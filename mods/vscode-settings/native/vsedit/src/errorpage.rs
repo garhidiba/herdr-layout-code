@@ -1,5 +1,5 @@
 //! The tab's page for a file the editor can't open (errorpage.cjs): the reason, then Try Again, Open in VS Code,
-//! Reveal in Finder and Close (Esc/⌘W/Ctrl+Q). Keyboard and mouse.
+//! Reveal in Finder and Close (Esc, or Close Editor's key). Keyboard and mouse.
 
 use crate::app::{App, Flow};
 use crate::keys::Ev;
@@ -96,7 +96,7 @@ impl App for ErrorPage {
             },
             Ev::Key(k) => {
                 let chord = k.chord();
-                if matches!(chord.as_str(), "escape" | "ctrl+q" | "cmd+w") {
+                if chord == "escape" || crate::commands::Keymap::resolve(&[]).id(&chord) == Some("workbench.action.closeActiveEditor") {
                     return Flow::Done(Choice::Close);
                 }
                 match k.name.as_str() {

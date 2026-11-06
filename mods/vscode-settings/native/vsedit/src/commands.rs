@@ -1,11 +1,14 @@
-//! Editor commands (commands.cjs): VS Code ids and titles, the default chords; user keybindings (keybindings.cjs):
-//! <herdr home>/vscode-keybindings.json in VS Code's format, where "-id" removes a default; the last binding of a key wins.
+//! Editor commands (commands.cjs): ids, titles and default keys per OS from the shared table
+//! mods/vscode-viewer/editor/keymap.json, and what each runs here (`act_of`, commands.cjs's RUNS); user keybindings
+//! (keybindings.cjs): <herdr home>/vscode-keybindings.json in VS Code's format, two-step chords included, where "-id"
+//! removes a default; the last binding of a key wins.
 
 use crate::file::disk_stamp;
 use crate::settings::herdr_home;
 use serde_json::Value;
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 /// What a command does in the editor.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -25,7 +28,9 @@ pub enum Act {
     Undo,
     Redo,
     SelectAll,
-    ToggleComment,
+    /// None toggles; Some(true) adds line comments, Some(false) removes them.
+    Comment(Option<bool>),
+    TrimTrailing,
     SelectNextOccurrence,
     OpenFind(bool),
     ToggleFind(FindOption),
@@ -48,6 +53,19 @@ pub enum Act {
     ToggleFold,
     FoldAll,
     UnfoldAll,
+    /// (dir, extend, word)
+    Horizontal(i32, bool, bool),
+    /// (rows, extend)
+    Vertical(i32, bool),
+    Home(bool),
+    /// (end, extend)
+    LineEdge(bool, bool),
+    DocEdge(bool, bool),
+    Page(i32, bool),
+    ScrollLine(i32),
+    Backspace(bool),
+    DeleteForward(bool),
+    DeleteAll(i32),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -57,197 +75,296 @@ pub enum FindOption {
     Regex,
 }
 
-/// The platform whose default keys apply (VS Code ships default keybindings per OS).
+/// What each command id runs (commands.cjs's RUNS); None for an id the editor doesn't know.
+pub fn act_of(id: &str) -> Option<Act> {
+    use Act::*;
+    Some(match id {
+        "editor.action.revealDefinition" | "editor.action.goToTypeDefinition" | "editor.action.goToImplementation" | "editor.action.goToReferences"
+        | "editor.action.peekDefinition" | "editor.action.referenceSearch.trigger" | "editor.action.peekImplementation"
+        | "editor.action.peekTypeDefinition" | "references-view.findReferences" | "references-view.findImplementations"
+        | "references-view.showCallHierarchy" | "editor.action.rename" | "editor.action.changeAll" | "editor.action.formatDocument"
+        | "editor.action.refactor" | "editor.action.sourceAction" | "workbench.action.showCommands" | "workbench.action.gotoSymbol"
+        | "editor.action.marker.next" | "editor.action.marker.prev" | "editor.action.showContextMenu" => Lang,
+        "editor.action.clipboardCutAction" => Copy(true),
+        "editor.action.clipboardCopyAction" => Copy(false),
+        "editor.action.clipboardPasteAction" => Paste,
+        "workbench.action.quickOpen" => QuickOpen,
+        "workbench.action.files.save" => Save,
+        "workbench.action.files.toggleAutoSave" => ToggleAutoSave,
+        "workbench.action.files.setAutoSaveDelay" => AskAutoSaveDelay,
+        "workbench.action.openSettings" => OpenSettingsUi(false),
+        "workbench.action.openSettingsJson" => OpenSettingsJson,
+        "workbench.action.openGlobalKeybindings" => OpenSettingsUi(true),
+        "workbench.action.openGlobalKeybindingsFile" => OpenKeybindingsJson,
+        "workbench.action.closeActiveEditor" => Quit,
+        "undo" => Undo,
+        "redo" => Redo,
+        "editor.action.selectAll" => SelectAll,
+        "editor.action.commentLine" => Comment(None),
+        "editor.action.addCommentLine" => Comment(Some(true)),
+        "editor.action.removeCommentLine" => Comment(Some(false)),
+        "editor.action.trimTrailingWhitespace" => TrimTrailing,
+        "editor.action.addSelectionToNextFindMatch" => SelectNextOccurrence,
+        "actions.find" => OpenFind(false),
+        "editor.action.startFindReplaceAction" => OpenFind(true),
+        "toggleFindCaseSensitive" => ToggleFind(FindOption::Case),
+        "toggleFindWholeWord" => ToggleFind(FindOption::Word),
+        "toggleFindRegex" => ToggleFind(FindOption::Regex),
+        "editor.action.replaceOne" => ReplaceOne,
+        "editor.action.replaceAll" => ReplaceAll,
+        "editor.action.nextMatchFindAction" => FindAgain(1),
+        "editor.action.previousMatchFindAction" => FindAgain(-1),
+        "workbench.action.gotoLine" => GotoLine,
+        "editor.action.deleteLines" => DeleteLines,
+        "editor.action.moveLinesUpAction" => MoveLines(-1),
+        "editor.action.moveLinesDownAction" => MoveLines(1),
+        "editor.action.copyLinesUpAction" => CopyLines(-1),
+        "editor.action.copyLinesDownAction" => CopyLines(1),
+        "editor.action.insertLineAfter" => InsertLine(true),
+        "editor.action.insertLineBefore" => InsertLine(false),
+        "editor.action.indentLines" => IndentLines(false),
+        "editor.action.outdentLines" => IndentLines(true),
+        "workbench.action.navigateBack" => Navigate(-1),
+        "workbench.action.navigateForward" => Navigate(1),
+        "editor.action.indentUsingSpaces" => PickTabSize(false),
+        "editor.action.indentUsingTabs" => PickTabSize(true),
+        "workbench.action.editor.changeEOL" => PickEol,
+        "workbench.action.editor.changeLanguageMode" => PickLanguage,
+        "workbench.action.editor.nextChange" => GotoChange(1),
+        "workbench.action.editor.previousChange" => GotoChange(-1),
+        "editor.fold" => Fold,
+        "editor.unfold" => Unfold,
+        "editor.toggleFold" => ToggleFold,
+        "editor.foldAll" => FoldAll,
+        "editor.unfoldAll" => UnfoldAll,
+        "cursorLeft" => Horizontal(-1, false, false),
+        "cursorLeftSelect" => Horizontal(-1, true, false),
+        "cursorRight" => Horizontal(1, false, false),
+        "cursorRightSelect" => Horizontal(1, true, false),
+        "cursorUp" => Vertical(-1, false),
+        "cursorUpSelect" => Vertical(-1, true),
+        "cursorDown" => Vertical(1, false),
+        "cursorDownSelect" => Vertical(1, true),
+        "cursorWordLeft" => Horizontal(-1, false, true),
+        "cursorWordLeftSelect" => Horizontal(-1, true, true),
+        "cursorWordEndRight" => Horizontal(1, false, true),
+        "cursorWordEndRightSelect" => Horizontal(1, true, true),
+        "cursorHome" => Home(false),
+        "cursorHomeSelect" => Home(true),
+        "cursorEnd" | "cursorLineEnd" => LineEdge(true, false),
+        "cursorEndSelect" | "cursorLineEndSelect" => LineEdge(true, true),
+        "cursorLineStart" => LineEdge(false, false),
+        "cursorLineStartSelect" => LineEdge(false, true),
+        "cursorTop" => DocEdge(false, false),
+        "cursorTopSelect" => DocEdge(false, true),
+        "cursorBottom" => DocEdge(true, false),
+        "cursorBottomSelect" => DocEdge(true, true),
+        "cursorPageUp" => Page(-1, false),
+        "cursorPageUpSelect" => Page(-1, true),
+        "cursorPageDown" => Page(1, false),
+        "cursorPageDownSelect" => Page(1, true),
+        "scrollLineUp" => ScrollLine(-1),
+        "scrollLineDown" => ScrollLine(1),
+        "deleteLeft" => Backspace(false),
+        "deleteRight" => DeleteForward(false),
+        "deleteWordLeft" => Backspace(true),
+        "deleteWordRight" => DeleteForward(true),
+        "deleteAllLeft" => DeleteAll(-1),
+        "deleteAllRight" => DeleteAll(1),
+        _ => return None,
+    })
+}
+
+/// The OS whose keys are in effect: VSEDIT_OS (mac | win | linux), else the platform's.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Os {
     Mac,
-    Windows,
+    Win,
     Linux,
 }
 
 impl Os {
     pub fn current() -> Os {
-        if cfg!(target_os = "macos") {
-            Os::Mac
-        } else if cfg!(windows) {
-            Os::Windows
-        } else {
-            Os::Linux
+        Os::pick(std::env::var("VSEDIT_OS").ok().as_deref())
+    }
+    fn pick(env: Option<&str>) -> Os {
+        match env {
+            Some("mac") => Os::Mac,
+            Some("win") => Os::Win,
+            Some("linux") => Os::Linux,
+            _ if cfg!(target_os = "macos") => Os::Mac,
+            _ if cfg!(windows) => Os::Win,
+            _ => Os::Linux,
+        }
+    }
+    fn key(self) -> &'static str {
+        match self {
+            Os::Mac => "mac",
+            Os::Win => "win",
+            Os::Linux => "linux",
         }
     }
 }
 
 pub struct Command {
-    pub id: &'static str,
-    #[allow(dead_code)] // phase 3: the command palette and the context menu show titles and key labels
-    pub title: &'static str,
-    /// The default chords (today the same on every OS, as in commands.cjs).
-    pub chords: &'static [&'static str],
-    /// An OS's own defaults instead of `chords` (none yet: per-OS keys follow once the JS defaults split).
-    pub os_chords: &'static [(Os, &'static [&'static str])],
+    pub id: String,
+    #[allow(dead_code)] // phase 3: the command palette and the context menu show titles
+    pub title: String,
+    /// Default keys (normalized) per OS: mac, win, linux.
+    pub keys: [Vec<String>; 3],
     pub act: Act,
 }
 
-impl Command {
-    pub fn defaults(&self, os: Os) -> &'static [&'static str] {
-        self.os_chords.iter().find(|(o, _)| *o == os).map_or(self.chords, |(_, c)| c)
-    }
+/// keymap.json's commands; an id with nothing to run is an error (the table and the editor are out of step).
+pub fn parse_keymap(v: &Value) -> Result<Vec<Command>, String> {
+    let list = v.get("commands").and_then(Value::as_array).ok_or("keymap.json: no commands")?;
+    list.iter()
+        .map(|c| {
+            let id = c.get("id").and_then(Value::as_str).ok_or("keymap.json: a command without an id")?;
+            let act = act_of(id).ok_or_else(|| format!("keymap.json: no editor action for {id}"))?;
+            let keys = [Os::Mac, Os::Win, Os::Linux].map(|os| {
+                c.pointer(&format!("/keys/{}", os.key())).and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(normalize).collect()
+            });
+            let title = c.get("title").and_then(Value::as_str).unwrap_or("").to_string();
+            Ok(Command { id: id.into(), title, keys, act })
+        })
+        .collect()
 }
 
-const fn c(id: &'static str, title: &'static str, chords: &'static [&'static str], act: Act) -> Command {
-    Command { id, title, chords, os_chords: &[], act }
+static COMMANDS: OnceLock<Vec<Command>> = OnceLock::new();
+
+/// Loads the shared key table once (main, before anything resolves keys).
+pub fn load_commands(file: &Path) -> Result<(), String> {
+    let text = std::fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let list = parse_keymap(&vscode_textmate::parse_jsonc(&text)?)?;
+    let _ = COMMANDS.set(list);
+    Ok(())
 }
 
-pub const COMMANDS: &[Command] = &[
-    c("editor.action.revealDefinition", "Go to Definition", &["f12"], Act::Lang),
-    c("editor.action.goToTypeDefinition", "Go to Type Definition", &[], Act::Lang),
-    c("editor.action.goToImplementation", "Go to Implementations", &["cmd+f12"], Act::Lang),
-    c("editor.action.goToReferences", "Go to References", &["shift+f12"], Act::Lang),
-    c("editor.action.peekDefinition", "Peek Definition", &["alt+f12"], Act::Lang),
-    c("editor.action.referenceSearch.trigger", "Peek References", &[], Act::Lang),
-    c("editor.action.peekImplementation", "Peek Implementations", &[], Act::Lang),
-    c("editor.action.peekTypeDefinition", "Peek Type Definition", &[], Act::Lang),
-    c("references-view.findReferences", "Find All References", &["alt+shift+f12"], Act::Lang),
-    c("references-view.findImplementations", "Find All Implementations", &[], Act::Lang),
-    c("references-view.showCallHierarchy", "Show Call Hierarchy", &["alt+shift+h"], Act::Lang),
-    c("editor.action.rename", "Rename Symbol", &["f2"], Act::Lang),
-    c("editor.action.changeAll", "Change All Occurrences", &["cmd+f2", "ctrl+f2"], Act::Lang),
-    c("editor.action.formatDocument", "Format Document", &["alt+shift+f"], Act::Lang),
-    c("editor.action.refactor", "Refactor...", &["ctrl+shift+r"], Act::Lang),
-    c("editor.action.sourceAction", "Source Action...", &[], Act::Lang),
-    c("editor.action.clipboardCutAction", "Cut", &["cmd+x", "ctrl+x"], Act::Copy(true)),
-    c("editor.action.clipboardCopyAction", "Copy", &["cmd+c", "ctrl+c"], Act::Copy(false)),
-    c("editor.action.clipboardPasteAction", "Paste", &["cmd+v", "ctrl+v"], Act::Paste),
-    c("workbench.action.showCommands", "Command Palette...", &["cmd+shift+p", "ctrl+shift+p", "f1"], Act::Lang),
-    c("workbench.action.quickOpen", "Go to File...", &["cmd+p", "ctrl+p"], Act::QuickOpen),
-    c("workbench.action.files.save", "File: Save", &["cmd+s", "ctrl+s"], Act::Save),
-    c("workbench.action.files.toggleAutoSave", "File: Toggle Auto Save", &[], Act::ToggleAutoSave),
-    c("workbench.action.files.setAutoSaveDelay", "File: Set Auto Save Delay…", &[], Act::AskAutoSaveDelay),
-    c("workbench.action.openSettings", "Preferences: Open Settings", &["cmd+,"], Act::OpenSettingsUi(false)),
-    c("workbench.action.openSettingsJson", "Preferences: Open Settings (JSON)", &[], Act::OpenSettingsJson),
-    c("workbench.action.openGlobalKeybindings", "Preferences: Open Keyboard Shortcuts", &[], Act::OpenSettingsUi(true)),
-    c("workbench.action.openGlobalKeybindingsFile", "Preferences: Open Keyboard Shortcuts (JSON)", &[], Act::OpenKeybindingsJson),
-    c("workbench.action.closeActiveEditor", "View: Close Editor", &["cmd+w", "ctrl+q"], Act::Quit),
-    c("undo", "Undo", &["cmd+z", "ctrl+z"], Act::Undo),
-    c("redo", "Redo", &["cmd+shift+z", "ctrl+shift+z", "ctrl+y"], Act::Redo),
-    c("editor.action.selectAll", "Select All", &["cmd+a", "ctrl+a"], Act::SelectAll),
-    c("editor.action.commentLine", "Toggle Line Comment", &["cmd+/", "ctrl+/"], Act::ToggleComment),
-    c("editor.action.addSelectionToNextFindMatch", "Add Selection to Next Find Match", &["cmd+d", "ctrl+d"], Act::SelectNextOccurrence),
-    c("actions.find", "Find", &["cmd+f", "ctrl+f"], Act::OpenFind(false)),
-    c("editor.action.startFindReplaceAction", "Replace", &["cmd+alt+f", "ctrl+h"], Act::OpenFind(true)),
-    c("toggleFindCaseSensitive", "Toggle Match Case", &["cmd+alt+c", "alt+c"], Act::ToggleFind(FindOption::Case)),
-    c("toggleFindWholeWord", "Toggle Match Whole Word", &["cmd+alt+w", "alt+w"], Act::ToggleFind(FindOption::Word)),
-    c("toggleFindRegex", "Toggle Use Regular Expression", &["cmd+alt+r", "alt+r"], Act::ToggleFind(FindOption::Regex)),
-    c("editor.action.replaceOne", "Replace Next Match", &["shift+cmd+1"], Act::ReplaceOne),
-    c("editor.action.replaceAll", "Replace All", &["cmd+alt+enter"], Act::ReplaceAll),
-    c("editor.action.nextMatchFindAction", "Find Next", &["cmd+g", "f3"], Act::FindAgain(1)),
-    c("editor.action.previousMatchFindAction", "Find Previous", &["cmd+shift+g", "shift+f3"], Act::FindAgain(-1)),
-    c("workbench.action.gotoSymbol", "Go to Symbol in Editor...", &["cmd+shift+o", "ctrl+shift+o"], Act::Lang),
-    c("editor.action.marker.next", "Go to Next Problem (Error, Warning, Info)", &["f8", "alt+f8"], Act::Lang),
-    c("editor.action.marker.prev", "Go to Previous Problem (Error, Warning, Info)", &["shift+f8", "alt+shift+f8"], Act::Lang),
-    c("workbench.action.gotoLine", "Go to Line/Column...", &["ctrl+g"], Act::GotoLine),
-    c("editor.action.deleteLines", "Delete Line", &["cmd+shift+k", "ctrl+shift+k"], Act::DeleteLines),
-    c("editor.action.moveLinesUpAction", "Move Line Up", &["alt+up"], Act::MoveLines(-1)),
-    c("editor.action.moveLinesDownAction", "Move Line Down", &["alt+down"], Act::MoveLines(1)),
-    c("editor.action.copyLinesUpAction", "Copy Line Up", &["alt+shift+up"], Act::CopyLines(-1)),
-    c("editor.action.copyLinesDownAction", "Copy Line Down", &["alt+shift+down"], Act::CopyLines(1)),
-    c("editor.action.insertLineAfter", "Insert Line Below", &["cmd+enter", "ctrl+enter"], Act::InsertLine(true)),
-    c("editor.action.insertLineBefore", "Insert Line Above", &["cmd+shift+enter", "ctrl+shift+enter"], Act::InsertLine(false)),
-    c("editor.action.indentLines", "Indent Line", &["cmd+]", "ctrl+]"], Act::IndentLines(false)),
-    c("editor.action.outdentLines", "Outdent Line", &["cmd+[", "ctrl+["], Act::IndentLines(true)),
-    c("workbench.action.navigateBack", "Go Back", &["ctrl+-"], Act::Navigate(-1)),
-    c("workbench.action.navigateForward", "Go Forward", &["ctrl+shift+-"], Act::Navigate(1)),
-    c("editor.action.indentUsingSpaces", "Indent Using Spaces", &[], Act::PickTabSize(false)),
-    c("editor.action.indentUsingTabs", "Indent Using Tabs", &[], Act::PickTabSize(true)),
-    c("workbench.action.editor.changeEOL", "Change End of Line Sequence", &[], Act::PickEol),
-    c("workbench.action.editor.changeLanguageMode", "Change Language Mode", &[], Act::PickLanguage),
-    c("workbench.action.editor.nextChange", "Go to Next Change", &["alt+f5"], Act::GotoChange(1)),
-    c("workbench.action.editor.previousChange", "Go to Previous Change", &["alt+shift+f5"], Act::GotoChange(-1)),
-    c("editor.fold", "Fold", &["ctrl+shift+["], Act::Fold),
-    c("editor.unfold", "Unfold", &["ctrl+shift+]"], Act::Unfold),
-    c("editor.toggleFold", "Toggle Fold", &["ctrl+alt+l"], Act::ToggleFold),
-    c("editor.foldAll", "Fold All", &["ctrl+alt+["], Act::FoldAll),
-    c("editor.unfoldAll", "Unfold All", &["ctrl+alt+]"], Act::UnfoldAll),
-    c("editor.action.showContextMenu", "Show Editor Context Menu", &["shift+f10", "menu"], Act::Lang),
-];
+pub fn commands() -> &'static [Command] {
+    COMMANDS.get_or_init(|| {
+        if cfg!(test) {
+            // unit tests read the repository's table
+            let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../vscode-viewer/editor/keymap.json");
+            let text = std::fs::read_to_string(file).unwrap_or_default();
+            return vscode_textmate::parse_jsonc(&text).ok().and_then(|v| parse_keymap(&v).ok()).unwrap_or_default();
+        }
+        vec![]
+    })
+}
 
 pub fn by_id(id: &str) -> Option<&'static Command> {
-    COMMANDS.iter().find(|c| c.id == id)
+    commands().iter().find(|c| c.id == id)
 }
 
 /// "shift+cmd+k" -> (["shift", "cmd"], "k"); the key itself may be "+" ("ctrl++").
-fn split(chord: &str) -> (Vec<&str>, &str) {
-    let i = if chord.len() > 1 { chord[..chord.len() - 1].rfind('+') } else { None };
+fn split(step: &str) -> (Vec<&str>, &str) {
+    let i = if step.len() > 1 { step[..step.len() - 1].rfind('+') } else { None };
     match i {
-        Some(i) => (chord[..i].split('+').collect(), &chord[i + 1..]),
-        None => (vec![], chord),
+        Some(i) => (step[..i].split('+').collect(), &step[i + 1..]),
+        None => (vec![], step),
     }
 }
 
-/// Chord strings in chordOf's modifier order.
-pub fn normalize(chord: &str) -> String {
-    let (mods, name) = split(chord);
-    let mut out = String::new();
-    for m in ["ctrl", "alt", "shift", "cmd"] {
-        if mods.contains(&m) {
-            out.push_str(m);
-            out.push('+');
-        }
-    }
-    out + name
+/// Keys in chordOf's modifier order; a two-step chord step by step.
+pub fn normalize(key: &str) -> String {
+    key.split_whitespace()
+        .map(|step| {
+            let (mods, name) = split(step);
+            let mut out = String::new();
+            for m in ["ctrl", "alt", "shift", "cmd"] {
+                if mods.contains(&m) {
+                    out.push_str(m);
+                    out.push('+');
+                }
+            }
+            out + name
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
-/// Normalized chord -> macOS label in VS Code's glyphs: "shift+cmd+k" -> "⇧⌘K".
-#[allow(dead_code)] // phase 3 (menu and palette labels)
-pub fn label(chord: &str) -> String {
-    let n = normalize(chord);
-    let (mods, name) = split(&n);
-    let mut out: String = mods.iter().map(|m| match *m { "ctrl" => "⌃", "alt" => "⌥", "shift" => "⇧", _ => "⌘" }).collect();
-    out += &match name {
-        "up" => "↑".into(),
-        "down" => "↓".into(),
-        "left" => "←".into(),
-        "right" => "→".into(),
-        "enter" => "↩".into(),
-        "backspace" => "⌫".into(),
-        "delete" => "⌦".into(),
-        "tab" => "⇥".into(),
-        "escape" => "Escape".into(),
-        "pageup" => "PageUp".into(),
-        "pagedown" => "PageDown".into(),
-        "space" => "Space".into(),
-        _ => {
-            let mut cs = name.chars();
-            cs.next().map(|f| f.to_uppercase().collect::<String>() + cs.as_str()).unwrap_or_default()
-        }
-    };
-    out
+fn capital(name: &str) -> String {
+    let mut c = name.chars();
+    c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
 }
 
-/// A VS Code key ("Shift+Cmd+K") -> the editor's chord; None for two-step chords and unknown modifiers.
+/// A key as VS Code shows it on that OS: macOS glyphs ("⇧⌘K", "⌘K ⌘J"), elsewhere "Ctrl+Shift+K", "Ctrl+K Ctrl+J".
+pub fn label(key: &str, os: Os) -> String {
+    normalize(key)
+        .split(' ')
+        .map(|step| {
+            let (mods, name) = split(step);
+            if os == Os::Mac {
+                let glyphs: String = mods.iter().map(|m| match *m { "ctrl" => "⌃", "alt" => "⌥", "shift" => "⇧", _ => "⌘" }).collect();
+                let k = match name {
+                    "up" => "↑".into(),
+                    "down" => "↓".into(),
+                    "left" => "←".into(),
+                    "right" => "→".into(),
+                    "enter" => "↩".into(),
+                    "backspace" => "⌫".into(),
+                    "delete" => "⌦".into(),
+                    "tab" => "⇥".into(),
+                    "pageup" => "PageUp".into(),
+                    "pagedown" => "PageDown".into(),
+                    _ => capital(name),
+                };
+                return glyphs + &k;
+            }
+            let mut parts: Vec<String> = ["ctrl", "shift", "alt", "cmd"]
+                .iter()
+                .filter(|m| mods.contains(m))
+                .map(|m| match *m { "ctrl" => "Ctrl".into(), "shift" => "Shift".into(), "alt" => "Alt".into(), _ => (if os == Os::Win { "Windows" } else { "Super" }).to_string() })
+                .collect();
+            parts.push(match name {
+                "up" => "UpArrow".into(),
+                "down" => "DownArrow".into(),
+                "left" => "LeftArrow".into(),
+                "right" => "RightArrow".into(),
+                "pageup" => "PageUp".into(),
+                "pagedown" => "PageDown".into(),
+                _ => capital(name),
+            });
+            parts.join("+")
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A VS Code key ("Shift+Cmd+K", "ctrl+k ctrl+c") -> the editor's key; None for more than two steps or an unknown
+/// modifier.
 pub fn canon(key: &str) -> Option<String> {
-    let s = key.trim().to_lowercase();
-    if s.is_empty() || s.chars().any(char::is_whitespace) {
+    let lower = key.trim().to_lowercase();
+    let steps: Vec<&str> = lower.split_whitespace().collect();
+    if steps.is_empty() || steps.len() > 2 {
         return None;
     }
-    let (mods, name) = split(&s);
     let mut out = vec![];
-    for m in mods {
-        out.push(match m {
-            "ctrl" | "control" => "ctrl",
-            "alt" | "option" | "opt" => "alt",
-            "shift" => "shift",
-            "cmd" | "meta" | "win" | "super" | "command" => "cmd",
-            _ => return None,
+    for step in steps {
+        let (mods, name) = split(step);
+        if name.is_empty() {
+            return None;
+        }
+        let mut parts = vec![];
+        for m in mods {
+            parts.push(match m {
+                "ctrl" | "control" => "ctrl",
+                "alt" | "option" | "opt" => "alt",
+                "shift" => "shift",
+                "cmd" | "meta" | "win" | "super" | "command" => "cmd",
+                _ => return None,
+            });
+        }
+        parts.push(match name {
+            "esc" => "escape",
+            "return" => "enter",
+            "del" => "delete",
+            n => n,
         });
+        out.push(parts.join("+"));
     }
-    out.push(match name {
-        "esc" => "escape",
-        "return" => "enter",
-        "del" => "delete",
-        n => n,
-    });
-    Some(normalize(&out.join("+")))
+    Some(normalize(&out.join(" ")))
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -258,19 +375,22 @@ pub struct Binding {
 }
 
 pub struct Keymap {
-    #[allow(dead_code)] // phase 3 (labels)
+    pub os: Os,
     pub bindings: Vec<Binding>,
     pub by_chord: HashMap<String, String>,
+    /// The first steps of the two-step keys in effect.
+    pub prefixes: HashSet<String>,
 }
 
 impl Keymap {
     /// This OS's defaults, then the user's entries in order.
     pub fn resolve(user: &[Value]) -> Keymap {
-        Keymap::with_defaults(default_bindings(), user)
+        Keymap::resolve_os(commands(), Os::current(), user)
     }
 
-    pub fn with_defaults(defaults: Vec<Binding>, user: &[Value]) -> Keymap {
-        let mut bindings = defaults;
+    pub fn resolve_os(commands: &[Command], os: Os, user: &[Value]) -> Keymap {
+        let i = os as usize;
+        let mut bindings: Vec<Binding> = commands.iter().flat_map(|c| c.keys[i].iter().map(|k| Binding { key: k.clone(), command: c.id.clone(), user: false })).collect();
         for e in user {
             let Some(command) = e.get("command").and_then(Value::as_str) else { continue };
             if command.trim_start_matches('-').is_empty() {
@@ -289,58 +409,29 @@ impl Keymap {
                 bindings.push(Binding { key, command: command.into(), user: true });
             }
         }
-        let by_chord = bindings.iter().map(|b| (b.key.clone(), b.command.clone())).collect();
-        Keymap { bindings, by_chord }
+        let by_chord: HashMap<String, String> = bindings.iter().map(|b| (b.key.clone(), b.command.clone())).collect();
+        let prefixes = by_chord.keys().filter_map(|k| k.split_once(' ').map(|(a, _)| a.to_string())).collect();
+        Keymap { os, bindings, by_chord, prefixes }
     }
 
     pub fn command(&self, chord: &str) -> Option<&'static Command> {
         self.by_chord.get(chord).and_then(|id| by_id(id))
     }
 
+    pub fn id(&self, chord: &str) -> Option<&str> {
+        self.by_chord.get(chord).map(String::as_str)
+    }
+
+    pub fn key_label(&self, key: &str) -> String {
+        label(key, self.os)
+    }
+
     /// The key shown for a command: the user's newest binding still in effect, else the first default.
     #[allow(dead_code)] // phase 3 (menu and palette labels)
     pub fn label(&self, id: &str) -> String {
         let live: Vec<&Binding> = self.bindings.iter().filter(|b| b.command == id && self.by_chord.get(&b.key).map(String::as_str) == Some(id)).collect();
-        live.iter().rev().find(|b| b.user).or(live.first()).map(|b| label(&b.key)).unwrap_or_default()
+        live.iter().rev().find(|b| b.user).or(live.first()).map(|b| self.key_label(&b.key)).unwrap_or_default()
     }
-}
-
-fn builtin_defaults(commands: &[Command], os: Os) -> Vec<Binding> {
-    commands.iter().flat_map(|c| c.defaults(os).iter().map(|ch| Binding { key: normalize(ch), command: c.id.into(), user: false })).collect()
-}
-
-/// The editors' shared default key table (a JSON file beside vsedit.cjs, set by main from --vscode), read once.
-pub static KEYMAP_FILE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-
-/// The default keys for this OS: from the shared key table when it exists, else the built-in table (commands.cjs's).
-fn default_bindings() -> Vec<Binding> {
-    static FROM_FILE: std::sync::OnceLock<Option<Vec<Binding>>> = std::sync::OnceLock::new();
-    let file = FROM_FILE.get_or_init(|| {
-        let text = std::fs::read_to_string(KEYMAP_FILE.get()?).ok()?;
-        table_defaults(&vscode_textmate::parse_jsonc(&text).ok()?, Os::current())
-    });
-    file.clone().unwrap_or_else(|| builtin_defaults(COMMANDS, Os::current()))
-}
-
-/// A default key table in VS Code's contribution shape, `[{ "command", "key", "mac"?, "win"?, "linux"? }]` (the OS's
-/// own key wins over `key`); entries whose key can't be read (two-step chords, for now) are skipped. None when the
-/// value isn't such an array.
-pub fn table_defaults(v: &Value, os: Os) -> Option<Vec<Binding>> {
-    let os_key = match os {
-        Os::Mac => "mac",
-        Os::Windows => "win",
-        Os::Linux => "linux",
-    };
-    let list = v.as_array()?;
-    Some(
-        list.iter()
-            .filter_map(|e| {
-                let command = e.get("command")?.as_str()?;
-                let key = e.get(os_key).or_else(|| e.get("key"))?.as_str()?;
-                Some(Binding { key: canon(key)?, command: command.into(), user: false })
-            })
-            .collect(),
-    )
 }
 
 pub fn keybindings_file() -> PathBuf {
@@ -391,52 +482,68 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn km(os: Os, user: &[Value]) -> Keymap {
+        Keymap::resolve_os(commands(), os, user)
+    }
+
     #[test]
-    fn chords_normalize_and_label_like_vs_code() {
-        assert_eq!(normalize("shift+cmd+1"), "shift+cmd+1");
-        assert_eq!(normalize("cmd+shift+k"), "shift+cmd+k");
-        assert_eq!(label("shift+cmd+k"), "⇧⌘K");
-        assert_eq!(label("ctrl++"), "⌃+");
+    fn every_command_of_the_shared_table_runs_something() {
+        assert!(commands().len() > 100, "keymap.json was not read");
+        assert!(by_id("cursorHome").is_some() && by_id("deleteAllRight").is_some());
+        assert!(parse_keymap(&json!({ "commands": [{ "id": "no.such", "keys": {} }] })).is_err());
+    }
+
+    #[test]
+    fn each_os_gets_its_own_defaults() {
+        let mac = km(Os::Mac, &[]);
+        assert_eq!(mac.id("cmd+s"), Some("workbench.action.files.save"));
+        assert_eq!(mac.id("ctrl+a"), Some("cursorLineStart"));
+        assert_eq!(mac.id("ctrl+k"), Some("deleteAllRight"));
+        let linux = km(Os::Linux, &[]);
+        assert_eq!(linux.id("ctrl+s"), Some("workbench.action.files.save"));
+        assert_eq!(linux.id("ctrl+a"), Some("editor.action.selectAll"));
+        assert!(linux.id("cmd+s").is_none());
+        assert_eq!(Os::pick(Some("win")), Os::Win);
+    }
+
+    #[test]
+    fn two_step_chords_have_their_first_key_as_a_prefix() {
+        let mac = km(Os::Mac, &[]);
+        assert!(mac.prefixes.contains("cmd+k"));
+        assert_eq!(mac.id("cmd+k cmd+c"), Some("editor.action.addCommentLine"));
+        assert!(km(Os::Linux, &[]).prefixes.contains("ctrl+k"));
+    }
+
+    #[test]
+    fn keys_normalize_and_label_as_vs_code_shows_them() {
+        assert_eq!(normalize("cmd+shift+k  cmd+alt+j"), "shift+cmd+k alt+cmd+j");
+        assert_eq!(label("shift+cmd+k", Os::Mac), "⇧⌘K");
+        assert_eq!(label("cmd+k cmd+j", Os::Mac), "⌘K ⌘J");
+        assert_eq!(label("ctrl+shift+k", Os::Linux), "Ctrl+Shift+K");
+        assert_eq!(label("alt+up", Os::Win), "Alt+UpArrow");
         assert_eq!(canon("Shift+Cmd+K").as_deref(), Some("shift+cmd+k"));
-        assert_eq!(canon("cmd+k cmd+s"), None);
+        assert_eq!(canon("ctrl+k ctrl+c").as_deref(), Some("ctrl+k ctrl+c"));
+        assert_eq!(canon("a b c"), None);
         assert_eq!(canon("hyper+k"), None);
     }
 
     #[test]
     fn user_bindings_add_keys_and_minus_removes_defaults() {
-        let km = Keymap::resolve(&[json!({ "key": "cmd+shift+d", "command": "editor.action.deleteLines" }), json!({ "key": "cmd+shift+k", "command": "-editor.action.deleteLines" })]);
-        assert_eq!(km.command("shift+cmd+d").map(|c| c.id), Some("editor.action.deleteLines"));
-        assert!(km.command("shift+cmd+k").is_none());
-        assert_eq!(km.command("ctrl+shift+k").map(|c| c.id), Some("editor.action.deleteLines"));
-        assert_eq!(km.label("editor.action.deleteLines"), "⇧⌘D");
-        let gone = Keymap::resolve(&[json!({ "command": "-undo" })]);
-        assert!(gone.command("cmd+z").is_none() && gone.label("undo").is_empty());
-    }
-
-    #[test]
-    fn an_os_can_have_its_own_default_keys() {
-        static CMDS: &[Command] = &[Command { id: "undo", title: "Undo", chords: &["cmd+z"], os_chords: &[(Os::Windows, &["ctrl+z"])], act: Act::Undo }];
-        assert!(Keymap::with_defaults(builtin_defaults(CMDS, Os::Mac), &[]).command("cmd+z").is_some());
-        let win = Keymap::with_defaults(builtin_defaults(CMDS, Os::Windows), &[]);
-        assert!(win.command("ctrl+z").is_some() && win.command("cmd+z").is_none());
-        assert!(COMMANDS.iter().all(|c| c.defaults(Os::Linux) == c.chords), "the defaults match commands.cjs on every OS for now");
-    }
-
-    #[test]
-    fn a_shared_key_table_gives_each_os_its_keys() {
-        let table = json!([{ "command": "undo", "key": "ctrl+z", "mac": "cmd+z" }, { "command": "redo", "key": "ctrl+k ctrl+y" }]);
-        let mac = Keymap::with_defaults(table_defaults(&table, Os::Mac).unwrap(), &[]);
-        assert_eq!(mac.command("cmd+z").map(|c| c.id), Some("undo"));
-        let linux = Keymap::with_defaults(table_defaults(&table, Os::Linux).unwrap(), &[]);
-        assert!(linux.command("ctrl+z").is_some() && linux.bindings.len() == 1);
-        assert!(table_defaults(&json!({}), Os::Mac).is_none());
+        let k = km(Os::Mac, &[json!({ "key": "cmd+shift+d", "command": "editor.action.deleteLines" }), json!({ "key": "cmd+shift+k", "command": "-editor.action.deleteLines" })]);
+        assert_eq!(k.id("shift+cmd+d"), Some("editor.action.deleteLines"));
+        assert!(k.id("shift+cmd+k").is_none());
+        assert_eq!(k.label("editor.action.deleteLines"), "⇧⌘D");
+        let gone = km(Os::Mac, &[json!({ "command": "-undo" })]);
+        assert!(gone.id("cmd+z").is_none() && gone.label("undo").is_empty());
+        let chord = km(Os::Linux, &[json!({ "key": "ctrl+k ctrl+s", "command": "workbench.action.files.save" })]);
+        assert_eq!(chord.id("ctrl+k ctrl+s"), Some("workbench.action.files.save"));
     }
 
     #[test]
     fn the_last_binding_of_a_key_wins() {
-        let km = Keymap::resolve(&[json!({ "key": "cmd+s", "command": "undo" })]);
-        assert_eq!(km.command("cmd+s").map(|c| c.id), Some("undo"));
-        assert_eq!(km.label("workbench.action.files.save"), "⌃S");
+        let k = km(Os::Mac, &[json!({ "key": "cmd+s", "command": "undo" })]);
+        assert_eq!(k.id("cmd+s"), Some("undo"));
+        assert!(k.label("workbench.action.files.save").is_empty() || k.label("workbench.action.files.save") != "⌘S");
     }
 
     #[test]

@@ -677,7 +677,8 @@ impl App for BinaryPrompt {
     }
     fn handle(&mut self, ev: &Ev) -> Flow<Self::Out> {
         if let Ev::Key(k) = ev {
-            if matches!(k.chord().as_str(), "escape" | "ctrl+q" | "cmd+w") {
+            let chord = k.chord();
+            if chord == "escape" || crate::commands::Keymap::resolve(&[]).id(&chord) == Some("workbench.action.closeActiveEditor") {
                 return Flow::Done(None);
             }
         }

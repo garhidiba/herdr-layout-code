@@ -162,6 +162,8 @@ pub struct Editor {
     pub message: Option<Message>,
     pub popup: Option<Popup>,
     pub prompt: Option<Prompt>,
+    /// The first key of a two-step chord, waiting for the second.
+    chord_prefix: Option<String>,
     pub find: Find,
     clip: (String, bool),
     closers: (u64, Vec<Pos>),
@@ -244,6 +246,7 @@ impl Editor {
             message: None,
             popup: None,
             prompt: None,
+            chord_prefix: None,
             find: Find { query: String::new(), replace: String::new(), field: Field::Query, opts: Opts::default(), matches: vec![], error: None, searched: None },
             clip: (String::new(), false),
             closers: (0, vec![]),
@@ -665,21 +668,29 @@ impl Editor {
         let u = self.unit(display_col(&self.buf.lines[s.line], s.col, self.tab()));
         self.insert(&u, false);
     }
-    fn toggle_comment(&mut self) {
+    /// mode: None toggles; Some(true) comments the lines, Some(false) uncomments the commented ones (⌘K ⌘C / ⌘K ⌘U).
+    fn toggle_comment(&mut self, mode: Option<bool>) {
         let Some((open, close)) = comment_of(self.scope.as_deref()) else {
             return self.warn(format!("No comment syntax known for {}", self.language));
         };
         let (a, b) = self.selected_lines();
-        let rows: Vec<usize> = (a..=b).filter(|l| !self.buf.lines[*l].trim().is_empty()).collect();
+        let lead = |t: &str| t.len() - t.trim_start_matches([' ', '\t']).len();
+        let lines = &self.buf.lines;
+        let is_commented = |l: &usize| {
+            let t = &lines[*l];
+            t[lead(t)..].starts_with(open) && close.is_none_or(|c| t.trim_end().ends_with(c))
+        };
+        let mut rows: Vec<usize> = (a..=b).filter(|l| !lines[*l].trim().is_empty()).collect();
+        if mode == Some(false) {
+            rows.retain(is_commented);
+        }
         if rows.is_empty() {
             return;
         }
-        let lead = |t: &str| t.len() - t.trim_start_matches([' ', '\t']).len();
-        let lines = &self.buf.lines;
-        let commented = rows.iter().all(|l| {
-            let t = &lines[*l];
-            t[lead(t)..].starts_with(open) && close.is_none_or(|c| t.trim_end().ends_with(c))
-        });
+        let commented = match mode {
+            Some(add) => !add,
+            None => rows.iter().all(is_commented),
+        };
         let mut edits = vec![];
         if commented {
             for &l in &rows {
@@ -949,10 +960,9 @@ impl Editor {
             self.prompt = None;
             return;
         }
-        if let Some(c) = self.keys.keymap.command(&chord) {
-            if matches!(c.act, Act::ToggleFind(_) | Act::ReplaceOne | Act::ReplaceAll) {
-                return self.run_act(c.act, None);
-            }
+        let act = self.keys.keymap.command(&chord).map(|c| c.act);
+        if let Some(a @ (Act::ToggleFind(_) | Act::ReplaceOne | Act::ReplaceAll)) = act {
+            return self.run_act(a, None);
         }
         let replace = self.prompt.as_ref().is_some_and(|p| p.replace);
         match k.name.as_str() {
@@ -967,22 +977,17 @@ impl Editor {
             }
             _ => {}
         }
-        if chord == "ctrl+h" || chord == "alt+cmd+f" {
-            self.prompt.as_mut().unwrap().replace = true;
-            self.find.field = Field::Replace;
-            return;
-        }
-        if chord == "ctrl+f" || chord == "cmd+f" {
-            self.prompt.as_mut().unwrap().replace = false;
-            self.find.field = Field::Query;
+        if let Some(Act::OpenFind(replace)) = act {
+            self.prompt.as_mut().unwrap().replace = replace;
+            self.find.field = if replace { Field::Replace } else { Field::Query };
             return;
         }
         let dir = if k.shift { -1 } else { 1 };
         match k.name.as_str() {
             "enter" if (k.alt || k.cmd) && replace => self.replace_all(),
             "enter" if self.find.field == Field::Replace => self.replace_one(),
-            "g" if k.cmd => self.find_next(dir, None),
-            "enter" | "f3" | "down" => self.find_next(dir, None),
+            _ if matches!(act, Some(Act::FindAgain(_))) => self.find_next(if act == Some(Act::FindAgain(1)) { 1 } else { -1 }, None),
+            "enter" | "down" => self.find_next(dir, None),
             "up" => self.find_next(-1, None),
             _ => {}
         }
@@ -1068,12 +1073,7 @@ impl Editor {
             return false;
         }
         if self.settings.trim_trailing_whitespace {
-            let edits = self.buf.lines.iter().enumerate().filter_map(|(l, t)| {
-                let n = t.trim_end().len();
-                (n < t.len()).then(|| (l, n, t.len() - n, String::new()))
-            });
-            let edits: Vec<_> = edits.collect();
-            self.line_edits(edits);
+            self.trim_trailing();
         }
         if self.settings.insert_final_newline && self.buf.lines.iter().any(|l| !l.is_empty()) {
             self.doc.final_newline = true;
@@ -1096,6 +1096,14 @@ impl Editor {
                 false
             }
         }
+    }
+    fn trim_trailing(&mut self) {
+        let edits = self.buf.lines.iter().enumerate().filter_map(|(l, t)| {
+            let n = t.trim_end().len();
+            (n < t.len()).then(|| (l, n, t.len() - n, String::new()))
+        });
+        let edits: Vec<_> = edits.collect();
+        self.line_edits(edits);
     }
     fn reload(&mut self) {
         match file::load(&self.file, false) {
@@ -1373,6 +1381,9 @@ impl Editor {
             Ev::Mouse(m) => return self.mouse(m, term),
             _ => {}
         }
+        if self.chord_prefix.is_some() {
+            return self.chord_key(ev, term);
+        }
         if self.popup.is_some() {
             return self.popup_event(ev, term);
         }
@@ -1385,7 +1396,14 @@ impl Editor {
             Ev::Key(k) => k.clone(),
             _ => return,
         };
-        if let Some(c) = self.keys.keymap.command(&k.chord()) {
+        let chord = k.chord();
+        if self.keys.keymap.prefixes.contains(&chord) {
+            // the first key of a two-step chord (VS Code's ⌘K …)
+            let text = format!("({}) was pressed. Waiting for second key of chord...", self.keys.keymap.key_label(&chord));
+            self.chord_prefix = Some(chord);
+            return self.say(text, None, 60000);
+        }
+        if let Some(c) = self.keys.keymap.command(&chord) {
             return self.run_act(c.act, Some(term));
         }
         self.key(&k);
@@ -1421,57 +1439,40 @@ impl Editor {
         }
     }
 
+    /// Keys that aren't commands: Enter, Tab and Escape are the editor's own (movement and deletion are keymap.json's).
     fn key(&mut self, k: &Key) {
-        let (name, shift, alt) = (k.name.as_str(), k.shift, k.alt);
-        let h = self.head();
-        if k.cmd {
-            match name {
-                "left" => self.home(shift),
-                "right" => self.line_end(shift),
-                "up" => self.move_to(pos(0, 0), shift),
-                "down" => self.doc_end(shift),
-                "backspace" if self.empty() => self.delete_range(pos(h.line, 0), h),
-                "backspace" => self.backspace(false),
-                "delete" if self.empty() => self.delete_range(h, pos(h.line, self.buf.lines[h.line].len())),
-                "delete" => self.delete_forward(false),
-                _ => {}
-            }
+        if k.cmd || k.ctrl {
             return;
         }
-        if k.ctrl {
-            match name {
-                "home" => self.move_to(pos(0, 0), shift),
-                "end" => self.doc_end(shift),
-                "left" | "right" => self.horizontal(if name == "left" { -1 } else { 1 }, shift, true),
-                "up" | "down" => self.top = self.scrolled(if name == "up" { -1 } else { 1 }, None),
-                "backspace" | "w" => self.backspace(true),
-                "delete" => self.delete_forward(true),
-                "u" if self.empty() => self.delete_range(pos(h.line, 0), h),
-                "u" => self.backspace(false),
-                "e" => self.line_end(shift),
-                _ => {}
-            }
-            return;
-        }
-        match name {
-            "left" | "right" => self.horizontal(if name == "left" { -1 } else { 1 }, shift, alt),
-            "up" | "down" => self.vertical(if name == "up" { -1 } else { 1 }, shift),
-            "pageup" | "pagedown" => {
-                let h = self.height() as i64;
-                let d = if name == "pageup" { -h } else { h };
-                let max = self.view_count().saturating_sub(self.height());
-                self.top = self.scrolled(d, Some(max));
-                self.vertical(d, shift);
-            }
-            "home" => self.home(shift),
-            "end" => self.line_end(shift),
-            "enter" if !alt => self.enter(),
-            "tab" => self.tab_key(shift),
-            "backspace" => self.backspace(alt),
-            "delete" => self.delete_forward(alt),
+        match k.name.as_str() {
+            "enter" if !k.alt => self.enter(),
+            "tab" => self.tab_key(k.shift),
             "escape" if !self.empty() => self.move_to(self.head(), false),
             _ => {}
         }
+    }
+
+    /// The second key of a chord: its command, else VS Code's "not a command" message. A typed character counts as its
+    /// key.
+    fn chord_key(&mut self, ev: &Ev, term: &mut Term) {
+        let second = match ev {
+            Ev::Key(k) => k.chord(),
+            Ev::Text(t) => match t.chars().next() {
+                Some(ch) => {
+                    let lower: String = ch.to_lowercase().collect();
+                    if lower != ch.to_string() { format!("shift+{lower}") } else { lower }
+                }
+                None => return,
+            },
+            _ => return,
+        };
+        let first = self.chord_prefix.take().unwrap_or_default();
+        self.message = None;
+        if let Some(c) = self.keys.keymap.command(&format!("{first} {second}")) {
+            return self.run_act(c.act, Some(term));
+        }
+        let (a, b) = (self.keys.keymap.key_label(&first), self.keys.keymap.key_label(&second));
+        self.warn(format!("The key combination ({a}, {b}) is not a command."));
     }
 
     pub fn run_act(&mut self, act: Act, term: Option<&mut Term>) {
@@ -1499,7 +1500,39 @@ impl Editor {
             Act::Undo => self.undo(false),
             Act::Redo => self.undo(true),
             Act::SelectAll => self.select_all(),
-            Act::ToggleComment => self.toggle_comment(),
+            Act::Comment(mode) => self.toggle_comment(mode),
+            Act::TrimTrailing => self.trim_trailing(),
+            Act::Horizontal(dir, extend, word) => self.horizontal(dir, extend, word),
+            Act::Vertical(rows, extend) => self.vertical(rows as i64, extend),
+            Act::Home(extend) => self.home(extend),
+            Act::LineEdge(true, extend) => self.line_end(extend),
+            Act::LineEdge(false, extend) => {
+                let l = self.head().line;
+                self.move_to(pos(l, 0), extend);
+            }
+            Act::DocEdge(true, extend) => self.doc_end(extend),
+            Act::DocEdge(false, extend) => self.move_to(pos(0, 0), extend),
+            Act::Page(dir, extend) => {
+                let d = dir as i64 * self.height() as i64;
+                let max = self.view_count().saturating_sub(self.height());
+                self.top = self.scrolled(d, Some(max));
+                self.vertical(d, extend);
+            }
+            Act::ScrollLine(dir) => self.top = self.scrolled(dir as i64, None),
+            Act::Backspace(word) => self.backspace(word),
+            Act::DeleteForward(word) => self.delete_forward(word),
+            Act::DeleteAll(dir) => {
+                if !self.empty() {
+                    let (s, e) = self.range();
+                    return self.delete_range(s, e);
+                }
+                let h = self.head();
+                if dir < 0 {
+                    self.delete_range(pos(h.line, 0), h);
+                } else {
+                    self.delete_range(h, pos(h.line, self.buf.lines[h.line].len()));
+                }
+            }
             Act::SelectNextOccurrence => self.select_next_occurrence(),
             Act::OpenFind(r) => self.open_find(r),
             Act::ToggleFind(o) => self.toggle_find(o),

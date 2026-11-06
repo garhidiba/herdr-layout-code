@@ -787,8 +787,8 @@ def run_folding(tmp):
     assert "⌄" in last(), "no chevrons with the pointer on the gutter"
     t.send("\x1b[<0;6;2M"); t.send("\x1b[<0;6;2m", wait=0.3)  # click line 1's chevron
     assert "›function a() { ⋯" in last() and "const z" in last() and "if (x)" not in last(), "the chevron click did not fold:\n" + last()[-600:]
-    if RUST_BIN:  # no command palette until phase 3: the key instead
-        t.send("\x1b[93;7u", wait=0.3)
+    if RUST_BIN:  # no command palette until phase 3: its key (Ctrl+K Ctrl+J) instead
+        t.send("\x1b[107;5u\x1b[106;5u", wait=0.3)
     else:
         t.send("\x1bOP"); t.send("Unfold All", wait=0.3); t.send("\r", wait=0.3)
     assert "one();" in last(), "Unfold All from the palette"

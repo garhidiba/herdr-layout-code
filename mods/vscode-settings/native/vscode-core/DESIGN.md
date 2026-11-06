@@ -372,9 +372,13 @@ contract. One module per JS file: `buffer`, `keys`, `width`, `paint`, `file`, `s
   off, `(?<![\p{L}\p{N}_$])…(?![\p{L}\p{N}_$])` for whole words; `$n`, `$&`, `$<name>`, `\n`, `\t` replacements.
 - **Semantic layer (phase 3 hook):** `highlight::SemanticLayer`, spans (line, start, end → fg, font style) painted
   over the TextMate colors; spans move with edits below them and are dropped on edited lines. Empty in phase 2.
-- **Keys:** the defaults come from the shared table `mods/vscode-viewer/editor/keymap.json` (VS Code's
-  `{command, key, mac, win, linux}` shape) when it ships, else the built-in table (commands.cjs's keys, with room
-  for per-OS defaults); the user's `vscode-keybindings.json` applies on top as in keybindings.cjs.
+- **Keys:** ids, titles and default keys per OS come from the shared table `mods/vscode-viewer/editor/keymap.json`
+  (`{ id, title, keys: { mac, win, linux } }`, read at start next to `--vscode`; an id the binary has no action for
+  sends the file to the JS editor). The OS is `VSEDIT_OS`, else the platform, as in commands.cjs. Two-step chords as
+  keybindings.cjs: the first key shows `(⌘K) was pressed. Waiting for second key of chord...`, the second runs the
+  command or says `The key combination (…, …) is not a command.`, and a typed character counts as the second key.
+  Movement and deletion (cursorHome, cursorLineStart, deleteAllLeft, macOS ⌃A/⌃E/⌃K/⌃U, …) are commands of the
+  table; only Enter, Tab and Escape are the editor's own. The user's `vscode-keybindings.json` applies on top.
 - Phase 3 (JS only for now): language features (tsserver/LSP: definition, references, rename, hover, format,
   diagnostics, document symbols and symbol breadcrumbs), the context menu, the command palette — their keys show
   `Not yet in the Rust editor`. Also still JS-only: Go to File (quick open) with its multi-file switching,
@@ -394,7 +398,7 @@ builds `vsedit` too when `core.engine` or `editor.engine` is `rust` (or `--engin
 
 ### Tests
 
-- `cargo test -p vsedit` (61 tests: buffer/undo, key parsing, keybinding resolution and per-OS defaults, find,
+- `cargo test -p vsedit` (62 tests: buffer/undo, key parsing, the shared key table, per-OS defaults and chords, find,
   folding, autoclose, decorations, git diff, scrollbars, settings, hex viewer, …).
 - `VSEDIT_BIN=<target>/release/vsedit python3 -I mods/vscode-viewer/editor/test/e2e.py`: the JS editor's e2e
   scenarios through the launcher with the Rust engine forced; the four phase-3 scenarios are skipped, and the

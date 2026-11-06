@@ -102,7 +102,9 @@ fn main() {
     let cwd = std::env::current_dir().unwrap_or_default();
     let file = normalize(&cwd.join(arg));
     let vscode = vscode_dir(vscode);
-    let _ = commands::KEYMAP_FILE.set(vscode.join("../editor/keymap.json"));
+    if let Err(e) = commands::load_commands(&vscode.join("../editor/keymap.json")) {
+        fallback(&e); // a table this binary doesn't know (or none): the JS editor reads it
+    }
     let Ok(index) = std::fs::read_to_string(vscode.join("index.json")).map_err(|e| e.to_string()).and_then(|t| serde_json::from_str::<serde_json::Value>(&t).map_err(|e| e.to_string())) else {
         fallback("no grammars at --vscode");
     };
