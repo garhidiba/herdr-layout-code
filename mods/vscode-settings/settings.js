@@ -1,0 +1,87 @@
+// Pure rules for <herdr home>/vscode-settings.json (shared with the terminal editor's settings.cjs and the viewer):
+// defaults, valid ranges, read-modify-write that keeps unknown keys. No I/O except through the `io` passed in.
+
+export const FILE = "vscode-settings.json";
+
+export const DEFAULTS = {
+  "core.engine": "js",                // "js" | "rust" (the Rust core in <herdr home>/vscode-core/)
+  "files.autoSave": "off",            // "off" | "afterDelay" | "onFocusChange"
+  "files.autoSaveDelay": 1,           // seconds (VS Code uses milliseconds), 0.1-3600
+  "files.trimTrailingWhitespace": false,
+  "files.insertFinalNewline": false,
+  "editor.formatOnSave": false,
+  "editor.tabSize": 4,                // 1-16, for files without indentation to detect
+  "editor.insertSpaces": true,
+};
+export const CHOICES = { "core.engine": ["js", "rust"], "files.autoSave": ["off", "afterDelay", "onFocusChange"] };
+const NUMBERS = { "files.autoSaveDelay": [0.1, 3600, false], "editor.tabSize": [1, 16, true] }; // [min, max, integer]
+
+// VS Code settings files allow comments and trailing commas (same rule as the editor's highlight.cjs `loose`).
+export const loose = (s) => JSON.parse(s.replace(/^﻿/, "").replace(/("(?:[^"\\]|\\.)*")|\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, (m, str) => str ?? "").replace(/,(\s*[}\]])/g, "$1"));
+
+// File text -> raw object. Missing/empty file -> {}; text that isn't a JSON object throws (never overwrite it).
+export function parse(text) {
+  if (text == null || !text.trim()) return {};
+  const o = loose(text);
+  if (!o || typeof o !== "object" || Array.isArray(o)) throw new Error("vscode-settings.json is not a JSON object");
+  return o;
+}
+
+// A known setting's value made valid, or undefined when it can't be (wrong type, not a number, unknown choice).
+export function coerce(key, value) {
+  if (CHOICES[key]) return CHOICES[key].includes(value) ? value : undefined;
+  if (NUMBERS[key]) {
+    const [lo, hi, int] = NUMBERS[key], n = Number(value);
+    if (value == null || value === "" || typeof value === "boolean" || !Number.isFinite(n) || (int && !Number.isInteger(n))) return undefined;
+    return Math.round(Math.max(lo, Math.min(hi, n)) * 1000) / 1000;
+  }
+  if (typeof DEFAULTS[key] === "boolean") return typeof value === "boolean" ? value : undefined;
+  return value;
+}
+
+// Raw object -> every known setting with a valid value (invalid or missing ones are the default).
+export function normalize(raw = {}) {
+  const v = {};
+  for (const k of Object.keys(DEFAULTS)) v[k] = coerce(k, raw[k]) ?? DEFAULTS[k];
+  return v;
+}
+
+// The engine the mods should use: "js" unless the file says "rust". The one reader other mods may copy.
+export const coreEngine = (raw) => normalize(raw)["core.engine"];
+
+// raw with key set to a valid value (throws on an invalid one); the other keys, known or not, are kept.
+export function withSetting(raw, key, value) {
+  const v = coerce(key, value);
+  if (v === undefined) throw new Error(`Invalid value for ${key}`);
+  return { ...raw, [key]: v };
+}
+
+// raw with every known setting back to its default; unknown keys are kept.
+export const withDefaults = (raw) => ({ ...raw, ...DEFAULTS });
+
+export const serialize = (raw) => JSON.stringify(raw, null, 2) + "\n";
+
+// Read-modify-write: io.read() -> text|null, io.write(text, expected) rejects when the file changed since `expected`.
+// One retry after re-reading when a concurrent edit wins the race. Resolves with the normalized values written.
+export async function updateFile(io, change) {
+  for (let attempt = 0; ; attempt++) {
+    const text = await io.read();
+    const next = change(parse(text));
+    try { await io.write(serialize(next), text ?? null); return normalize(next); }
+    catch (e) { if (attempt >= 1) throw e; }
+  }
+}
+
+// − / + on the auto save delay: tenths below one second, whole seconds above.
+export function stepDelay(value, dir) {
+  const n = Number(value) || DEFAULTS["files.autoSaveDelay"];
+  const step = n < 1 || (dir < 0 && n <= 1) ? 0.1 : 1;
+  return coerce("files.autoSaveDelay", Math.round((n + dir * step) * 10) / 10);
+}
+
+// `vscode-core --version` output -> "built (v0.1.0)"-style status; null output means not built.
+export function coreStatus(stdout) {
+  if (stdout == null) return "Rust core: not built";
+  const m = stdout.match(/\d+\.\d+[\w.+-]*/);
+  return `Rust core: built${m ? ` (v${m[0]})` : ""}`;
+}
