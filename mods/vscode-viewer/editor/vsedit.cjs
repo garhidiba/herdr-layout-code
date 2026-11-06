@@ -29,6 +29,7 @@ const T = require("./terminal.cjs");
 const HV = require("./hexview.cjs");
 const E = require("./errorpage.cjs");
 const SB = require("./scrollbar.cjs");
+const D = require("./decorations.cjs");
 
 // VS Code's "Col": characters before the cursor, tabs counted to the next tab stop.
 function visibleColumn(line, index, tab) {
@@ -931,6 +932,7 @@ class Editor {
     const [ss, se] = this.range(), empty = this.empty;
     const showMatches = this.prompt?.kind === "find" && this.find.query;
     const ms = showMatches ? this.matches() : [];
+    const guides = this.guidesFor(height);
     let mi = 0;
 
     // breadcrumbs
@@ -949,7 +951,7 @@ class Editor {
       while (mi < ms.length && ms[mi].line < l) mi++;
       const lineMatches = [];
       for (let k = mi; k < ms.length && ms[k].line === l; k++) lineMatches.push(ms[k]);
-      this.paintLine(P, l, lineBg, ss, se, lineMatches, width);
+      this.paintLine(P, l, lineBg, ss, se, lineMatches, width, { guide: guides[r] });
     }
     this.marks = this.vbar.shown ? this.rulerMarks(ms) : null;
     this.vbar.paint(P, c, this.marks);
@@ -974,8 +976,17 @@ class Editor {
     return { out: P.out, done };
   }
 
-  paintLine(P, l, lineBg, ss, se, lineMatches, width) {
-    const c = this.colors, text = this.lines[l];
+  // Indent guides of the visible lines, recomputed when the text, the view or the cursor line changes.
+  guidesFor(height) {
+    const key = `${this.buf.version}:${this.top}:${height}:${this.head.line}:${this.tab}`;
+    if (this._guides?.key !== key || this._guides.buf !== this.buf) {
+      this._guides = { key, buf: this.buf, rows: D.indentGuides(this.lines, this.top, this.top + height - 1, this.tab, this.tab, this.head.line) };
+    }
+    return this._guides.rows;
+  }
+  // deco: { guide: { count, active } } for this line.
+  paintLine(P, l, lineBg, ss, se, lineMatches, width, deco = {}) {
+    const c = this.colors, text = this.lines[l], g = deco.guide, size = this.tab;
     const selFrom = l < ss.line || l > se.line ? -1 : l === ss.line ? ss.col : 0;
     const selTo = l < ss.line || l > se.line ? -1 : l === se.line ? se.col : Infinity;
     const cur = this.currentMatchRange();
@@ -984,16 +995,28 @@ class Editor {
       if (m) return cur && cur.line === l && cur.col === m.col ? c.match : c.matchOther;
       return selFrom !== -1 && i >= selFrom && i < selTo ? c.selection : null;
     };
-    let { x, col } = this.paintText(P, text, this.hl.tokens[l] ?? null, width, this.left, lineBg, bgAt, this.tab);
+    // a guide at every indent step the line has, the active block's in its own color
+    const guideAt = g?.count ? (k) => (k % size === 0 && k / size < g.count ? (k / size === g.active ? c.guideActive : c.guide) : null) : null;
+    let { x, col } = this.paintText(P, text, this.hl.tokens[l] ?? null, width, this.left, lineBg, bgAt, this.tab, guideAt);
     // Selection past the line end shows one cell for the line break, like VS Code.
     if (x < width && selFrom !== -1 && selTo > text.length && col >= this.left) { P.text(" ", c.fg, c.selection); x++; }
-    if (x < width) P.text(" ".repeat(width - x), c.fg, lineBg);
+    if (x >= width) return;
+    if (!guideAt) return P.text(" ".repeat(width - x), c.fg, lineBg);
+    let pad = ""; // a blank line's guides go on past its end
+    for (let k = this.left + x; k < this.left + width; k++) {
+      const gc = guideAt(k);
+      if (!gc) { pad += " "; continue; }
+      if (pad) { P.text(pad, c.fg, lineBg); pad = ""; }
+      P.text("│", gc, lineBg);
+    }
+    if (pad) P.text(pad, c.fg, lineBg);
   }
-  // Paints a line's visible part [left, left+width) with token colors; bgAt(i) overrides the background at UTF-16 index i.
+  // Paints a line's visible part [left, left+width) with token colors; bgAt(i) overrides the background at UTF-16 index i,
+  // guideAt(col) gives an indent guide's color at a display column of the leading whitespace (not over a selection).
   // Returns { x: cells painted, col: the line's display width }.
-  paintText(P, text, tokens, width, left, lineBg, bgAt, tab) {
+  paintText(P, text, tokens, width, left, lineBg, bgAt, tab, guideAt = null) {
     const c = this.colors;
-    let col = 0, ti = 0, x = 0, i = 0;
+    let col = 0, ti = 0, x = 0, i = 0, lead = !!guideAt;
     const right = left + width;
     // A long line of single-width characters (a minified file): start at the first visible one instead of walking there.
     if (left > 0 && text.length > 1000 && !/[^\x20-\x7e]/.test(text)) {
@@ -1004,12 +1027,18 @@ class Editor {
       if (col >= right) break;
       while (tokens && ti + 2 < tokens.length && tokens[ti + 2] <= i) ti += 2;
       const meta = tokens ? tokens[ti + 1] : 0;
-      const fg = tokens ? this.colorMap[H.foregroundOf(meta)] ?? c.fg : c.fg, style = tokens ? H.fontStyleOf(meta) : 0;
-      const bg = bgAt(i) ?? lineBg;
+      let fg = tokens ? this.colorMap[H.foregroundOf(meta)] ?? c.fg : c.fg;
+      const style = tokens ? H.fontStyleOf(meta) : 0, bg = bgAt(i) ?? lineBg;
       const cp = ch.codePointAt(0);
       let w, glyph = ch;
       if (ch === "\t") { w = tab - (col % tab); glyph = " ".repeat(w); }
       else { w = W.charWidth(cp); if (cp < 0x20) glyph = String.fromCharCode(0x2400 + cp); else if (cp === 0x7f) glyph = "␡"; }
+      if (lead && ch !== " " && ch !== "\t") lead = false;
+      if (lead && bg !== c.selection) {
+        let g = "", gc = null;
+        for (let k = 0; k < w; k++) { const kc = guideAt(col + k); g += kc ? "│" : " "; gc ??= kc; }
+        if (gc) { glyph = g; fg = gc; }
+      }
       if (w === 0) { if (col > left && col <= right) P.out += ch; }
       else if (col >= left && col + w <= right) { P.text(glyph, fg, bg, style); x += w; }
       else if (col + w > left) { const vis = Math.min(col + w, right) - Math.max(col, left); P.text(" ".repeat(vis), fg, bg, style); x += vis; }

@@ -563,12 +563,33 @@ def run_scrollbars(tmp):
     print("scrollbars: ok")
 
 
+def bg(hexcolor):
+    return sgr(hexcolor).replace("[38;", "[48;")
+
+
+def run_decorations(tmp):
+    """Indent guides in the theme's editorIndentGuide colors (the cursor's block in activeBackground)."""
+    file = os.path.join(tmp, "deco.go")
+    open(file, "w").write("package main\n\nfunc main() {\n\tif true {\n\t\tprintln(1)\n\t}\n}\n")
+    t = Term(file)
+    assert colored_frame(t), "no colored frame"
+    t.send("\x07"); t.send("5:3\r")              # into the if block
+    assert t.read("Ln 5, Col 9", timeout=2)
+    sc = screen_of(t)
+    assert sgr("#3c4049") + "│" in sc, "no indent guide in editorIndentGuide.background #abb2bf26"
+    assert sgr("#626772") + "│" in sc, "no active guide in editorIndentGuide.activeBackground #626772"
+    assert "5  │   │   println(1)" in plain(t), "guides not at each indent step"
+    t.send("\x11")
+    assert t.wait_exit() == 0
+    print("decorations: ok")
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="vsedit-e2e-")
     ISOLATED.update(VSEDIT_SETTINGS=os.path.join(tmp, "settings", "vscode-settings.json"), VSEDIT_BACKUPS=os.path.join(tmp, "backups"),
                     VSEDIT_KEYBINDINGS=os.path.join(tmp, "settings", "vscode-keybindings.json"))
     try:
-        run_tsx(tmp); run_go(tmp); run_crlf(tmp); run_hex(tmp); run_error_page(tmp); run_drag_scroll(tmp); run_minified(tmp); run_scrollbars(tmp)
+        run_tsx(tmp); run_go(tmp); run_crlf(tmp); run_hex(tmp); run_error_page(tmp); run_drag_scroll(tmp); run_minified(tmp); run_scrollbars(tmp); run_decorations(tmp)
         run_menu_and_cmd_save(tmp); run_save_dialog(tmp); run_auto_save(tmp); run_hot_exit(tmp); run_keybindings(tmp)
         run_format(tmp); run_typescript(tmp)
     finally:
