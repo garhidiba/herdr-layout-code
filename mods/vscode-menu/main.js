@@ -45,7 +45,7 @@ function items(p, git) {
             ]
           : []),
         ...(parent ? [[`Send back to ${parent.name || parent.address}`, "terminal.park", { terminal: term.address }]] : []),
-        ...(cwd && !String(tg.pane).includes("/") ? [["Open in Devin", "devin.open", { folder: cwd }], ["Open in Finder", "finder.open", { folder: cwd }]] : []),
+        ...(cwd && !String(tg.pane).includes("/") ? [["Open in VS Code", "vscode.open", { folder: cwd }], ["Open in Finder", "finder.open", { folder: cwd }]] : []),
         ["Close pane", "pane.close", { pane: tg.pane }],
       ];
     }
@@ -108,7 +108,7 @@ export default class Menu extends View {
     if (!it) return;
     closeOverlay(props()?.overlay);
     if (it[1] === "worktree") openOverlay({ mod: "worktree", kind: "dialog", ...(it[2].action === "open" ? { width: 560, height: 480 } : { width: 440, height: 260 }), props: it[2] });
-    else if (it[1] === "devin.open") exec("devin", [it[2].folder]).catch(() => {});
+    else if (it[1] === "vscode.open") exec("code", [it[2].folder]).catch(() => {});
     else if (it[1] === "finder.open") exec("open", [it[2].folder]).catch(() => {});
     else run(it[1], it[2]);
   }

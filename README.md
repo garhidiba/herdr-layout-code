@@ -4,7 +4,7 @@ A VS Code–style layout for [Herdr](https://herdr.dev):
 
 - **Explorer:** Material Icon Theme icons and VS Code git colors, including repos nested in the folder.
 - **Editor:** files open in their own tab as an Atom One Dark editor.
-- **Pane menu:** Open in Devin / Finder.
+- **Pane menu:** Open in VS Code / Finder.
 - **Status bar:** Claude and Codex usage meters.
 
 See [RECIPE.md](RECIPE.md) for exactly what it does and how it is built.
@@ -25,7 +25,7 @@ Optional Claude meter: set Claude Code's `statusLine.command` to `sh ~/.config/h
 ## What it runs
 
 - `sh`, `git`, `find` (Explorer listing and git status)
-- `devin` (Open in Devin), `open` (Finder)
+- `code` (Open in VS Code), `open` (Finder)
 - `grep` over `~/.codex/sessions` (Codex usage)
 
 Nothing reaches the network.

@@ -1,6 +1,6 @@
 # VS Code
 
-Herdr's main layout turned into a VS Code–style workbench: a file explorer with Material Icon Theme icons and VS Code's git colors on the right, files opening in their own tab as an Atom One Dark editor, a right-click menu that opens the folder in Devin (a VS Code fork) or Finder, and a status bar that shows how much of the Claude and Codex usage windows is left.
+Herdr's main layout turned into a VS Code–style workbench: a file explorer with Material Icon Theme icons and VS Code's git colors on the right, files opening in their own tab as an Atom One Dark editor, a right-click menu that opens the folder in VS Code or Finder, and a status bar that shows how much of the Claude and Codex usage windows is left.
 
 ![VS Code](preview.png)
 
@@ -20,20 +20,20 @@ Herdr's main layout turned into a VS Code–style workbench: a file explorer wit
   - Codex credit balance (e.g. `29,412`).
   - Hovering a group opens a 250px card with each window's name, `N% used`, a full-width bar and `resets 11/12 19:00 (4d 21h left)`.
 - **Editor tab** (`vscode-viewer`, opened from the Explorer):
-  - Header (30px): breadcrumbs of the last 3 folders `›` the file with its Material icon, then ghost buttons **Wrap**, **Revert** (only when edited), **Open in Devin**, **Save ⌘S** / **Saved**.
+  - Header (30px): breadcrumbs of the last 3 folders `›` the file with its Material icon, then ghost buttons **Wrap**, **Revert** (only when edited), **Open in VS Code**, **Save ⌘S** / **Saved**.
   - Herdr's built-in editor on `#282c34` with text `#abb2bf`, 13px, line numbers.
   - Status strip (22px): language name (VS Code's name for the file type), line count, `Spaces: N`/`Tabs`, `UTF-8`, `LF`/`CRLF`.
 
 ## How it behaves
 
 - **Explorer button / Changes button** toggle the right panel and pick its page; the choice is remembered per space. `cmd-e` toggles the panel.
-- **Explorer clicks:** folder = expand/collapse; file = opens a new tab named after the file with `vscode-viewer`; `cmd`+click = `devin <file>`.
+- **Explorer clicks:** folder = expand/collapse; file = opens a new tab named after the file with `vscode-viewer`; `cmd`+click = `code <file>`.
   - The tree follows the focused pane's folder, refreshes on file changes and every 10s, and lists at most 500 entries per folder and 5,000 in total.
 - **Editor:**
   - Typing marks the file dirty (8px `#e5c07b` dot). `cmd-s` (or Save) writes only if the file on disk is still what was loaded.
   - If the disk changed while editing, a banner offers **Reload (discard my edits)** or **Overwrite**. Untouched buffers follow the disk every 3s.
   - **Wrap** toggles soft wrap. Remote (SSH) files open read-only.
-- **Pane right-click** (`vscode-menu`): Herdr's pane menu plus **Open in Devin** and **Open in Finder** for the pane's folder (local panes only).
+- **Pane right-click** (`vscode-menu`): Herdr's pane menu plus **Open in VS Code** and **Open in Finder** for the pane's folder (local panes only).
 - **Status bar:** Codex usage re-read every 60s, Claude every 10s.
 
 ## Built from
@@ -43,11 +43,11 @@ Herdr's main layout turned into a VS Code–style workbench: a file explorer wit
   - It treats an empty `workspace.panels` as unset (an old uninstalled layout can leave `[]`, which otherwise hides every panel button).
   - It never shows a `files` button.
 - **`vscode-explorer`:**
-  - Runs `sh` (folder listing; `find … -maxdepth 3 -name .git` for nested repos), `git status --porcelain=v1 -z` per repo, and `devin` on cmd+click. Uses `watchFolder`.
+  - Runs `sh` (folder listing; `find … -maxdepth 3 -name .git` for nested repos), `git status --porcelain=v1 -z` per repo, and `code` on cmd+click. Uses `watchFolder`.
   - `icons.json` maps names/extensions/folder names to icon files, generated from Material Icon Theme 5.40.0's `material-icons.json`. `icons/` holds its 1,256 SVGs (MIT, see `LICENSE-material-icon-theme.txt`).
   - Opens files with `run("tab.new", {name, mod: "vscode-viewer", props: {file, on}})`.
 - **`vscode-viewer`:**
-  - `EditorState`/`Editor` from `gpui-base`, `readTextFile`/`writeTextFile(path, text, expected)` for conflict-safe saves, and `nextCommand()` for `save`. Runs `devin` from the Open in Devin button.
+  - `EditorState`/`Editor` from `gpui-base`, `readTextFile`/`writeTextFile(path, text, expected)` for conflict-safe saves, and `nextCommand()` for `save`. Runs `code` from the Open in VS Code button.
   - `langs.json`: file type → the closest grammar the built-in editor has, from the language contributions of VS Code's built-in extensions.
   - `vscode/index.json`: file type → VS Code TextMate scope, used for the language name.
   - `palettes.json`: per-extension role colors (see Watch out). It reads `../vscode-explorer/icons.json` for the breadcrumb icon.
@@ -55,7 +55,7 @@ Herdr's main layout turned into a VS Code–style workbench: a file explorer wit
   - Codex usage comes from the newest `~/.codex/sessions/**/rollout-*.jsonl` that has a `rate_limits` event (`sh` + `grep`, no network). Claude usage comes from `<herdr home>/claude-usage.json`, written by `claude-usage-tap.sh`.
   - Wire the tap in as Claude Code's `statusLine.command` (`sh <herdr home>/mods/vscode-status/claude-usage-tap.sh`). It saves `rate_limits` from the statusLine input and then runs `<herdr home>/claude-statusline-orig.sh` with the same input, if present.
   - Uses `HoverCard` from `gpui-base`. Icons: `claude.svg`, `codex.svg`.
-- **`vscode-menu`:** the shipped menu plus two pane items that call `exec("devin", [cwd])` and `exec("open", [cwd])`.
+- **`vscode-menu`:** the shipped menu plus two pane items that call `exec("code", [cwd])` and `exec("open", [cwd])`.
 
 ## Watch out
 
@@ -63,9 +63,9 @@ Herdr's main layout turned into a VS Code–style workbench: a file explorer wit
   - `palettes.json` was calibrated per extension: real files were tokenized with VS Code's engine and the akamud Atom One Dark theme, Herdr's editor was rendered with a unique color per role, and each role took the VS Code color most of its characters have.
   - A role changes only when that color has ≥ 45% share and leads the base color by 20 points. Comments always stay `#5c6370`.
   - Character match vs VS Code went from 59.0% to 68.1% overall (Python 56→85%, Shell 60→85%, C 67→88%, CSS 38→75%). TSX stays ~62%: function calls, JSX tags and globals share one role.
-  - For exact colors use Open in Devin.
+  - For exact colors use Open in VS Code.
 - **Editor limits.** It opens files up to 1 MiB. With `line_numbers: false` the editor scrolls 4 columns left; keep line numbers on.
-- **Assumptions.** The `devin` CLI and macOS `open` are assumed. The Claude meter needs the statusLine tap and shows `–` until Claude Code has refreshed its status line once. Codex needs local session logs.
+- **Assumptions.** The VS Code `code` CLI (Shell Command: Install 'code' in PATH) and macOS `open` are assumed. The Claude meter needs the statusLine tap and shows `–` until Claude Code has refreshed its status line once. Codex needs local session logs.
 - **Changing the mods.** Herdr replaces shipped mods and layouts on every start (edits move to `<name>-edited`). That is why everything here is a separately named mod; don't edit the shipped ones.
 
 ## Done when
@@ -74,4 +74,4 @@ Herdr's main layout turned into a VS Code–style workbench: a file explorer wit
 - The tab bar shows Explorer and Changes. Explorer lists the focused folder with Material icons, and a modified file in a git repo is `#e2c08d` with `M`.
 - Clicking a `.ts` file opens a tab whose status strip says `TypeScript`. Editing shows the dot. `cmd-s` writes the file and the button returns to Saved.
 - With a Codex session log present, the status bar shows the Codex glyph with two bars and a credit number; hovering shows the card with reset times.
-- Right-clicking a pane shows Open in Devin and Open in Finder; Finder opens the pane's folder.
+- Right-clicking a pane shows Open in VS Code and Open in Finder; Finder opens the pane's folder.

@@ -145,7 +145,7 @@ export default class Viewer extends View {
         .when(this.dirty, el => el.child(div().size(8).rounded(4).bg("#e5c07b").flex_none()))
         .child(button("wrap", "Wrap", cx => this.toggleWrap(cx), this.wrap))
         .when(this.dirty, el => el.child(button("revert", "Revert", cx => this.revert(cx))))
-        .when(!this.on, el => el.child(button("devin", "Open in Devin", () => exec("devin", [this.file]).catch(() => {}))))
+        .when(!this.on, el => el.child(button("vscode", "Open in VS Code", () => exec("code", [this.file]).catch(() => {}))))
         .when(!this.on, el => el.child(button("save", this.dirty ? "Save ⌘S" : "Saved", cx => this.save(cx), this.dirty))))
       .when(this.conflict, el => el.child(h_flex().flex_none().px(14).py(6).gap(10).items_center().bg(t.chrome).border_b(1).border_color(t.border).text_size(12)
         .child(div().flex_1().text_color("#e5c07b").child("This file changed on disk."))

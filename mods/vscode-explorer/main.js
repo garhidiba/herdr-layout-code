@@ -1,5 +1,5 @@
 // A lazy file explorer for the focused pane's folder, with Material Icon Theme icons.
-// Click a file to open it in a new tab (vscode-viewer mod); Cmd+click opens it in Devin.
+// Click a file to open it in a new tab (vscode-viewer mod); Cmd+click opens it in VS Code.
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, window, run, appHome } from "herdr";
@@ -181,7 +181,7 @@ export default class Files extends View {
       out.push(h_flex().id(`file-${path}`).h(22).flex_none().pl(6 + depth * 12).pr(8).gap(5).items_center().rounded(4).cursor_pointer().hover(s => s.bg(t.hover))
         .on_click((e, cx) => {
           if (entry.dir) return this.toggle(path, cx);
-          if (e.modifiers.platform && !this.on) exec("devin", [abs]).catch(() => {});
+          if (e.modifiers.platform && !this.on) exec("code", [abs]).catch(() => {});
           else this.open(path);
         })
         .child(entry.dir ? svg(`mods/vscode-explorer/chevron-${open ? "down" : "right"}.svg`).size(12).flex_none().text_color(t.dim) : div().w(12).flex_none())
