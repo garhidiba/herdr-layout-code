@@ -90,6 +90,12 @@ const COMMANDS = [
   C("workbench.action.editor.changeLanguageMode", "Change Language Mode", [], "pickLanguage"),
   C("workbench.action.editor.nextChange", "Go to Next Change", ["alt+f5"], "gotoChange", { args: [1] }),
   C("workbench.action.editor.previousChange", "Go to Previous Change", ["alt+shift+f5"], "gotoChange", { args: [-1] }),
+  // Folding: VS Code's Linux keys (macOS's ⌥⌘[ / ⌥⌘] switch spaces in Herdr; its ⌘K chords are two-step).
+  C("editor.fold", "Fold", ["ctrl+shift+["], "fold"),
+  C("editor.unfold", "Unfold", ["ctrl+shift+]"], "unfold"),
+  C("editor.toggleFold", "Toggle Fold", ["ctrl+alt+l"], "toggleFold"),
+  C("editor.foldAll", "Fold All", ["ctrl+alt+["], "foldAll"),
+  C("editor.unfoldAll", "Unfold All", ["ctrl+alt+]"], "unfoldAll"),
   C("editor.action.showContextMenu", "Show Editor Context Menu", ["shift+f10", "menu"], "openMenuAtCursor"),
 ];
 const BY_ID = new Map(COMMANDS.map(c => [c.id, c]));

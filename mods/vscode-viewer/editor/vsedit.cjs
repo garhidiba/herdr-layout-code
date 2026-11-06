@@ -34,6 +34,7 @@ const A = require("./autoclose.cjs");
 const FIND = require("./find.cjs");
 const SYM = require("./symbols.cjs");
 const G = require("./gitgutter.cjs");
+const FD = require("./folding.cjs");
 
 // VS Code's "Col": characters before the cursor, tabs counted to the next tab stop.
 function visibleColumn(line, index, tab) {
@@ -61,7 +62,7 @@ function wordLeft(line, col) {
 const shiftClosers = (at, line, col, delta) => at.map(q => (q.line === line && q.col >= col ? { line, col: q.col + delta } : q));
 
 // ---------- the editor ----------
-const DOC_FIELDS = ["file", "doc", "buf", "hl", "indent", "scope", "language", "comment", "crumbs", "root", "session", "sel", "goal", "top", "left", "seenVersion", "outline", "git"];
+const DOC_FIELDS = ["file", "doc", "buf", "hl", "indent", "scope", "language", "comment", "crumbs", "root", "session", "sel", "goal", "top", "left", "seenVersion", "outline", "git", "folds"];
 const GIT_GLYPHS = { added: "▎", modified: "▎", deletedBelow: "▁", deletedAbove: "▔" };
 const GIT_COLORS = { added: "gitAdded", modified: "gitModified", deletedBelow: "gitDeleted", deletedAbove: "gitDeleted" };
 const WORD_DELAY = 250; // ms the cursor rests on a word before its occurrences highlight, like VS Code
@@ -98,10 +99,12 @@ class Editor {
     buf.listeners.push((s, r, n) => hl.onEdit(s, r, n));
     const git = new G.GitGutter(file, buf, () => this.redraw());
     buf.listeners.push(() => git.changed());
+    const folds = new FD.Folds();
+    buf.listeners.push((s, r, n) => folds.onEdit(s, r, n));
     const fallback = { useTabs: !this.settings["editor.insertSpaces"], size: this.settings["editor.tabSize"] };
     return { file, doc, buf, hl, indent: F.detectIndent(buf.lines, fallback), scope, language: L.languageName(grammar ? scope : null),
       comment: L.commentOf(scope), crumbs: breadcrumbs(file), root: gitRoot(file), session: null, sel: caret({ line: 0, col: 0 }),
-      goal: null, top: 0, left: 0, seenVersion: 0, outline: null, git };
+      goal: null, top: 0, left: 0, seenVersion: 0, outline: null, git, folds };
   }
   colorsOf(colorMap) { return colorMap.map(c => (c ? c.slice(0, 7).toLowerCase() : this.colors.fg)); }
   // The grammar arrives after the first, uncolored frame (main paints before loading it).
@@ -126,6 +129,12 @@ class Editor {
   get gutter() { return Math.max(3, String(this.lines.length).length) + 3; }
   get textWidth() { return Math.max(1, this.cols - this.gutter - (this.vbar.shown ? 1 : 0)); }
   range() { return ordered(this.sel.anchor, this.sel.head); }
+  // View rows (the lines collapsed folds hide skipped) <-> buffer lines; `top` is always a visible line.
+  toView(line) { return this.folds.toView(line); }
+  fromView(v) { return this.folds.fromView(v); }
+  get viewCount() { return this.folds.viewCount(this.lines.length); }
+  // The line `rows` view rows from `top`, clamped to [0, max].
+  scrolled(rows, max = this.viewCount - 1) { return this.fromView(Math.max(0, Math.min(Math.max(0, max), this.toView(this.top) + rows))); }
   say(text, color = this.colors.barFg, ms = 3000) { this.message = { text, color, until: Date.now() + ms }; }
 
   // ----- cursor -----
@@ -138,8 +147,10 @@ class Editor {
   }
   reveal() {
     const { line, col } = this.head;
-    if (line < this.top) this.top = line;
-    if (line >= this.top + this.height) this.top = line - this.height + 1;
+    this.folds.reveal(line); // the cursor in a fold opens it
+    const row = this.toView(line) - this.toView(this.top);
+    if (row < 0) this.top = line;
+    if (row >= this.height) this.top = this.fromView(this.toView(line) - this.height + 1);
     const x = W.displayCol(this.lines[line], col, this.tab);
     if (x < this.left) this.left = Math.max(0, x - 4);
     if (x >= this.left + this.textWidth) this.left = x - this.textWidth + 5;
@@ -147,9 +158,10 @@ class Editor {
   vertical(delta, extend) {
     const { line, col } = this.head;
     if (this.goal == null) this.goal = W.displayCol(this.lines[line], col, this.tab);
-    const target = line + delta;
-    if (target < 0) return this.moveTo({ line: 0, col: 0 }, extend);
-    if (target >= this.lines.length) return this.moveTo({ line: this.lines.length - 1, col: this.lines[this.lines.length - 1].length }, extend);
+    const v = this.toView(line) + delta, end = this.viewCount - 1; // by view rows: over folds
+    if (v < 0) return this.moveTo({ line: 0, col: 0 }, extend);
+    if (v > end) { const l = this.fromView(end); return this.moveTo({ line: l, col: this.lines[l].length }, extend); }
+    const target = this.fromView(v);
     this.moveTo({ line: target, col: W.indexAtCol(this.lines[target], this.goal, this.tab) }, extend, true);
   }
   horizontal(dir, extend, word) {
@@ -495,7 +507,7 @@ class Editor {
       this.activate(st);
       if (first) this.offerBackup();
     }
-    if (pos) { this.moveTo(pos); this.top = Math.max(0, this.head.line - Math.floor(this.height / 3)); }
+    if (pos) { this.moveTo(pos); this.top = this.fromView(Math.max(0, this.toView(this.head.line) - Math.floor(this.height / 3))); }
     this.redraw();
     return true;
   }
@@ -534,7 +546,7 @@ class Editor {
     if (!ln) return;
     const line = Math.max(0, Math.min(this.lines.length, ln) - 1);
     this.moveTo({ line, col: col ? col - 1 : 0 });
-    this.top = Math.max(0, line - Math.floor(this.height / 2));
+    this.top = this.fromView(Math.max(0, this.toView(line) - Math.floor(this.height / 2)));
   }
   // ----- status bar pickers (indentation, end of line, language mode); they change the current file only -----
   // A quick pick of fixed choices [{ label, detail?, run }], filtered as typed, starting on `current`.
@@ -574,7 +586,7 @@ class Editor {
     this.useGrammar(g);
   }
   // Screen cell under a buffer position (row, col), for popups placed at the cursor.
-  screenOf(p) { return { row: p.line - this.top + 2, col: this.gutter + W.displayCol(this.lines[p.line], p.col, this.tab) - this.left + 1 }; }
+  screenOf(p) { return { row: this.toView(p.line) - this.toView(this.top) + 2, col: this.gutter + W.displayCol(this.lines[p.line], p.col, this.tab) - this.left + 1 }; }
   openMenu(x, y) { this.popup = new O.Menu(C.menuRows(C.MENU, cap => this.lang.can(cap), this.keymap.label), x, y); }
   openMenuAtCursor() { const s = this.screenOf(this.head); this.openMenu(Math.max(1, s.col), Math.min(this.rows, s.row + 1)); }
   openPicker(prefix) {
@@ -661,7 +673,7 @@ class Editor {
     const d = dir > 0 ? ps.find(p => cmp(p.start, h) > 0) ?? ps[0] : ps.findLast(p => cmp(p.start, h) < 0) ?? ps.at(-1);
     this.pushNav();
     this.moveTo(d.start);
-    this.top = Math.max(0, d.start.line - Math.floor(this.height / 3));
+    this.top = this.fromView(Math.max(0, this.toView(d.start.line) - Math.floor(this.height / 3)));
   }
   // Files of the git root (git ls-files), else up to 20,000 files found under the file's folder.
   projectFiles() {
@@ -787,8 +799,8 @@ class Editor {
     return this.track(this.locate(kind).then(locs => {
       if (!locs.length) return this.noResult(kind);
       this.peek = new O.Peek(PEEK_TITLE[kind], locs);
-      const row = this.head.line - this.top; // keep the box on screen below the cursor line
-      if (row + this.peek.height >= this.height) this.top = Math.max(0, this.head.line - Math.max(0, this.height - this.peek.height - 1));
+      const row = this.toView(this.head.line) - this.toView(this.top); // keep the box on screen below the cursor line
+      if (row + this.peek.height >= this.height) this.top = this.fromView(Math.max(0, this.toView(this.head.line) - Math.max(0, this.height - this.peek.height - 1)));
     }));
   }
   findAll(kind) {
@@ -875,6 +887,35 @@ class Editor {
     }));
   }
 
+  // ----- folding -----
+  // Foldable ranges (folding.cjs, cached per text version); collapsed folds follow them by their header line.
+  foldRanges() {
+    const r = this._ranges;
+    if (r?.buf === this.buf && r.version === this.buf.version && r.tab === this.tab) return r.list;
+    const list = FD.foldRanges(this.lines, this.tab, FD.offSide(this.scope));
+    this._ranges = { buf: this.buf, version: this.buf.version, tab: this.tab, list };
+    if (this.folds.sync(list)) this.folds.reveal(this.head.line);
+    return list;
+  }
+  // Collapses ranges; a cursor they hide goes to the header of the fold hiding it. True when one collapsed.
+  collapse(ranges) {
+    if (!this.folds.collapse(ranges)) return false;
+    if (this.folds.isHidden(this.head.line)) this.moveTo({ line: this.folds.visible(this.head.line), col: this.head.col });
+    return true;
+  }
+  // Fold: the innermost expanded range at the cursor line. Unfold: the collapsed one it heads. Toggle: either.
+  fold() { const r = FD.innermost(this.foldRanges(), this.head.line, r => !this.folds.has(r.start)); if (r) this.collapse([r]); }
+  unfold() { this.folds.expand(this.head.line); }
+  toggleFold() { if (!this.folds.expand(this.head.line)) this.fold(); }
+  foldAll() { this.collapse(this.foldRanges()); }
+  unfoldAll() { this.folds.clear(); }
+  // A click on line's chevron: expands a collapsed fold, collapses the range it heads; false when it heads none.
+  clickFold(line) {
+    if (this.folds.expand(line)) return true;
+    const r = FD.rangeAt(this.foldRanges(), line);
+    return !!r && this.collapse([r]);
+  }
+
   // ----- settings, auto save -----
   applySettings({ values, stamp }) { this.settings = values; this.settingsStamp = stamp; }
   pollSettings() {
@@ -954,7 +995,7 @@ class Editor {
         case "home": return this.moveTo({ line: 0, col: 0 }, shift);
         case "end": return this.moveTo({ line: last, col: this.lines[last].length }, shift);
         case "left": case "right": return this.horizontal(name === "left" ? -1 : 1, shift, true);
-        case "up": case "down": this.top = Math.max(0, Math.min(last, this.top + (name === "up" ? -1 : 1))); return;
+        case "up": case "down": this.top = this.scrolled(name === "up" ? -1 : 1); return;
         case "backspace": case "w": return this.backspace(true);   // ctrl+w: what Herdr sends for ⌥⌫
         case "delete": return this.deleteForward(true);
         case "u": return this.empty ? this.deleteRange({ line: this.head.line, col: 0 }, this.head) : this.backspace(false); // Herdr's ⌘⌫
@@ -967,7 +1008,7 @@ class Editor {
       case "up": case "down": return this.vertical(name === "up" ? -1 : 1, shift);
       case "pageup": case "pagedown": {
         const d = name === "pageup" ? -this.height : this.height;
-        this.top = Math.max(0, Math.min(Math.max(0, this.lines.length - this.height), this.top + d));
+        this.top = this.scrolled(d, this.viewCount - this.height);
         return this.vertical(d, shift);
       }
       case "home": return this.home(shift);
@@ -982,7 +1023,7 @@ class Editor {
 
   // Terminal cell -> buffer position (rows: 1 breadcrumbs, 2..rows-1 text).
   cellToPos(x, y) {
-    const line = Math.max(0, Math.min(this.lines.length - 1, this.top + y - 2));
+    const line = this.fromView(Math.max(0, Math.min(this.viewCount - 1, this.toView(this.top) + y - 2)));
     return { line, col: W.indexAtCol(this.lines[line], Math.max(0, this.left + x - 1 - this.gutter), this.tab) };
   }
   // How far past the text area a drag pointer is, in cells (the gutter and the last text column count as past the side).
@@ -995,7 +1036,7 @@ class Editor {
   // Returns true while the pointer is outside, so the auto-scroll timer keeps going.
   dragStep() {
     const { x, y } = this.drag, { dx, dy } = this.dragOverflow(x, y);
-    if (dy) this.top = Math.max(0, Math.min(this.lines.length - 1, this.top + dy));
+    if (dy) this.top = this.scrolled(dy);
     if (dx) this.left = Math.max(0, Math.min(this.left + dx * 2, Math.max(this.left, this.widest(this.top, this.height) - this.textWidth + 5)));
     const p = this.cellToPos(Math.max(this.gutter + 1, Math.min(x, this.gutter + this.textWidth)), Math.max(2, Math.min(y, this.height + 1)));
     this.sel = { anchor: this.sel.anchor, head: p };
@@ -1005,38 +1046,43 @@ class Editor {
   // Display width of the widest of `count` lines from `top` (a very long line counts its length: exact for ASCII, not walked).
   widest(top, count) {
     let w = 0;
-    for (let l = top; l < Math.min(this.lines.length, top + count); l++) { const t = this.lines[l]; w = Math.max(w, t.length > 1000 ? t.length : W.textWidth(t, this.tab)); }
+    for (let l = top, k = 0; l < this.lines.length && k < count; l = this.folds.next(l), k++) { const t = this.lines[l]; w = Math.max(w, t.length > 1000 ? t.length : W.textWidth(t, this.tab)); }
     return w;
   }
   // Shows the vertical bar when the file is taller than the view, the horizontal one when a line in view is wider; the
   // vertical one scrolls to the last line at the top (VS Code's scroll beyond last line), the horizontal one 5 columns past the widest line.
   layoutBars() {
-    const base = Math.max(1, this.rows - 2 - (this.panel ? this.panel.height(this) : 0)), n = this.lines.length, widest = this.widest(this.top, base);
+    const base = Math.max(1, this.rows - 2 - (this.panel ? this.panel.height(this) : 0)), n = this.viewCount, widest = this.widest(this.top, base);
     let v = n > base || this.top > 0;
     const h = widest > this.cols - this.gutter - (v ? 1 : 0) || this.left > 0;
     if (h) v ||= n > base - 1;
     const height = Math.max(1, base - (h ? 1 : 0)), width = Math.max(1, this.cols - this.gutter - (v ? 1 : 0));
-    this.vbar.layout(v, 2, this.cols, height, height, n + height - 1, this.top);
+    this.vbar.layout(v, 2, this.cols, height, height, n + height - 1, this.toView(this.top));
     this.hbar.layout(h, height + 2, this.gutter + 1, width, width, widest + 5, this.left);
   }
   // Overview ruler marks on the vertical bar, like VS Code's: find matches, word / selection occurrences, the selection's
   // other end, the cursor line.
   rulerMarks(ms, hits, problems = []) {
-    const n = this.lines.length, len = this.vbar.length, marks = new Array(len).fill(null), c = this.colors;
+    const n = this.viewCount, len = this.vbar.length, marks = new Array(len).fill(null), c = this.colors;
+    const cell = (line) => SB.markCell(this.toView(line), n, len);
     for (const h of this.git.hunks) { // git changes first: everything else draws over them
       const color = c[`ruler${h.kind[0].toUpperCase()}${h.kind.slice(1)}`];
-      for (let k = SB.markCell(G.lineOf(h), n, len); k <= SB.markCell(Math.max(G.lineOf(h), h.end - 1), n, len); k++) marks[k] = color;
+      for (let k = cell(G.lineOf(h)); k <= cell(Math.max(G.lineOf(h), h.end - 1)); k++) marks[k] = color;
     }
-    for (const m of ms) marks[SB.markCell(m.line, n, len)] = c.rulerFind;
-    for (const h of hits?.list ?? []) marks[SB.markCell(h.line, n, len)] = hits.ruler;
-    for (const d of [...problems].sort((a, b) => b.severity - a.severity)) marks[SB.markCell(d.start.line, n, len)] = c.rulerDiag[d.severity]; // errors win
-    if (!this.empty) marks[SB.markCell(this.sel.anchor.line, n, len)] = c.rulerSelection;
-    marks[SB.markCell(this.head.line, n, len)] = c.rulerCursor;
+    for (const m of ms) marks[cell(m.line)] = c.rulerFind;
+    for (const h of hits?.list ?? []) marks[cell(h.line)] = hits.ruler;
+    for (const d of [...problems].sort((a, b) => b.severity - a.severity)) marks[cell(d.start.line)] = c.rulerDiag[d.severity]; // errors win
+    if (!this.empty) marks[cell(this.sel.anchor.line)] = c.rulerSelection;
+    marks[cell(this.head.line)] = c.rulerCursor;
     return marks;
   }
   // A buttonless motion: the changed bar alone, "" when nothing changed, null for a whole frame (or not a hover).
   hover(ev) {
     if (this.popup) return null; // menus highlight under the pointer
+    if (ev.type === "mouse" && ev.motion && ev.button === 3) { // the fold chevrons show while the pointer is on the gutter
+      const over = ev.x <= this.gutter && ev.y >= 2 && ev.y <= this.height + 1;
+      if (over !== !!this.gutterHover) { this.gutterHover = over; this.redraw(); }
+    }
     const out = SB.hover(ev, [[this.vbar, this.marks], [this.hbar, null]], this.colors);
     return out && (this.peek || this.prompt) ? null : out; // overlays may cover the bars
   }
@@ -1049,7 +1095,7 @@ class Editor {
       if (covered && bar.drag === null) continue;
       const pos = bar.mouse(ev);
       if (pos === undefined) continue;
-      if (pos !== null) this[key] = pos;
+      if (pos !== null) this[key] = key === "top" ? this.fromView(pos) : pos;
       return true;
     }
     return false;
@@ -1061,7 +1107,7 @@ class Editor {
     if (this.panel && this.panel.mouse(ev, this)) return;
     const wheel = ev.button === 64 || ev.button === 65;
     if (wheel && !ev.shift) {
-      this.top = Math.max(0, Math.min(Math.max(0, this.lines.length - 1), this.top + (ev.button === 64 ? -3 : 3)));
+      this.top = this.scrolled(ev.button === 64 ? -3 : 3);
       return;
     }
     if (wheel || ev.button === 66 || ev.button === 67) { // horizontal wheel, or Shift+wheel
@@ -1094,6 +1140,7 @@ class Editor {
     if (this.panel) this.panel.focused = false;
     if (this.peek && !ev.motion) { if (ev.y >= this.peekRow && ev.y < this.peekRow + this.peek.height) return; this.peek = null; }
     if (ev.motion) return;
+    if (ev.x === this.gutter && this.clickFold(p.line)) return; // the chevron column
     const now = Date.now(), c = this.lastClick;
     const double = now - c.time < 400 && c.line === p.line && c.col === p.col;
     this.lastClick = { time: now, line: p.line, col: p.col };
@@ -1110,21 +1157,25 @@ class Editor {
   // ----- drawing -----
   // budget: ms to spend tokenizing toward the viewport before painting the rest in the default color.
   render(budget = 60) {
-    this.top = Math.max(0, Math.min(this.top, this.lines.length - 1));
+    if (this.folds.any) this.foldRanges(); // collapsed folds follow the text
+    this.top = this.folds.visible(Math.max(0, Math.min(this.top, this.lines.length - 1)));
     this.layoutBars();
     const P = new Painter(), c = this.colors, height = this.height, width = this.textWidth, gw = this.gutter;
     const deadline = Date.now() + budget;
+    const rows = []; // the line on each text row (-1 past the end), folded lines skipped
+    for (let r = 0, l = this.top; r < height; r++, l = this.folds.next(l)) rows.push(l < this.lines.length ? l : -1);
+    const end = Math.max(this.top, ...rows) + 1;
     // long lines get at most 25 ms a frame, so keys are handled between slices
-    const done = this.hl.ensure(this.top + height, deadline) & this.hl.ensureLong(this.top, this.top + height, Math.min(deadline, Date.now() + 25));
+    const done = this.hl.ensure(end, deadline) & this.hl.ensureLong(this.top, end, Math.min(deadline, Date.now() + 25));
     const [ss, se] = this.range(), empty = this.empty;
     const showMatches = this.prompt?.kind === "find" && this.find.query;
     const ms = showMatches ? this.matches() : [];
-    const guides = this.guidesFor(height), brackets = this.bracketPair() ?? [];
+    const guides = this.guidesFor(rows), brackets = this.bracketPair() ?? [];
     const hits = showMatches ? null : this.highlights(height), occ = hits?.list ?? []; // Find shows its own matches
     if (this.outline?.version !== this.buf.version) this.queueOutline();
     const problems = this.problems();
     this.git.start();
-    const changes = G.marksFor(this.git.hunks, this.top, this.top + height - 1);
+    const changes = G.marksFor(this.git.hunks, this.top, end - 1), ranges = this.gutterHover ? this.foldRanges() : null;
     let mi = 0, hi = 0;
 
     // breadcrumbs
@@ -1134,51 +1185,57 @@ class Editor {
     if (this.buf.dirty) { const w = W.textWidth(crumbs + " ", 8); if (w < this.cols) { P.move(1, w + 1); P.text("●", c.warn, c.bg); } }
 
     for (let r = 0; r < height; r++) {
-      const l = this.top + r;
+      const l = rows[r], folded = l >= 0 && this.folds.has(l);
       P.move(r + 2, 1);
-      if (l >= this.lines.length) { P.text(" ".repeat(this.cols), c.fg, c.bg); continue; }
+      if (l < 0) { P.text(" ".repeat(this.cols), c.fg, c.bg); continue; }
       const active = l === this.head.line;
       const spans = []; // this line's squiggles, the most severe first
       for (const d of problems) { if (d.start.line > l) break; const s = Editor.problemSpan(d, l, this.lines[l]); if (s) spans.push({ ...s, color: c.diag[d.severity], severity: d.severity }); }
       spans.sort((a, b) => a.severity - b.severity);
-      this.paintGutter(P, l, active, changes.get(l), spans[0]?.color);
-      const lineBg = active && empty ? c.currentLine : c.bg;
+      this.paintGutter(P, l, active, changes.get(l), spans[0]?.color, folded ? "›" : ranges && FD.rangeAt(ranges, l) ? "⌄" : " ");
+      const lineBg = active && empty ? c.currentLine : folded ? c.foldBackground : c.bg;
       while (mi < ms.length && ms[mi].line < l) mi++;
       const lineMatches = [];
       for (let k = mi; k < ms.length && ms[k].line === l; k++) lineMatches.push(ms[k]);
       while (hi < occ.length && occ[hi].line < l) hi++;
       const lineHits = [];
       for (let k = hi; k < occ.length && occ[k].line === l; k++) lineHits.push(occ[k]);
-      this.paintLine(P, l, lineBg, ss, se, lineMatches, width, { guide: guides[r], brackets: brackets.filter(b => b.line === l), hits: lineHits, hitBg: hits?.bg, problems: spans });
+      this.paintLine(P, l, lineBg, ss, se, lineMatches, width, { guide: guides[r], brackets: brackets.filter(b => b.line === l), hits: lineHits, hitBg: hits?.bg, problems: spans, folded });
     }
     this.marks = this.vbar.shown ? this.rulerMarks(ms, hits, problems) : null;
     this.vbar.paint(P, c, this.marks);
     if (this.hbar.shown) { P.move(height + 2, 1); P.text(" ".repeat(this.cols), c.fg, c.bg); this.hbar.paint(P, c); }
 
     if (this.peek) {
-      this.peekRow = Math.max(2, Math.min(this.head.line - this.top + 3, height + 2 - this.peek.height));
+      this.peekRow = Math.max(2, Math.min(this.toView(this.head.line) - this.toView(this.top) + 3, height + 2 - this.peek.height));
       this.peek.render(P, this, this.peekRow);
     }
     if (this.panel) this.panel.render(P, this);
     this.renderStatus(P);
     let cursor = this.renderPrompt(P);
     if (this.popup) { this.popup.cursor = null; this.popup.render(P, this); cursor = this.popup.cursor ?? "hide"; }
-    P.out += "\x1b[0m" + SB.hoverMode(this, this.vbar.shown || this.hbar.shown);
+    P.out += "\x1b[0m" + SB.hoverMode(this, this.vbar.shown || this.hbar.shown || this.lines.length > 1); // bars and chevrons follow the pointer
     if (cursor === "hide") P.out += "\x1b[?25l";
     else if (cursor) P.out += `\x1b[${cursor[0]};${cursor[1]}H\x1b[?25h`;
     else {
       const { line, col } = this.head, x = W.displayCol(this.lines[line], col, this.tab) - this.left;
-      const visible = line >= this.top && line < this.top + height && x >= 0 && x < width;
-      P.out += visible ? `\x1b[${line - this.top + 2};${gw + x + 1}H\x1b[?25h` : "\x1b[?25l";
+      const row = this.toView(line) - this.toView(this.top), visible = !this.folds.isHidden(line) && row >= 0 && row < height && x >= 0 && x < width;
+      P.out += visible ? `\x1b[${row + 2};${gw + x + 1}H\x1b[?25h` : "\x1b[?25l";
     }
     return { out: P.out, done };
   }
 
-  // Indent guides of the visible lines, recomputed when the text, the view or the cursor line changes.
-  guidesFor(height) {
-    const key = `${this.buf.version}:${this.top}:${height}:${this.head.line}:${this.tab}`;
+  // Indent guides of the visible lines (one per row, each run of consecutive lines between folds computed at once),
+  // recomputed when the text, the view, the folds or the cursor line changes.
+  guidesFor(rows) {
+    const key = `${this.buf.version}:${this.top}:${rows.length}:${this.head.line}:${this.tab}:${this.folds.version}`;
     if (this._guides?.key !== key || this._guides.buf !== this.buf) {
-      this._guides = { key, buf: this.buf, rows: D.indentGuides(this.lines, this.top, this.top + height - 1, this.tab, this.tab, this.head.line) };
+      const out = [];
+      for (let r = 0, k; r < rows.length && rows[r] >= 0; r = k + 1) {
+        for (k = r; rows[k + 1] === rows[k] + 1; k++);
+        out.push(...D.indentGuides(this.lines, rows[r], rows[k], this.tab, this.tab, this.head.line));
+      }
+      this._guides = { key, buf: this.buf, rows: out };
     }
     return this._guides.rows;
   }
@@ -1221,15 +1278,15 @@ class Editor {
     return this._hits;
   }
   // The gutter, `gutter` cells: a problem's mark `●` in the glyph margin (the first column, `mark` its color), the line
-  // number, the git change bar (or a deletion marker), a blank cell.
-  paintGutter(P, l, active, change, mark = null) {
+  // number, the git change bar (or a deletion marker), the fold chevron.
+  paintGutter(P, l, active, change, mark = null, fold = " ") {
     const c = this.colors;
     P.text(mark ? "●" : " ", mark ?? c.lineNumber, c.bg);
     P.text(String(l + 1).padStart(this.gutter - 3), active ? c.lineNumberActive : c.lineNumber, c.bg);
     P.text(GIT_GLYPHS[change] ?? " ", change ? c[GIT_COLORS[change]] : c.fg, c.bg);
-    P.text(" ", c.fg, c.bg);
+    P.text(fold, c.foldControl, c.bg);
   }
-  // deco: { guide: { count, active }, brackets: [{ col }], hits: [{ col, len }], hitBg, problems: [{ from, to, color }] } for this line.
+  // deco: { guide: { count, active }, brackets: [{ col }], hits: [{ col, len }], hitBg, problems: [{ from, to, color }], folded } for this line.
   paintLine(P, l, lineBg, ss, se, lineMatches, width, deco = {}) {
     const c = this.colors, text = this.lines[l], g = deco.guide, size = this.tab;
     const selFrom = l < ss.line || l > se.line ? -1 : l === ss.line ? ss.col : 0;
@@ -1248,6 +1305,7 @@ class Editor {
     let { x, col } = this.paintText(P, text, this.hl.tokens[l] ?? null, width, this.left, lineBg, bgAt, this.tab, guideAt, curlyAt);
     // Selection past the line end shows one cell for the line break, like VS Code.
     if (x < width && selFrom !== -1 && selTo > text.length && col >= this.left) { P.text(" ", c.fg, c.selection); x++; }
+    if (deco.folded && x < width && col >= this.left) { const m = " ⋯".slice(0, width - x); P.text(m, c.foldPlaceholder, lineBg); x += m.length; } // VS Code's collapsed marker
     if (x >= width) return;
     if (!guideAt) return P.text(" ".repeat(width - x), c.fg, lineBg);
     let pad = ""; // a blank line's guides go on past its end

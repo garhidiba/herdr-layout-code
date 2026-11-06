@@ -52,6 +52,10 @@ function paletteOf(colors = {}) {
       blend(colors["editorOverviewRuler.warningForeground"] ?? "#cca700", bg), blend(colors["editorOverviewRuler.infoForeground"] ?? "#3794ff", bg)],
     // git change bars (One Dark Pro's; the akamud theme has none) and their ruler marks (VS Code: the bar color at 60%)
     ...gitColors(colors, bg),
+    // folding (VS Code's dark defaults: the icon color, the selection at 30%, gray)
+    foldControl: blend(colors["editorGutter.foldingControlForeground"] ?? "#c5c5c5", bg),
+    foldBackground: blend(colors["editor.foldBackground"] ?? selection + "4d", bg),
+    foldPlaceholder: blend(colors["editor.foldPlaceholderForeground"] ?? "#808080", bg),
   };
 }
 const GIT_DEFAULTS = { added: "#109868", modified: "#948b60", deleted: "#9a353d" };

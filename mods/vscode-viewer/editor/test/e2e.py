@@ -728,12 +728,42 @@ def run_git_gutter(tmp):
     print("git gutter: ok")
 
 
+def run_folding(tmp):
+    """Kitty ⌃⇧[ folds the block at the cursor (⋯ after the header, its lines gone, ↓ skips them), ⌃⇧] unfolds it;
+    chevrons show with the pointer on the gutter and a click on one folds; Unfold All from the palette."""
+    file = os.path.join(tmp, "fold.ts")
+    open(file, "w").write("function a() {\n  if (x) {\n    one();\n    two();\n  }\n}\nconst z = 1;\n")
+    t = Term(file)
+    assert colored_frame(t), "no colored frame"
+    last = lambda: plain(t).split("\x1b[1;1H")[-1]
+    t.send("\x07"); t.send("3\r")
+    t.send("\x1b[91;6u", wait=0.3)                      # ⌃⇧[ (Kitty: [ with ctrl+shift)
+    assert "⋯" in last() and "one();" not in last() and "Ln 2, Col" in last(), "Fold did not fold the if block:\n" + last()[-600:]
+    t.send("\x1b[B")
+    assert t.read("Ln 5, Col", timeout=2), "↓ did not skip the folded lines"
+    t.send("\x1b[A"); t.send("\x1b[93;6u", wait=0.3)    # ⌃⇧]
+    assert "one();" in last() and "⋯" not in last(), "Unfold did not unfold"
+    t.send("\x1b[<35;2;3M", wait=0.3)                   # the pointer onto the gutter
+    assert "⌄" in last(), "no chevrons with the pointer on the gutter"
+    t.send("\x1b[<0;6;2M"); t.send("\x1b[<0;6;2m", wait=0.3)  # click line 1's chevron
+    assert "›function a() { ⋯" in last() and "const z" in last() and "if (x)" not in last(), "the chevron click did not fold:\n" + last()[-600:]
+    t.send("\x1bOP"); t.send("Unfold All", wait=0.3); t.send("\r", wait=0.3)
+    assert "one();" in last(), "Unfold All from the palette"
+    t.send("\x1b[91;7u", wait=0.3)                      # ⌃⌥[ Fold All
+    assert "›function a() { ⋯" in last() and "if (x)" not in last(), "Fold All"
+    t.send("\x1b[93;7u", wait=0.3)                      # ⌃⌥] Unfold All
+    assert "one();" in last(), "Unfold All"
+    t.send("\x11")
+    assert t.wait_exit() == 0
+    print("folding: ok")
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="vsedit-e2e-")
     ISOLATED.update(VSEDIT_SETTINGS=os.path.join(tmp, "settings", "vscode-settings.json"), VSEDIT_BACKUPS=os.path.join(tmp, "backups"),
                     VSEDIT_KEYBINDINGS=os.path.join(tmp, "settings", "vscode-keybindings.json"))
     try:
-        run_tsx(tmp); run_go(tmp); run_crlf(tmp); run_hex(tmp); run_error_page(tmp); run_drag_scroll(tmp); run_minified(tmp); run_scrollbars(tmp); run_decorations(tmp); run_autoclose(tmp); run_git_gutter(tmp)
+        run_tsx(tmp); run_go(tmp); run_crlf(tmp); run_hex(tmp); run_error_page(tmp); run_drag_scroll(tmp); run_minified(tmp); run_scrollbars(tmp); run_decorations(tmp); run_autoclose(tmp); run_git_gutter(tmp); run_folding(tmp)
         run_menu_and_cmd_save(tmp); run_save_dialog(tmp); run_auto_save(tmp); run_hot_exit(tmp); run_keybindings(tmp)
         run_format(tmp); run_typescript(tmp); run_find_and_status(tmp); run_symbols_and_problems(tmp)
     finally:
