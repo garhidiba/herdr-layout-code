@@ -62,7 +62,7 @@ pub fn status(repo: &str, untracked: &str, ahead_behind: bool) -> Result<Status,
     if !ahead_behind {
         args.push("--no-ahead-behind");
     }
-    let out = git(repo, &args).ok_or("Cannot start git")?;
+    let out = git(repo, &args).ok_or_else(|| format!("Cannot run git in {repo}"))?;
     if !out.ok {
         return Err(out.stderr.trim().to_string());
     }
@@ -198,7 +198,7 @@ pub fn log(repo: &str, upstream: Option<&str>, n: usize) -> Result<Vec<Commit>, 
     let mut args = vec!["log", "--topo-order", "--date-order", "-n", n.as_str(), LOG_FORMAT, "HEAD"];
     args.extend(upstream);
     args.push("--");
-    let out = git(repo, &args).ok_or("Cannot start git")?;
+    let out = git(repo, &args).ok_or_else(|| format!("Cannot run git in {repo}"))?;
     if !out.ok {
         return Err(out.stderr.trim().to_string());
     }
@@ -207,7 +207,7 @@ pub fn log(repo: &str, upstream: Option<&str>, n: usize) -> Result<Vec<Commit>, 
 
 /// A commit's changed files against its first parent.
 pub fn commit_files(repo: &str, hash: &str) -> Result<Vec<File>, String> {
-    let out = git(repo, &["show", "--name-status", "-z", "--format=", "-M", "-m", "--first-parent", hash]).ok_or("Cannot start git")?;
+    let out = git(repo, &["show", "--name-status", "-z", "--format=", "-M", "-m", "--first-parent", hash]).ok_or_else(|| format!("Cannot run git in {repo}"))?;
     if !out.ok {
         return Err(out.stderr.trim().to_string());
     }
