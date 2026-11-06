@@ -1,19 +1,22 @@
 # VS Code
 
-Herdr's main layout turned into a VS Code–style workbench: a file explorer with Material Icon Theme icons and VS Code's git colors on the right, files opening in their own tab as an Atom One Dark editor, a right-click menu that opens the folder in VS Code or Finder, and a status bar that shows how much of the Claude and Codex usage windows is left.
+Herdr's main layout turned into a VS Code–style workbench: a file explorer with Material Icon Theme icons and VS Code's git colors and a Source Control panel (repositories, changes, commit graph) on the right, files opening in their own tab as an Atom One Dark editor, a right-click menu that opens the folder in VS Code or Finder, and a status bar that shows how much of the Claude and Codex usage windows is left.
 
 ![VS Code](preview.png)
 
 ## What you see
 
 - **Left sidebar** (268px, 44–480): Herdr's own brand row (46px), spaces and agents lists (equal weights, min 90px each), footer (69px). Unchanged from Herdr's main layout.
-- **Tab bar** (42px, `vscode-tabs`): Herdr's tabs, then on the right `+`, **Explorer** (folder icon) and **Changes** (branch icon) buttons; the active panel's button has the `selected` background.
+- **Tab bar** (42px, `vscode-tabs`): Herdr's tabs, then on the right `+`, **Explorer** (folder icon) and **Source Control** (Herdr's changes icon) buttons; the active panel's button has the `selected` background.
 - **Work area** (padding 8, gap 8): the active tab's panes (radius 10, 1px `border`, `accent` focus ring, 30px pane header).
 - **Right panel** (368px, 280–900, a stack):
   - **Explorer** (`vscode-explorer`): header "Explorer" + folder name (36px, semibold 13px). A tree of the focused pane's folder, 22px rows, 12px indent per level, chevron 12px, Material Icon Theme icon 16px (file name → extension → default; folders have open/closed icons).
     - Git colors as VS Code: modified `#e2c08d`, untracked/added `#73c991`, deleted `#c74e39`, conflict `#e4676b`. Files show the color on the name plus the letter (`M U A D !`); folders show it on the name plus a 6px dot. Folders take the worst state below them; deletions don't bubble up.
     - It also finds git repos nested up to 3 levels below the folder (up to 200) and merges their status, so a folder of projects shows which project has changes.
-  - **Changes**: Herdr's shipped `changes` mod (diff and commit).
+  - **Source Control** (`vscode-scm`): header "Source Control" (36px, semibold 13px), then three collapsible sections. Each section header is 22px: chevron 14px, uppercase 11px bold title, details on the right, 1px `border` line above. Rows are 22px.
+    - **Repositories** (count badge): every git repo under the focused folder: the folder's own repo plus repos nested up to 3 levels (200 at most), up to 5 rows visible then scrolling. A row: 6px `accent` dot when selected (row on `selected`), repo folder name, branch icon 12px, branch (short hash when detached) with `*` when dirty, and `↑n ↓m` when the branch has an upstream.
+    - **Changes** (repo name and file-count badge): a 28px commit message input (`surface`, `accent` border while typing, placeholder "Message (Enter to commit)"), a 28px full-width **✓ Commit on <branch>** button (`solid` when there is a message, else `raised`), then the changed files, up to 8 rows visible: file name in its git color (deleted ones struck through), the folder dimmed, the letter on the right. Colors and letters as the Explorer: `M` `#e2c08d`, untracked `U` / added `A` `#73c991`, `D` `#c74e39`, conflict `!` `#e4676b`. A clicked file shows its diff below (240px, editor font 11px, line numbers, added lines on `ansi2` and removed on `ansi1` at 18 alpha, hunk headers on `raised`).
+    - **Graph** (`<branch> · <upstream>` on the right): takes the remaining height. One 22px row per commit (newest 300): a lane column (12px per lane, at most 12 lanes drawn) with 2px lines, horizontal links where branches join or split, and an 8px dot (a ring for merge commits), lane colors `#ffb000 #dc267f #994f00 #40b0a6 #b66dff` (VS Code's scmGraph colors) by lane; then the subject (semibold on the HEAD commit), up to 2 ref chips (16px, radius 8, 10px: branches with the lane color border and 20% fill, tags on `raised`; `+n` for more), and the author dimmed.
 - **Status bar** (28px, `vscode-status`): machine, branch and agent count on the left. On the right, one group per provider:
   - Claude (orange glyph) and Codex (blue-violet glyph without its white tile).
   - Each usage window shows: time to reset (session `3h 25m`; weekly `4d 21h`, `5h 10m` once under a day), a 40×5px bar (green `ansi2` < 70%, yellow `ansi3` 70–90%, red `ansi1` ≥ 90%), the percent.
@@ -28,9 +31,14 @@ Herdr's main layout turned into a VS Code–style workbench: a file explorer wit
 
 ## How it behaves
 
-- **Explorer button / Changes button** toggle the right panel and pick its page; the choice is remembered per space. `cmd-e` toggles the panel.
+- **Explorer button / Source Control button** toggle the right panel and pick its page; the choice is remembered per space. `cmd-e` toggles the panel.
 - **Explorer clicks:** folder = expand/collapse; file = opens a new tab named after the file with `vscode-viewer`; `cmd`+click = `code <file>`.
   - The tree follows the focused pane's folder, refreshes on file changes and every 10s, and lists at most 500 entries per folder and 5,000 in total.
+- **Source Control:**
+  - Clicking a section header collapses or expands it (remembered). Clicking a repo selects it for Changes and Graph; the choice is kept per folder while the panel lives. The default is the focused folder's own repo, else the first dirty repo, else the first.
+  - Clicking a file opens its diff against `HEAD` (untracked files show whole); clicking it again closes it.
+  - **Enter** in the message or the Commit button runs `git add -A` then `git commit -m <message>` in the selected repo, as Herdr's `changes` mod; errors show in `ansi1` under the button. Esc leaves the input.
+  - It refreshes when files change under the folder (at most every 2s) and every 10s, and follows the focused pane's folder.
 - **Editor:**
   - Typing marks the file dirty (8px `#e5c07b` dot). `cmd-s` (or Save) writes only if the file on disk is still what was loaded.
   - If the disk changed while editing, a banner offers **Reload (discard my edits)** or **Overwrite**. Untouched buffers follow the disk every 3s.
@@ -42,14 +50,19 @@ Herdr's main layout turned into a VS Code–style workbench: a file explorer wit
 
 ## Built from
 
-- **Layout** `layouts/vscode.json`: Herdr's main tree with `terminal_menu: "vscode-menu"`, `tabs` → `vscode-tabs`, `status` → `vscode-status`, and `panel-body` children `explorer` (`vscode-explorer`) and `changes` (shipped `changes`). Shipped mods used as is: `workspace-chrome`, `spaces`, `agents`, `pane`, `changes`. Keys: `keys.json` section `layout:vscode` (`cmd-e` → `layout.toggle:panel`, `cmd-s` → `vscode-viewer.save`).
-- **`vscode-tabs`:** the shipped tabs mod plus an `explorer` panel button.
+- **Layout** `layouts/vscode.json`: Herdr's main tree with `terminal_menu: "vscode-menu"`, `tabs` → `vscode-tabs`, `status` → `vscode-status`, and `panel-body` children `explorer` (`vscode-explorer`) and `changes` (`vscode-scm`). Shipped mods used as is: `workspace-chrome`, `spaces`, `agents`, `pane`. Keys: `keys.json` section `layout:vscode` (`cmd-e` → `layout.toggle:panel`, `cmd-s` → `vscode-viewer.save`).
+- **`vscode-tabs`:** the shipped tabs mod plus an `explorer` panel button; the `changes` button reads "Source Control" (icon `mods/changes/changes.svg`).
   - It treats an empty `workspace.panels` as unset (an old uninstalled layout can leave `[]`, which otherwise hides every panel button).
   - It never shows a `files` button.
 - **`vscode-explorer`:**
   - Runs `sh` (folder listing; `find … -maxdepth 3 -name .git` for nested repos), `git status --porcelain=v1 -z` per repo, and `code` on cmd+click. Uses `watchFolder`.
   - `icons.json` maps names/extensions/folder names to icon files, generated from Material Icon Theme 5.40.0's `material-icons.json`. `icons/` holds its 1,256 SVGs (MIT, see `LICENSE-material-icon-theme.txt`).
   - Opens files with `run("tab.new", {name, mod: "vscode-viewer", props: {file, on}})`.
+- **`vscode-scm`:**
+  - Repos: one `sh` script runs `git rev-parse --show-toplevel`, `find "$1" -maxdepth 3 -name .git -prune | head -200`, then for each repo `git status --porcelain=v2 --branch --untracked-files=normal | head -n 5` (branch, upstream, ahead/behind; one entry line means dirty).
+  - Selected repo: `git status --porcelain=v1 -z --no-renames --untracked-files=all` (first 1,000 files), `git log --topo-order --date-order -n 300` with `%H %P %D %s %an %ar` split by NUL and `0x1e`, over `HEAD` plus the upstream when `branch.ab` shows it exists; diffs with `git diff HEAD --no-ext-diff --no-textconv --no-color -- <file>` or `readTextFile`. Diff and commit logic are copied from the shipped `changes` mod.
+  - Lanes are computed in JS: each lane waits for the commit it leads to; per row it records which lanes have a top half and a bottom half line and which lanes link to the node. Lines, links and dots are absolutely placed `div`s.
+  - `v_virtual_list` + `Scrollbar.vertical` for the graph and the diff; `InputState`/`Input` for the message; `watchFolder` on the repo top (or the folder); `localStorage` for collapsed sections. Icons: `branch.svg` (Lucide git-branch), `chevron-down.svg`, `chevron-right.svg`.
 - **`vscode-viewer`:**
   - `EditorState`/`Editor` from `gpui-base`, `readTextFile`/`writeTextFile(path, text, expected)` for conflict-safe saves, and `nextCommand()` for `save`. Runs `code` from the Open in VS Code button.
   - `langs.json`: file type → the closest grammar the built-in editor has, from the language contributions of VS Code's built-in extensions.
@@ -73,12 +86,14 @@ Herdr's main layout turned into a VS Code–style workbench: a file explorer wit
 - **No HTML preview.** Herdr has no webview; `TextView` renders markdown (and simple HTML) without CSS or scripts, so `.html` files open in the editor only.
 - **Editor limits.** It opens files up to 1 MiB. With `line_numbers: false` the editor scrolls 4 columns left; keep line numbers on.
 - **Assumptions.** The VS Code `code` CLI (Shell Command: Install 'code' in PATH) and macOS `open` are assumed. The Claude meter needs the statusLine tap and shows `–` until Claude Code has refreshed its status line once. Codex needs local session logs.
+- **Source Control.** Git reads use `--no-optional-locks -c core.fsmonitor=false` so polling writes no lock files (otherwise the folder watch refreshes itself forever). It never pushes, fetches or switches branches; ahead/behind is as of the last fetch. Graph links are straight horizontal lines, not VS Code's curves; lanes past 12 are not drawn. Limits: 200 repos, 300 commits, 1,000 files, diffs 1,500 lines. Remote (SSH) folders refresh on the 10s timer only.
 - **Changing the mods.** Herdr replaces shipped mods and layouts on every start (edits move to `<name>-edited`). That is why everything here is a separately named mod; don't edit the shipped ones.
 
 ## Done when
 
-- `herdr-app check` passes for each of the five mods, and `layout.switch {name: "vscode"}` shows no errors in `herdr-app status`.
-- The tab bar shows Explorer and Changes. Explorer lists the focused folder with Material icons, and a modified file in a git repo is `#e2c08d` with `M`.
+- `herdr-app check` passes for each of the six mods, and `layout.switch {name: "vscode"}` shows no errors in `herdr-app status`.
+- The tab bar shows Explorer and Source Control. Explorer lists the focused folder with Material icons, and a modified file in a git repo is `#e2c08d` with `M`.
+- Source Control on a folder holding several repos lists them all with branch and `*` on the dirty ones; selecting one shows its changed files and a graph whose HEAD commit carries its branch chip. Typing a message and pressing Enter commits, and the file list empties.
 - Clicking a `.ts` file opens a tab whose status strip says `TypeScript`. Editing shows the dot. `cmd-s` writes the file and the button returns to Saved.
 - Clicking a `.png` shows it centered on the checkerboard with `PNG`, `W × H` and its size in the strip. Clicking `README.md` shows it rendered; Edit opens the editor, and an unsaved edit appears after Preview.
 - With a Codex session log present, the status bar shows the Codex glyph with two bars and a credit number; hovering shows the card with reset times.
