@@ -401,7 +401,7 @@ straight from `sh -c` without the login shell (`exec` dropped), `tab.new` when t
 `<herdr home>/vscode-core/vsedit --vscode … --fallback …/vsedit.cjs` when `"editor.engine": "rust"` and
 `vsedit --api` prints `1`; otherwise `node vsedit.cjs`. The binary execs `node vsedit.cjs` itself (before touching
 the terminal) when it can't start. Without `editor.engine` the editor follows `core.engine` (`RUST_READY=1` in the
-launcher, flipped once every phase-2 e2e scenario passed in Rust): one switch for the user, JavaScript by default, and
+launcher, flipped once every e2e scenario passed in Rust, phase 3 below): one switch for the user, JavaScript by default, and
 the Settings dialog's **Editor: Engine** (`editor.engine`) to run one engine for the editor alone; `settings.js`'s
 `editorEngine()` is the launcher's rule. `install.sh` (the dialog's Build Rust core) builds `vsedit` too when
 `core.engine` or `editor.engine` is `rust` (or `--engine rust`); a failed editor build (no C compiler) leaves the editor
@@ -471,6 +471,11 @@ was already ~2 ms in JS.
   through the theme's `semanticTokenColors` (the most specific selector per attribute) else VS Code's default semantic
   token → TextMate scope map through `tokenColors`, and fills the semantic layer. The akamud theme doesn't turn it on, so
   nothing is asked and the colors are TextMate's as before.
+
+### Launch and switch
+
+`RUST_READY=1` in `vsedit.sh` and `RUST_EDITOR_READY = true` in `settings.js`: once every e2e scenario passed in both
+editors, `"core.engine": "rust"` chooses the Rust editor too (`editor.engine` still picks one for the editor alone).
 
 ### Tests
 

@@ -8,7 +8,7 @@
 # Which editor: "editor.engine" ("js" | "rust") in vscode-settings.json; without it "core.engine" (while RUST_READY is
 # 1; the Settings dialog's editorEngine() reads it the same way). VSEDIT_ENGINE overrides both (tests);
 # VSEDIT_ENGINE_LOG=<file> gets a line per launch: rust, js, or js (fallback).
-RUST_READY=0 # 1 once the Rust editor has the phase-3 language features: then "core.engine": "rust" chooses it too (0: only "editor.engine")
+RUST_READY=1 # 1: "core.engine": "rust" chooses the Rust editor too (0: only "editor.engine")
 API=1        # the launch contract: `vsedit --api` must print this
 
 here=$(cd "$(dirname "$0")" && pwd)

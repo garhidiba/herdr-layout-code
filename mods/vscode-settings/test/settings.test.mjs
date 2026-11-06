@@ -26,12 +26,12 @@ test("a missing or empty file means every default, engine js", () => {
   assert.equal(coreEngine({ "core.engine": "go" }), "js");
 });
 
-test("the editor's engine is js until editor.engine is set, as vsedit.sh picks it while RUST_READY=0", () => {
+test("the editor's engine is editor.engine, else the core's, as vsedit.sh picks it with RUST_READY=1", () => {
   assert.equal(editorEngine({}), "js");
-  assert.equal(editorEngine({ "core.engine": "rust" }), "js");
+  assert.equal(editorEngine({ "core.engine": "rust" }), "rust");
   assert.equal(editorEngine({ "core.engine": "rust", "editor.engine": "js" }), "js");
   assert.equal(editorEngine({ "editor.engine": "rust" }), "rust");
-  assert.equal(editorEngine({ "core.engine": "rust", "editor.engine": "go" }), "js");
+  assert.equal(editorEngine({ "core.engine": "rust", "editor.engine": "go" }), "rust");
   assert.throws(() => withSetting({}, "editor.engine", "go"));
   assert.deepEqual(withDefaults({ "editor.engine": "rust", "core.engine": "rust", "my.key": 1 }), { "my.key": 1, ...DEFAULTS });
 });
