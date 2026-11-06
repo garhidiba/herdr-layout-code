@@ -9,8 +9,12 @@ import { openArgs, wantsEditor } from "./paths.js";
 export const ROOT = ".local/share/herdr-vscode"; // under the machine's $HOME; nothing is written outside it
 const BUNDLES = "vscode-core/remote";              // under <herdr home>
 const ASK_AGAIN = 24 * 3600 * 1000;                // a machine whose install wasn't confirmed is asked again after a day
-export const ASKED = "vscode-explorer.remote-asked", APPROVED = "vscode-explorer.remote-approved", PENDING = "vscode-explorer.remote-pending";
+export const ASKED = "vscode-explorer.remote-asked", APPROVED = "vscode-explorer.remote-approved", INSTALL_REQUEST = "vscode-explorer.remote-install";
 export const INSTALL_COMMAND = "vscode-explorer.install-remote";
+const REQUEST_AGE = 600000; // a confirm dialog answered later than this installs nothing
+
+// The confirm dialog's yes (INSTALL_COMMAND): the machine it asked about, from INSTALL_REQUEST, or null when stale.
+export const requestedMachine = (request, now) => (request?.machine && now - request.at < REQUEST_AGE ? request.machine : null);
 
 // What a machine is: `uname -sm` and $HOME, one round trip.
 export const INFO = 'uname -sm; printf "%s\\n" "$HOME"';
@@ -161,7 +165,16 @@ export function createRemote({ exec, readTextFile, notify, appHome, platform = (
     }
   }
 
-  return { prepare, install };
+  // The confirm dialog's yes: that machine is approved from now on (new versions install on their own), then installed.
+  async function installRequested() {
+    const machine = requestedMachine(shared(INSTALL_REQUEST), now());
+    if (!machine) return;
+    setShared(INSTALL_REQUEST, null);
+    setShared(APPROVED, { ...(shared(APPROVED) ?? {}), [machine]: true });
+    await install(machine).catch((e) => notify({ title: `Could not install the editor on ${machine}`, body: String(e?.message ?? e), level: "error" }));
+  }
+
+  return { prepare, install, installRequested };
 }
 
 // Opens a file as the Explorer does: on a remote space the terminal editor runs on its machine when it is (or gets)

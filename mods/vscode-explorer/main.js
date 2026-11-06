@@ -4,14 +4,11 @@
 // (menu.js), which runs as an overlay of this same mod.
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { spaces, panes, focused, exec, hc, readTextFile, watchFolder, theme, window, run, appHome, props, shared, setShared, notify } from "herdr";
-import { openArgs } from "./paths.js";
-import { createOpenTab } from "./launch.js";
+import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, window, appHome, props, shared, setShared, notify, nextCommand } from "herdr";
 import { freshRoot, encode, decode } from "./cache.js";
-import { ExplorerMenu, ExplorerDialog, openMenu, openInCode, refreshKey } from "./menu.js";
+import { ExplorerMenu, ExplorerDialog, openMenu, openInCode, refreshKey, openFile, remote } from "./menu.js";
 import { createCore } from "./core.js";
 // Herdr starts with PATH=/usr/bin:/bin, so Homebrew/user tools (node, code, codex, trash) are looked up here too.
-const openTab = createOpenTab({ hc, run, spaces });
 const userExec = (cmd, args, opts) => exec("sh", ["-c", 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; exec "$0" "$@"', cmd, ...args], opts);
 
 // The project you work in: the focused terminal's folder. Editor and diff tabs have no folder, so focusing
@@ -122,6 +119,8 @@ export default class Files extends View {
       try { this.icons = JSON.parse(await readTextFile(`${appHome()}/mods/vscode-explorer/icons.json`)); } catch {}
       cx.notify();
     });
+    // The confirm dialog's yes for installing the editor on a remote machine (menu.js askInstall).
+    cx.spawn(async () => { for (;;) if (await nextCommand() === "install-remote") remote.installRequested(); });
     this.refresh(cx);
     cx.timer.every(10000, cx => {
       this.refresh(cx);
@@ -276,8 +275,8 @@ export default class Files extends View {
 
   open(path, cx) {
     // The editor tab is a terminal: started in the Explorer's root, so focusing it keeps the tree where it is.
-    const args = openArgs(`${this.root}/${path}`, { on: this.on, appHome: appHome(), folder: this.root });
-    cx.spawn(cx => openTab(args, cx));
+    const [file, on, folder] = [`${this.root}/${path}`, this.on, this.root];
+    cx.spawn(cx => openFile(file, { on, folder }, cx));
   }
 
   menu(abs, dir, cx) {

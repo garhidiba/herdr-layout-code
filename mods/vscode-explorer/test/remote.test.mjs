@@ -6,7 +6,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, exist
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { archOf, parseInfo, parseManifest, keysOs, megabytes, rootOf, dirOf, REMOTE_INSTALL, UPLOAD, INFO, createRemote, createOpenFile, ASKED, APPROVED } from "../remote.js";
+import { archOf, parseInfo, parseManifest, keysOs, megabytes, rootOf, dirOf, REMOTE_INSTALL, UPLOAD, INFO, createRemote, createOpenFile, ASKED, APPROVED, INSTALL_REQUEST } from "../remote.js";
 
 const VER = "1.0.0-0123456789ab", SUM = "a".repeat(64);
 const manifestText = (arch, version = VER, sha256 = SUM) => JSON.stringify({ version, arch, sha256, size: 2843587, files: {} });
@@ -171,6 +171,20 @@ test("a failed install, an unreachable or unsupported machine, or no built bundl
   const unbuilt = fake({ files: { "/h/vscode-core/remote/aarch64/manifest.json": null } });
   assert.equal(await unbuilt.remote.prepare("box"), null);
   assert.match(unbuilt.toasts[0].body, /build-remote\.sh/);
+});
+
+test("the confirm dialog's yes approves the machine it asked about and installs there; a stale one does nothing", async () => {
+  const f = fake();
+  f.store[INSTALL_REQUEST] = { machine: "box", at: f.t - 1000 };
+  await f.remote.installRequested();
+  assert.deepEqual(f.store[APPROVED], { box: true });
+  assert.equal(f.store[INSTALL_REQUEST], null);
+  assert.equal(f.runs.filter(r => r.args[1] === UPLOAD).length, 1);
+  const stale = fake();
+  stale.store[INSTALL_REQUEST] = { machine: "box", at: stale.t - 3600 * 1000 };
+  await stale.remote.installRequested();
+  assert.deepEqual(stale.store[APPROVED], {});
+  assert.deepEqual(stale.runs, []);
 });
 
 test("two opens while installing share one upload", async () => {

@@ -2,12 +2,26 @@
 // (props { menu } or { dialog }), so they share the open rule in paths.js with the tree.
 import { div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { exec, hc, run, spaces, props, openOverlay, closeOverlay, theme, shared, setShared, appHome, writeTextFile, notify } from "herdr";
+import { exec, hc, run, spaces, props, openOverlay, closeOverlay, theme, shared, setShared, appHome, readTextFile, writeTextFile, notify, window } from "herdr";
 import { createOpenTab } from "./launch.js";
-import { menuItems, menuHeight, openWith, openArgs, baseName, parentOf, relativeTo, nameProblem, vscodeRemoteArgs } from "./paths.js";
+import { menuItems, menuHeight, openWith, baseName, parentOf, relativeTo, nameProblem, vscodeRemoteArgs } from "./paths.js";
 import { createOps } from "./ops.js";
+import { createRemote, createOpenFile, ROOT, INSTALL_COMMAND, INSTALL_REQUEST } from "./remote.js";
 
 const openTab = createOpenTab({ hc, run, spaces });
+// The editor on a remote space's machine (remote.js): installing it is asked once with the shipped confirm dialog,
+// whose yes runs INSTALL_COMMAND for the tree (main.js), naming the machine in the shared value INSTALL_REQUEST.
+const askInstall = (machine, size) => {
+  setShared(INSTALL_REQUEST, { machine, at: Date.now() });
+  openOverlay({ mod: "confirm", kind: "dialog", width: 420, height: 180, props: {
+    title: `Install the editor on ${machine} (${size})?`,
+    detail: `Its files then open in the terminal editor on ${machine}, with its language servers; it goes into ~/${ROOT}. This file opens in the viewer meanwhile.`,
+    command: { name: INSTALL_COMMAND, args: {} },
+  } });
+};
+export const remote = createRemote({ exec, readTextFile, notify, appHome, platform: () => window()?.platform, shared, setShared, confirm: askInstall });
+// Every way the Explorer opens a file: the tree's click, Open / Open With, a new file.
+export const openFile = createOpenFile({ openTab, remote, appHome });
 const CLIPBOARD = "vscode-explorer.clipboard", REFRESH = "vscode-explorer.refresh";
 export const refreshKey = REFRESH;
 
@@ -68,9 +82,9 @@ export class ExplorerMenu {
     const t = this.target, folder = t.dir ? t.path : parentOf(t.path);
     if (action === "openWith") { this.withList = true; this.at = -1; return cx.notify(); }
     // Closed once the tab is shown: closing first could end the wait. A second pick meanwhile is ignored.
-    const open = (args) => !this.opening && (this.opening = true) && cx.spawn(async cx => { try { await openTab(args, cx); } finally { this.close(); } });
-    if (action === "open") return open(openArgs(t.path, { on: t.on, appHome: appHome(), folder: t.root }));
-    if (action === "editor" || action === "viewer") return open(openArgs(t.path, { on: t.on, appHome: appHome(), how: action, folder: t.root }));
+    const open = (how) => !this.opening && (this.opening = true) && cx.spawn(async cx => { try { await openFile(t.path, { on: t.on, how, folder: t.root }, cx); } finally { this.close(); } });
+    if (action === "open") return open("auto");
+    if (action === "editor" || action === "viewer") return open(action);
     this.close();
     const fail = (e) => e?.unreachable ? toast(e) : dialog({ kind: "error", text: String(e?.message ?? e) }, 150);
     switch (action) {
@@ -147,7 +161,7 @@ export class ExplorerDialog {
     if (s.kind === "newFolder") return ops.mkdir(target);
     if (s.kind === "newFile") {
       if (s.on) await ops.newFile(target); else await writeTextFile(target, "", null);
-      await openTab(openArgs(target, { on: s.on, appHome: appHome(), folder: s.root }), cx);
+      await openFile(target, { on: s.on, folder: s.root }, cx);
       return;
     }
     await ops.move(s.path, target);
