@@ -151,3 +151,12 @@ test("the API Key row shows where the key is and only its ends, or how to add on
   assert.equal(keyLine(null), "Checking for a key…");
   assert.match(keyLine({ error: "node: not found" }), /Cannot check the key: node: not found/);
 });
+
+test("word wrap: VS Code's modes and indents, the column clamped to 1-500, off / 80 / same by default", () => {
+  const v = normalize({});
+  assert.deepEqual([v["editor.wordWrap"], v["editor.wordWrapColumn"], v["editor.wrappingIndent"]], ["off", 80, "same"]);
+  const w = normalize({ "editor.wordWrap": "bounded", "editor.wordWrapColumn": 9999, "editor.wrappingIndent": "deepIndent" });
+  assert.deepEqual([w["editor.wordWrap"], w["editor.wordWrapColumn"], w["editor.wrappingIndent"]], ["bounded", 500, "deepIndent"]);
+  assert.equal(normalize({ "editor.wordWrap": "wrap" })["editor.wordWrap"], "off");
+  assert.deepEqual(withSetting({}, "editor.wordWrapColumn", 0), { "editor.wordWrapColumn": 1 });
+});

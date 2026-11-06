@@ -16,15 +16,19 @@ export const DEFAULTS = {
   "editor.cursorBlinking": "blink",   // "solid" is steady, the others blink
   "editor.inlineSuggest.provider": "ollama", // the editor's inline suggestions (mods/vscode-viewer/editor/inline.cjs)
   "editor.inlineSuggest.model": "",          // "": the provider's default
+  "editor.wordWrap": "off",           // "off" | "on" | "wordWrapColumn" | "bounded" (mods/vscode-viewer/editor/wrap.cjs)
+  "editor.wordWrapColumn": 80,        // 1-500
+  "editor.wrappingIndent": "same",    // "none" | "same" | "indent" | "deepIndent"
 };
 export const CHOICES = { "core.engine": ["js", "rust"], "editor.engine": ["js", "rust"], "files.autoSave": ["off", "afterDelay", "onFocusChange"],
   "editor.inlineSuggest.provider": ["ollama", "codestral", "deepseek", "mercury", "off"],
   "editor.cursorStyle": ["line", "block", "underline", "line-thin", "underline-thin", "block-outline"],
-  "editor.cursorBlinking": ["blink", "smooth", "phase", "expand", "solid"] };
+  "editor.cursorBlinking": ["blink", "smooth", "phase", "expand", "solid"],
+  "editor.wordWrap": ["off", "on", "wordWrapColumn", "bounded"], "editor.wrappingIndent": ["none", "same", "indent", "deepIndent"] };
 // editor.inlineSuggest.enabled: absent, the editor turns suggestions on when the provider can run there (Ollama
 // installed); the dialog shows that as on, and Reset to defaults removes the key again.
 const INLINE_ENABLED = "editor.inlineSuggest.enabled";
-const NUMBERS = { "files.autoSaveDelay": [0.1, 3600, false], "editor.tabSize": [1, 16, true] }; // [min, max, integer]
+const NUMBERS = { "files.autoSaveDelay": [0.1, 3600, false], "editor.tabSize": [1, 16, true], "editor.wordWrapColumn": [1, 500, true] }; // [min, max, integer]
 
 // VS Code settings files allow comments and trailing commas (same rule as the editor's highlight.cjs `loose`).
 export const loose = (s) => JSON.parse(s.replace(/^﻿/, "").replace(/("(?:[^"\\]|\\.)*")|\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, (m, str) => str ?? "").replace(/,(\s*[}\]])/g, "$1"));

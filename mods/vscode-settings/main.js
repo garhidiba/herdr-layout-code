@@ -37,6 +37,7 @@ export default class Settings extends View {
     this.inputs = {};
     this.number("files.autoSaveDelay");
     this.number("editor.tabSize");
+    this.number("editor.wordWrapColumn");
     this.page = "settings";
     this.kb = null; this.kbOs = "mac"; this.kbEntries = []; this.kbText = undefined; this.kbError = null; this.query = ""; this.rec = null;
     this.search = InputState.new({ placeholder: "Type to search in keybindings" });
@@ -435,6 +436,12 @@ export default class Settings extends View {
         this.segmented(t, "editor.cursorStyle", [["line", "Line"], ["block", "Block"], ["underline", "Underline"], ["line-thin", "Line Thin"], ["underline-thin", "Underline Thin"], ["block-outline", "Block Outline"]])))
       .child(this.row(t, "Editor", "Cursor Blinking", "Solid keeps the cursor steady; the other styles all blink.",
         this.segmented(t, "editor.cursorBlinking", [["blink", "Blink"], ["smooth", "Smooth"], ["phase", "Phase"], ["expand", "Expand"], ["solid", "Solid"]])))
+      .child(this.row(t, "Editor", "Word Wrap", "Wrap long lines at the window's width (On), at Word Wrap Column, or at the smaller of both (Bounded). ⌥Z / Alt+Z or the status bar item toggles it for one file.",
+        this.segmented(t, "editor.wordWrap", [["off", "Off"], ["on", "On"], ["wordWrapColumn", "Column"], ["bounded", "Bounded"]])))
+      .child(this.row(t, "Editor", "Word Wrap Column", "The column lines wrap at with Word Wrap set to Column or Bounded (1–500).",
+        this.stepper(t, "editor.wordWrapColumn", (v, dir) => v + dir)))
+      .child(this.row(t, "Editor", "Wrapping Indent", "Indentation of wrapped rows: none, the line's own, or one / two levels more.",
+        this.segmented(t, "editor.wrappingIndent", [["none", "None"], ["same", "Same"], ["indent", "Indent"], ["deepIndent", "Deep Indent"]])))
       .child(this.row(t, "Editor", "Inline Suggestions", "Gray ghost text from a code model while you type: Tab accepts, Esc hides, ⌘→ / Ctrl+→ takes a word. The status bar item turns it on and off.",
         this.toggle(t, "editor.inlineSuggest.enabled", "Inline Suggestions")))
       .child(this.row(t, "Editor", "Inline Suggestion Provider", "Ollama runs a model on this machine, free. Codestral (Mistral), DeepSeek and Mercury (Inception) are paid APIs with your key; they get the code around the cursor, 2,000 requests a day by default, and the status bar shows the cost.",
