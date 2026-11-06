@@ -62,6 +62,7 @@
     {"id":"editor.action.nextSelectionMatchFindAction","title":"Find Next Selection","keys":{"mac":["cmd+f3"],"win":["ctrl+f3"],"linux":["ctrl+f3"]}},
     {"id":"editor.action.previousSelectionMatchFindAction","title":"Find Previous Selection","keys":{"mac":["shift+cmd+f3"],"win":["ctrl+shift+f3"],"linux":["ctrl+shift+f3"]}},
     {"id":"workbench.action.gotoSymbol","title":"Go to Symbol in Editor...","keys":{"mac":["shift+cmd+o"],"win":["ctrl+shift+o"],"linux":["ctrl+shift+o"]}},
+    {"id":"workbench.action.showAllSymbols","title":"Go to Symbol in Workspace...","keys":{"mac":["cmd+t"],"win":["ctrl+t"],"linux":["ctrl+t"]}},
     {"id":"editor.action.marker.next","title":"Go to Next Problem (Error, Warning, Info)","keys":{"mac":["f8","alt+f8"],"win":["f8","alt+f8"],"linux":["f8","alt+f8"]},"note":"F8 is VS Code's Go to Next Problem in Files (editor.action.marker.nextInFiles); with one file both keys run this command."},
     {"id":"editor.action.marker.prev","title":"Go to Previous Problem (Error, Warning, Info)","keys":{"mac":["shift+f8","alt+shift+f8"],"win":["shift+f8","alt+shift+f8"],"linux":["shift+f8","alt+shift+f8"]},"note":"Shift+F8 is VS Code's Go to Previous Problem in Files; with one file both keys run this command."},
     {"id":"workbench.action.gotoLine","title":"Go to Line/Column...","keys":{"mac":["ctrl+g"],"win":["ctrl+g"],"linux":["ctrl+g"]}},

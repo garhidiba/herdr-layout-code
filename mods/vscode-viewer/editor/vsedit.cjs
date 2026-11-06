@@ -736,6 +736,7 @@ class Editor {
         detail: item.run === "toggleAutoSave" || item.run === "askAutoSaveDelay" ? S.autoSaveLabel(this.settings) : "", run: () => this.runCommand(item.id) }));
     }
     if (text.startsWith("@")) return this.symbolItems(text.slice(1).trim());
+    if (text.startsWith("#")) return this.workspaceSymbolItems(text.slice(1).trim());
     if (text.startsWith(":")) return [{ label: text.length > 1 ? `Go to line ${text.slice(1)}` : "Type a line number to go to", run: () => this.gotoText(text.slice(1)) }];
     return C.filter(this.projectFiles(), text.trim(), f => f).slice(0, 300)
       .map(({ item, hits }) => ({ label: item, hits, run: () => this.track(this.open(path.join(this.root, item))) }));
@@ -1196,6 +1197,21 @@ class Editor {
     this.hoverKey = key; clearTimeout(this.hoverTimer);
     if (this.hoverBox?.source === "mouse") { this.hoverBox = null; this.hoverToken = (this.hoverToken ?? 0) + 1; this.redraw(); }
     if (w && this.settings["editor.hover.enabled"]) (this.hoverTimer = setTimeout(() => this.showHover(p, "mouse"), HOVER_DELAY)).unref?.();
+  }
+
+  // ----- Go to Symbol in Workspace (⌘T: the quick pick with "#") -----
+  // The language server's symbols for the query, asked once per query; rows refresh when they come.
+  workspaceSymbolItems(query) {
+    let req = this.wsSymbols;
+    if (req?.query !== query || req.root !== this.root) {
+      req = this.wsSymbols = { query, root: this.root, items: null };
+      this.lang.run("workspaceSymbols", "workspaceSymbols", this.langCtx(), query).then(items => { req.items = items; }, (e) => { req.items = []; req.error = e.message; })
+        .finally(() => { if (this.wsSymbols === req && this.popup instanceof O.Picker && this.popup.text.startsWith("#")) { this.popup.refresh(); this.redraw(); } });
+    }
+    if (!req.items) return [{ label: "Searching symbols…", run: () => {} }];
+    if (req.error) return [{ label: req.error, run: () => {} }];
+    return req.items.map(it => ({ label: it.name, hits: C.fuzzy(query, it.name)?.hits ?? [], key: it.kind,
+      detail: [it.container, path.relative(this.root, it.file)].filter(Boolean).join(" · "), run: () => this.jumpTo(it) }));
   }
 
   // ----- folding -----

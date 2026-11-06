@@ -39,7 +39,7 @@ const EMPTY = /no content|could not find|cannot|not found/i;
 
 class TsServer {
   static CAPS = ["definition", "typeDefinition", "implementation", "references", "rename", "format", "refactor", "source", "callHierarchy", "symbols",
-    "quickFix", "hover", "selectionRange", "formatRange"];
+    "quickFix", "hover", "selectionRange", "formatRange", "workspaceSymbols"];
   label = "TypeScript server";
 
   constructor(file, root) {
@@ -137,6 +137,12 @@ class TsServer {
     for (let r = (await this.list("selectionRange", { file: ctx.file, locations: [{ line: ctx.line + 1, offset: ctx.col + 1 }] }))[0]; r; r = r.parent)
       out.push({ start: toPos(r.textSpan.start), end: toPos(r.textSpan.end) });
     return out;
+  }
+  // navto: [{ name, kind, container, file, line, col }]
+  async workspaceSymbols(ctx, query) {
+    if (!query) return [];
+    return (await this.list("navto", { searchValue: query, file: ctx.file, maxResultCount: 256 }))
+      .map(n => ({ name: n.name, kind: n.kind, container: n.containerName ?? "", file: n.file, ...toPos(n.start) }));
   }
   async sourceActions(ctx) {
     const out = [{ title: "Organize Imports", resolve: async () => wsEdit(await this.request("organizeImports", { scope: { type: "file", args: { file: ctx.file } } })) }];

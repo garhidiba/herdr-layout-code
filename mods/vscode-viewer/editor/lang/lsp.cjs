@@ -1,7 +1,7 @@
 // A Language Server Protocol client over stdio (Content-Length framing), full-text sync.
 const { pathToFileURL, fileURLToPath } = require("url");
 const { Child, frame } = require("./rpc.cjs");
-const { fromLsp } = require("../symbols.cjs");
+const { fromLsp, KINDS } = require("../symbols.cjs");
 
 const uri = (file) => pathToFileURL(file).href;
 const fileOf = (u) => { try { return fileURLToPath(u); } catch { return null; } };
@@ -46,15 +46,15 @@ function diagnosticsOf(params) {
 const OPS = { definition: "definitionProvider", typeDefinition: "typeDefinitionProvider", implementation: "implementationProvider",
   references: "referencesProvider", rename: "renameProvider", format: "documentFormattingProvider", refactor: "codeActionProvider",
   source: "codeActionProvider", callHierarchy: "callHierarchyProvider", symbols: "documentSymbolProvider", quickFix: "codeActionProvider",
-  hover: "hoverProvider", selectionRange: "selectionRangeProvider", formatRange: "documentRangeFormattingProvider" };
+  hover: "hoverProvider", selectionRange: "selectionRangeProvider", formatRange: "documentRangeFormattingProvider", workspaceSymbols: "workspaceSymbolProvider" };
 const METHOD_OP = { "textDocument/definition": "definition", "textDocument/typeDefinition": "typeDefinition", "textDocument/implementation": "implementation",
   "textDocument/references": "references", "textDocument/rename": "rename", "textDocument/formatting": "format", "textDocument/codeAction": "refactor",
   "textDocument/prepareCallHierarchy": "callHierarchy", "textDocument/documentSymbol": "symbols", "textDocument/hover": "hover",
-  "textDocument/selectionRange": "selectionRange", "textDocument/rangeFormatting": "formatRange" };
+  "textDocument/selectionRange": "selectionRange", "textDocument/rangeFormatting": "formatRange", "workspace/symbol": "workspaceSymbols" };
 
 const CLIENT_CAPS = {
   general: { positionEncodings: ["utf-16"] },
-  workspace: { applyEdit: true, workspaceEdit: { documentChanges: true }, configuration: true, workspaceFolders: true },
+  workspace: { applyEdit: true, workspaceEdit: { documentChanges: true }, configuration: true, workspaceFolders: true, symbol: {} },
   textDocument: {
     synchronization: { didSave: true }, definition: { linkSupport: true }, typeDefinition: { linkSupport: true },
     implementation: { linkSupport: true }, references: {}, rename: { prepareSupport: false }, formatting: {}, rangeFormatting: {}, callHierarchy: {},
@@ -170,6 +170,13 @@ class Lsp {
     for (let r = (await this.optional("selectionRange", "textDocument/selectionRange", { textDocument: { uri: uri(ctx.file) }, positions: [lspPos(ctx)] }))?.[0]; r; r = r.parent)
       out.push({ start: pos(r.range.start), end: pos(r.range.end) });
     return out;
+  }
+  // SymbolInformation[] | WorkspaceSymbol[] -> [{ name, kind, container, file, line, col }]
+  async workspaceSymbols(ctx, query) {
+    return ((await this.optional("workspaceSymbols", "workspace/symbol", { query })) ?? []).map(s => {
+      const file = fileOf(s.location?.uri);
+      return file && { name: s.name, kind: KINDS[s.kind] ?? "symbol", container: s.containerName ?? "", file, ...pos(s.location.range?.start ?? { line: 0, character: 0 }) };
+    }).filter(Boolean);
   }
   async symbols(ctx) { return fromLsp(await this.call("textDocument/documentSymbol", { textDocument: { uri: uri(ctx.file) } })); }
   async calls(ctx, dir) {

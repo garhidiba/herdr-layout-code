@@ -62,6 +62,7 @@ const RUNS = {
   "editor.action.smartSelect.shrink": ["smartSelect", [-1]],
   "cursorUndo": ["cursorHistory", [-1]],
   "cursorRedo": ["cursorHistory", [1]],
+  "workbench.action.showAllSymbols": ["openPicker", ["#"], "workspaceSymbols"],
   "editor.action.refactor": ["codeActions", ["refactor"], "refactor"],
   "editor.action.sourceAction": ["codeActions", ["source"], "source"],
   "editor.action.clipboardCutAction": ["copy", [true]],

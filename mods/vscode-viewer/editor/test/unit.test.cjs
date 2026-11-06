@@ -1379,3 +1379,30 @@ test("the mouse resting 300 ms on a word shows its hover (editor.hover.enabled),
   assert.equal(S.normalize({ "editor.hover.enabled": 0 })["editor.hover.enabled"], true);
   assert.equal(K.resolve([], "linux").byChord.get("ctrl+k ctrl+i"), "editor.action.showHover");
 });
+
+// ---------- medium batch: Go to Symbol in Workspace ----------
+test("Go to Symbol in Workspace (⌘T) asks the language server for what is typed and opens the chosen symbol", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vsedit-ws-")), other = path.join(dir, "b.txt");
+  fs.writeFileSync(other, "one\n  greet here\n");
+  const ed = await plainEditor(["x"], path.join(dir, "a.txt"));
+  const queries = [];
+  ed.session = stubSession({ workspaceSymbols: async (ctx, q) => { queries.push(q); return [{ name: "greet", kind: "function", container: "Shop", file: other, line: 1, col: 2 }]; } }, ["workspaceSymbols"]);
+  press(ed, "t", { cmd: true });
+  assert.equal(ed.popup.text, "#");
+  ed.handle({ type: "text", text: "gre" });
+  assert.equal(ed.popup.items[0].label, "Searching symbols…");
+  await tick();
+  assert.deepEqual(queries.at(-1), "gre");
+  assert.deepEqual(ed.popup.items.map(i => [i.label, i.detail, i.key]), [["greet", "Shop · b.txt", "function"]]);
+  press(ed, "enter");
+  await tick(); await tick();
+  assert.equal(ed.file, other);
+  assert.deepEqual(ed.head, { line: 1, col: 2 });
+  const plain = await plainEditor(["x"]);
+  plain.session = stubSession({});
+  press(plain, "t", { cmd: true });
+  assert.equal(plain.popup, null);
+  assert.match(plain.message.text, /No go to symbol in workspace support for Plain Text/);
+  assert.equal(K.resolve([], "linux").byChord.get("ctrl+t"), "workbench.action.showAllSymbols");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
