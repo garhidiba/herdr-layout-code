@@ -25,14 +25,27 @@ function onigLib() {
   return onigReady.then(() => ({ createOnigScanner: (s) => new onig.OnigScanner(s), createOnigString: (s) => new onig.OnigString(s) }));
 }
 
-// Resolves { grammar, colorMap, textmate } for a scope; grammar is null when the scope is unknown.
-async function loadGrammar(scope, index = loadIndex(), theme = loadTheme()) {
-  const textmate = require(path.join(VSCODE, "lib/textmate.js"));
+// One registry per (theme, index): it caches each scope's grammar, whose compiled scanners live in oniguruma's WASM
+// memory, which garbage collection never frees. A registry per file grew it ~30 MB a file until it crashed past 2 GB.
+const registries = new WeakMap(); // theme -> index -> Registry
+function registryFor(textmate, index, theme) {
+  let byIndex = registries.get(theme);
+  if (!byIndex) registries.set(theme, (byIndex = new WeakMap()));
+  let registry = byIndex.get(index);
+  if (registry) return registry;
   const rawTheme = { name: theme.name, settings: [{ settings: { foreground: theme.colors["editor.foreground"], background: theme.colors["editor.background"] } }, ...theme.tokenColors] };
-  const registry = new textmate.Registry({
+  registry = new textmate.Registry({
     onigLib: onigLib(), theme: rawTheme,
     loadGrammar: async (s) => { const f = index.scopes[s]; return f ? textmate.parseRawGrammar(fs.readFileSync(path.join(VSCODE, f), "utf8"), f) : null; },
   });
+  byIndex.set(index, registry);
+  return registry;
+}
+
+// Resolves { grammar, colorMap, textmate } for a scope; grammar is null when the scope is unknown.
+async function loadGrammar(scope, index = loadIndex(), theme = loadTheme()) {
+  const textmate = require(path.join(VSCODE, "lib/textmate.js"));
+  const registry = registryFor(textmate, index, theme);
   const grammar = scope && index.scopes[scope] ? await registry.loadGrammar(scope) : null;
   return { grammar, colorMap: registry.getColorMap(), textmate };
 }
