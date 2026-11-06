@@ -51,7 +51,7 @@ Herdr's main layout turned into a VS Code–style workbench: a file explorer wit
 
 ## How it behaves
 
-- **Explorer button / Source Control button** toggle the right panel and pick its page; the choice is remembered per space. `cmd-e` toggles the panel.
+- **Explorer button / Source Control button** toggle the right panel and pick its page; the panel's state is one for all spaces (switching spaces doesn't open or close it). `cmd-e` toggles the panel.
 - **Explorer clicks:** folder = expand/collapse; code/text file = a new terminal tab named after the file running `node <herdr home>/mods/vscode-viewer/editor/vsedit.cjs <file>`, started in the Explorer's root; images (`png jpg jpeg gif webp bmp ico svg tif tiff`), markdown (`md markdown mdx mkd`) and files on a remote machine = a `vscode-viewer` tab; `cmd`+click = `code <file>`.
   - The tree follows the focused terminal's folder. While an editor, viewer or diff tab is focused it keeps the space's last project (the terminal editor tab starts in the Explorer's root, so it doesn't move the tree either); a new space starts at its first terminal's folder, else the space folder. Each project keeps its last tree and git state, so switching back shows it at once and refreshes behind it. It refreshes on file changes, every 10s and after a menu file operation, and lists at most 500 entries per folder and 5,000 in total.
 - **Explorer right-click menu:**
