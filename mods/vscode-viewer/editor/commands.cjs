@@ -55,6 +55,8 @@ const RUNS = {
   "editor.action.rename": ["renameSymbol", [], "rename"],
   "editor.action.changeAll": ["changeAll"],
   "editor.action.formatDocument": ["formatDocument", [], "format"],
+  "editor.action.smartSelect.expand": ["smartSelect", [1]],
+  "editor.action.smartSelect.shrink": ["smartSelect", [-1]],
   "cursorUndo": ["cursorHistory", [-1]],
   "cursorRedo": ["cursorHistory", [1]],
   "editor.action.refactor": ["codeActions", ["refactor"], "refactor"],

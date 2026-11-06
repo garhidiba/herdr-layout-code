@@ -38,7 +38,8 @@ const tsDiagnostics = (list) => (list ?? []).filter(d => d?.start && d.text).map
 const EMPTY = /no content|could not find|cannot|not found/i;
 
 class TsServer {
-  static CAPS = ["definition", "typeDefinition", "implementation", "references", "rename", "format", "refactor", "source", "callHierarchy", "symbols"];
+  static CAPS = ["definition", "typeDefinition", "implementation", "references", "rename", "format", "refactor", "source", "callHierarchy", "symbols",
+    "selectionRange"];
   label = "TypeScript server";
 
   constructor(file, root) {
@@ -108,6 +109,13 @@ class TsServer {
         out.push({ title: a.description, resolve: async () => wsEdit((await this.request("getEditsForRefactor", { ...args, refactor: r.name, action: a.name }))?.edits) });
       }
     }
+    return out;
+  }
+  // Selection ranges at the cursor, innermost first.
+  async selectionRanges(ctx) {
+    const out = [];
+    for (let r = (await this.list("selectionRange", { file: ctx.file, locations: [{ line: ctx.line + 1, offset: ctx.col + 1 }] }))[0]; r; r = r.parent)
+      out.push({ start: toPos(r.textSpan.start), end: toPos(r.textSpan.end) });
     return out;
   }
   async sourceActions(ctx) {

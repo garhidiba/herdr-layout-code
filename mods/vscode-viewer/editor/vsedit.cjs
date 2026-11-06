@@ -35,6 +35,7 @@ const FIND = require("./find.cjs");
 const SYM = require("./symbols.cjs");
 const G = require("./gitgutter.cjs");
 const FD = require("./folding.cjs");
+const SS = require("./smartselect.cjs");
 
 // VS Code's "Col": characters before the cursor, tabs counted to the next tab stop.
 function visibleColumn(line, index, tab) {
@@ -962,6 +963,43 @@ class Editor {
     this.sel = st.sel; this.top = st.top; this.left = st.left; this.goal = null; this.buf.seal();
     h.last = st;
   }
+
+  // ----- Expand / Shrink Selection (smart select) -----
+  // dir 1 grows the selection to the next range around it (the language server's selection ranges with the word,
+  // string, bracket and line ones), -1 goes back to the one before; shrinking a selection that wasn't grown does nothing.
+  smartSelect(dir) {
+    const st = this.smart, [a, b] = this.range(), cur = { start: a, end: b };
+    if (st?.buf === this.buf && st.version === this.buf.version && SS.same(st.chain[st.index], cur)) {
+      const i = st.index + dir;
+      if (i < 0 || i >= st.chain.length) return;
+      st.index = i;
+      this.sel = { anchor: st.chain[i].start, head: st.chain[i].end }; this.buf.seal(); this.reveal();
+      return;
+    }
+    if (dir < 0) return;
+    const buf = this.buf, version = buf.version, sel = this.sel;
+    return this.track(this.selectionRanges().then(ranges => {
+      if (this.buf !== buf || buf.version !== version || this.sel !== sel) return; // the cursor moved meanwhile
+      this.smart = { buf, version, chain: SS.chain(cur, ranges), index: 0 };
+      this.smartSelect(1);
+    }));
+  }
+  async selectionRanges() {
+    const own = SS.fallbackRanges(this.lines, this.head, this.isCode, this.stringAt);
+    if (!this.lang.can("selectionRange")) return own;
+    try { return [...await this.lang.run("selectionRange", "selectionRanges", this.langCtx()), ...own]; } catch { return own; }
+  }
+  // The [from, to) columns of the string token at (line, col), quotes included, or null.
+  stringAt = (line, col) => {
+    this.hl.ensure(line, Date.now() + 20);
+    const tk = this.hl.tokens[line], isString = (k) => H.tokenTypeOf(tk[k + 1]) === 2;
+    if (!tk || col >= this.lines[line].length) return null;
+    let s = H.tokenIndex(tk, col), e = s;
+    if (!isString(s)) return null;
+    while (s >= 2 && isString(s - 2)) s -= 2;
+    while (e + 2 < tk.length && isString(e + 2)) e += 2;
+    return [tk[s], e + 2 < tk.length ? tk[e + 2] : this.lines[line].length];
+  };
 
   // ----- language features -----
   langCtx() {

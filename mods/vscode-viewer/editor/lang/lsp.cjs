@@ -38,10 +38,12 @@ function diagnosticsOf(params) {
 
 const OPS = { definition: "definitionProvider", typeDefinition: "typeDefinitionProvider", implementation: "implementationProvider",
   references: "referencesProvider", rename: "renameProvider", format: "documentFormattingProvider", refactor: "codeActionProvider",
-  source: "codeActionProvider", callHierarchy: "callHierarchyProvider", symbols: "documentSymbolProvider" };
+  source: "codeActionProvider", callHierarchy: "callHierarchyProvider", symbols: "documentSymbolProvider",
+  selectionRange: "selectionRangeProvider" };
 const METHOD_OP = { "textDocument/definition": "definition", "textDocument/typeDefinition": "typeDefinition", "textDocument/implementation": "implementation",
   "textDocument/references": "references", "textDocument/rename": "rename", "textDocument/formatting": "format", "textDocument/codeAction": "refactor",
-  "textDocument/prepareCallHierarchy": "callHierarchy", "textDocument/documentSymbol": "symbols" };
+  "textDocument/prepareCallHierarchy": "callHierarchy", "textDocument/documentSymbol": "symbols",
+  "textDocument/selectionRange": "selectionRange" };
 
 const CLIENT_CAPS = {
   general: { positionEncodings: ["utf-16"] },
@@ -49,6 +51,7 @@ const CLIENT_CAPS = {
   textDocument: {
     synchronization: { didSave: true }, definition: { linkSupport: true }, typeDefinition: { linkSupport: true },
     implementation: { linkSupport: true }, references: {}, rename: { prepareSupport: false }, formatting: {}, callHierarchy: {},
+    selectionRange: {},
     documentSymbol: { hierarchicalDocumentSymbolSupport: true },
     codeAction: { codeActionLiteralSupport: { codeActionKind: { valueSet: ["", "quickfix", "refactor", "refactor.extract", "refactor.inline", "refactor.rewrite", "source", "source.organizeImports", "source.fixAll"] } },
       resolveSupport: { properties: ["edit"] }, dataSupport: true },
@@ -125,6 +128,8 @@ class Lsp {
   async format(ctx) {
     return edits(await this.call("textDocument/formatting", { textDocument: { uri: uri(ctx.file) }, options: { tabSize: ctx.tabSize, insertSpaces: ctx.insertSpaces } }));
   }
+  // Operations a server may lack: null once it says (initialize) it doesn't have `op`, so the editor can fall back.
+  async optional(op, method, params) { await this.ready; return this.can(op) ? this.call(method, params) : null; }
   async actions(ctx, kind) {
     const list = await this.call("textDocument/codeAction", {
       textDocument: { uri: uri(ctx.file) }, range: { start: lspPos(ctx.sel.start), end: lspPos(ctx.sel.end) }, context: { diagnostics: [], only: [kind] },
@@ -142,6 +147,13 @@ class Lsp {
   }
   refactors(ctx) { return this.actions(ctx, "refactor"); }
   sourceActions(ctx) { return this.actions(ctx, "source"); }
+  // Innermost first.
+  async selectionRanges(ctx) {
+    const out = [];
+    for (let r = (await this.optional("selectionRange", "textDocument/selectionRange", { textDocument: { uri: uri(ctx.file) }, positions: [lspPos(ctx)] }))?.[0]; r; r = r.parent)
+      out.push({ start: pos(r.range.start), end: pos(r.range.end) });
+    return out;
+  }
   async symbols(ctx) { return fromLsp(await this.call("textDocument/documentSymbol", { textDocument: { uri: uri(ctx.file) } })); }
   async calls(ctx, dir) {
     const items = await this.call("textDocument/prepareCallHierarchy", this.tdp(ctx)) ?? [];

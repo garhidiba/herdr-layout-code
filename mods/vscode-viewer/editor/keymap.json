@@ -38,6 +38,8 @@
     {"id":"cursorRedo","title":"Cursor Redo","keys":{"mac":[],"win":[],"linux":[]}},
     {"id":"editor.action.selectAll","title":"Select All","keys":{"mac":["cmd+a"],"win":["ctrl+a"],"linux":["ctrl+a"]}},
     {"id":"expandLineSelection","title":"Expand Line Selection","keys":{"mac":["cmd+l"],"win":["ctrl+l"],"linux":["ctrl+l"]}},
+    {"id":"editor.action.smartSelect.expand","title":"Expand Selection","keys":{"mac":["ctrl+shift+cmd+right"],"win":["alt+shift+right"],"linux":["alt+shift+right"]}},
+    {"id":"editor.action.smartSelect.shrink","title":"Shrink Selection","keys":{"mac":["ctrl+shift+cmd+left"],"win":["alt+shift+left"],"linux":["alt+shift+left"]}},
     {"id":"editor.action.commentLine","title":"Toggle Line Comment","keys":{"mac":["cmd+/"],"win":["ctrl+/"],"linux":["ctrl+/"]}},
     {"id":"editor.action.addCommentLine","title":"Add Line Comment","keys":{"mac":["cmd+k cmd+c"],"win":["ctrl+k ctrl+c"],"linux":["ctrl+k ctrl+c"]}},
     {"id":"editor.action.removeCommentLine","title":"Remove Line Comment","keys":{"mac":["cmd+k cmd+u"],"win":["ctrl+k ctrl+u"],"linux":["ctrl+k ctrl+u"]}},

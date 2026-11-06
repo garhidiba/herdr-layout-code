@@ -1196,3 +1196,49 @@ test("Cursor Undo keeps at most 50 states and brings back the scroll position", 
   for (let i = 0; i < 60; i++) { ed.runCommand("cursorUndo"); ed.afterEvent(); }
   assert.equal(ed.head.line, 10, "the oldest of the 50 states (lines 10-59)");
 });
+
+// ---------- medium batch: Expand / Shrink Selection ----------
+// A language session stub: can(op) from `ops`, the provider methods from `impl`.
+const stubSession = (impl, ops = Object.keys(impl), diags = []) => ({ can: (op) => ops.includes(op), provider: (op) => (ops.includes(op) ? impl : null),
+  run: async (op, method, ctx, ...rest) => impl[method](ctx, ...rest), diagnostics: () => diags, symbols: async () => ({ source: "t", items: [] }), touch() {}, saved() {} });
+const SS = require("../smartselect.cjs");
+const rangeOf = (r) => [r.start.line, r.start.col, r.end.line, r.end.col];
+
+test("Expand Selection grows from the word to the string's contents, the string, the brackets' contents, the brackets, the line, the text", async () => {
+  const ed = await jsEditor(['call(a, "hi there");', "x"]);
+  ed.session = stubSession({}); // no language server
+  ed.moveTo({ line: 0, col: 13 });
+  const steps = [];
+  for (let i = 0; i < 8; i++) { await ed.runCommand("editor.action.smartSelect.expand"); steps.push(sel(ed)); }
+  assert.deepEqual(steps, [[0, 12, 0, 17], [0, 9, 0, 17], [0, 8, 0, 18], [0, 5, 0, 18], [0, 4, 0, 19], [0, 0, 0, 20], [0, 0, 1, 1], [0, 0, 1, 1]]);
+  await ed.runCommand("editor.action.smartSelect.shrink");
+  assert.deepEqual(sel(ed), [0, 0, 0, 20]);
+  for (let i = 0; i < 7; i++) await ed.runCommand("editor.action.smartSelect.shrink");
+  assert.deepEqual(sel(ed), [0, 13, 0, 13], "back to where it started");
+  ed.moveTo({ line: 0, col: 1 });
+  await ed.runCommand("editor.action.smartSelect.shrink");
+  assert.deepEqual(sel(ed), [0, 1, 0, 1], "shrinking a selection that wasn't grown does nothing");
+});
+
+test("Expand Selection: a block's lines after its brackets; Alt+Shift+→ / ⌃⇧⌘→ on each OS", async () => {
+  const lines = ["if (x) {", "  y();", "}"], code = () => true;
+  const chain = SS.chain({ start: { line: 1, col: 2 }, end: { line: 1, col: 2 } }, SS.fallbackRanges(lines, { line: 1, col: 2 }, code)).map(rangeOf);
+  assert.deepEqual(chain, [[1, 2, 1, 2], [1, 2, 1, 3], [1, 2, 1, 6], [1, 0, 1, 6], [0, 8, 2, 0], [0, 7, 2, 1], [0, 0, 2, 1]]);
+  assert.equal(K.resolve([], "mac").byChord.get("ctrl+shift+cmd+right"), "editor.action.smartSelect.expand");
+  assert.equal(K.resolve([], "win").byChord.get("alt+shift+left"), "editor.action.smartSelect.shrink");
+  assert.equal(K.resolve([], "linux").byChord.get("alt+shift+right"), "editor.action.smartSelect.expand");
+  assert.equal(keyOf("\x1b[1;14C"), "ctrl+shift+cmd+right");
+});
+
+test("Expand Selection takes the language server's ranges with its own; a failing server leaves its own", async () => {
+  const ed = await plainEditor(["a.b.c"]);
+  let fail = false;
+  ed.session = { can: (op) => op === "selectionRange", diagnostics: () => [], symbols: async () => ({ source: "t", items: [] }),
+    run: async () => { if (fail) throw new Error("server gone"); return [{ start: { line: 0, col: 0 }, end: { line: 0, col: 3 } }]; } };
+  ed.moveTo({ line: 0, col: 2 });
+  for (const want of [[0, 2, 0, 3], [0, 0, 0, 3], [0, 0, 0, 5]]) { await ed.runCommand("editor.action.smartSelect.expand"); assert.deepEqual(sel(ed), want); }
+  fail = true;
+  ed.moveTo({ line: 0, col: 2 });
+  await ed.runCommand("editor.action.smartSelect.expand"); await ed.runCommand("editor.action.smartSelect.expand");
+  assert.deepEqual(sel(ed), [0, 0, 0, 5]);
+});
