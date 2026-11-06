@@ -29,7 +29,7 @@ const key = () => JSON.stringify(location());
 const PER_FOLDER = 500, TOTAL = 5000;
 // Other spaces' trees load in the background: 3s after start, 2 at a time, again every 10 minutes
 // (and when a space appears), skipping ones loaded in the last 2 minutes.
-const CACHE = "vscode-explorer.cache", FRESH = 120000, PRELOAD_EVERY = 600000, SAVE_EVERY = 60000;
+const CACHE = "vscode-explorer.cache", FRESH = 120000, PRELOAD_EVERY = 600000, SAVE_EVERY = 60000, REMOTE_POLL = 3000;
 
 // VS Code's git decoration colors and how severe each state is (a folder shows its worst child).
 const GIT_COLOR = { M: "#e2c08d", A: "#73c991", U: "#73c991", D: "#c74e39", "!": "#e4676b" };
@@ -127,6 +127,8 @@ export default class Files extends View {
       this.refresh(cx);
       if (this.known && spaces().some(s => !this.known.has(s.id))) this.preloadAll(cx);
     });
+    // Remote folders can't be watched (watchFolder is local), so a remote tree polls in its place.
+    cx.timer.every(REMOTE_POLL, cx => { if (this.on) this.refresh(cx); });
     cx.timer.after(3000, cx => this.preloadAll(cx));
     cx.timer.every(PRELOAD_EVERY, cx => this.preloadAll(cx));
   }
