@@ -39,10 +39,10 @@ export default class Settings extends View {
     if (typed !== String(this.v[key])) this.set(key, typed, cx);
   }
 
-  show(values) {
+  show(values, force = false) {
     this.v = values;
     for (const [key, e] of Object.entries(this.inputs))
-      if (!e.focused && e.state.value() !== String(values[key])) e.state.set_value(String(values[key]));
+      if ((force || !e.focused) && e.state.value() !== String(values[key])) e.state.set_value(String(values[key]));
   }
 
   io() {
@@ -69,7 +69,7 @@ export default class Settings extends View {
         cx.timer.after(1500, (cx) => { if (this.saved === token) { this.saved = 0; cx.notify(); } });
       } catch (e) {
         this.error = /Invalid value/.test(e?.message) ? e.message : `Cannot write settings: ${e?.message ?? e}`;
-        this.show(this.v); // put the field back to the last good value
+        this.show(this.v, true); // put the field back to the last good value
       }
       this.writing = false;
       cx.notify();
@@ -99,7 +99,7 @@ export default class Settings extends View {
   }
 
   // ----- controls -----
-  segmented(t, key, options, cx) {
+  segmented(t, key, options) {
     return h_flex().flex_none().p(2).gap(2).rounded(6).bg(t.background).border_1().border_color(t.input).children(options.map(([value, label]) => {
       const on = this.v[key] === value;
       return div().id(`${key}-${value}`).h(24).px(10).flex().items_center().rounded(4).text_size(12).cursor_pointer()
@@ -171,10 +171,10 @@ export default class Settings extends View {
       .child(v_flex().id("body").flex_1().min_h(0).px(18).pb(10).overflow_y_scrollbar()
         .child(this.section(t, "Core engine"))
         .child(this.row(t, "Core", "Engine", "File and git scanning for the explorer and source control. JavaScript works everywhere; Rust is faster but must be built first.",
-          this.segmented(t, "core.engine", [["js", "JavaScript"], ["rust", "Rust"]], cx), this.coreLine(t)))
+          this.segmented(t, "core.engine", [["js", "JavaScript"], ["rust", "Rust"]]), this.coreLine(t)))
         .child(this.section(t, "Files"))
         .child(this.row(t, "Files", "Auto Save", "Save dirty editors automatically.",
-          this.segmented(t, "files.autoSave", [["off", "Off"], ["afterDelay", "After Delay"], ["onFocusChange", "On Focus Change"]], cx)))
+          this.segmented(t, "files.autoSave", [["off", "Off"], ["afterDelay", "After Delay"], ["onFocusChange", "On Focus Change"]])))
         .child(this.row(t, "Files", "Auto Save Delay", "Seconds after the last edit, when Auto Save is After Delay (0.1–3600).",
           this.stepper(t, "files.autoSaveDelay", stepDelay)))
         .child(this.row(t, "Files", "Trim Trailing Whitespace", "Remove trailing whitespace when saving.", this.toggle(t, "files.trimTrailingWhitespace", "Trim Trailing Whitespace")))
