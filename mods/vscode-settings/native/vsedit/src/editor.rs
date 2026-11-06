@@ -2187,7 +2187,7 @@ impl Editor {
             | Act::ContextMenu => self.run_lang(act),
             Act::QuickOpen => self.open_picker(""),
             Act::InlineTrigger => self.inline_trigger(),
-            Act::InlineAccept(word) => self.inline_accept(word),
+            Act::InlineAccept(part) => self.inline_accept(part),
             Act::InlineHide => self.inline_hide(),
             Act::InlineCycle(dir) => self.inline_cycle(dir),
             Act::OpenSettingsJson => self.open_settings_json(),
@@ -2928,11 +2928,11 @@ mod tests {
             ed.after_event();
         }
     }
-    /// The debounced request, as the loop's tick would run it, and its reply.
+    /// The debounced request, as the loop's tick would run it, and its reply (after the lines shown while it streams).
     fn ask(ed: &mut Editor) {
         assert!(ed.inline_deadline().is_some(), "nothing scheduled");
         ed.inline_request(false);
-        ed.wait_jobs(5000);
+        while ed.inline.busy && ed.wait_jobs(5000) {}
     }
 
     #[test]
@@ -2945,28 +2945,37 @@ mod tests {
         ask(&mut ed);
         assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(ed.ghost_view().map(|g| g.2), Some(vec![" a + b;".to_string()]));
-        ed.inline_accept(true);
+        ed.inline_accept(1);
         assert_eq!(text(&ed)[1], "  return a");
         assert_eq!(ed.ghost_view().map(|g| g.2), Some(vec![" + b;".to_string()]));
-        ed.inline_accept(false);
+        ed.inline_accept(0);
         assert_eq!(text(&ed)[1], "  return a + b;");
         assert!(ed.ghost_view().is_none());
     }
 
     #[test]
-    fn inline_suggestions_pause_after_empty_replies_and_stop_at_the_daily_limit() {
+    fn inline_suggestions_drop_prose_pause_after_4n_and_stop_at_the_daily_limit() {
         let _one = inline_lock();
         let (url, count) = fake_ollama("");
-        let mut ed = inline_editor(&[""], json!({ "editor.inlineSuggest.endpoint": url, "editor.inlineSuggest.stopAfter": 2 }));
-        for ch in ["a", "b"] {
+        let mut ed = inline_editor(&[""], json!({ "editor.inlineSuggest.endpoint": url, "editor.inlineSuggest.stopAfter": 1 }));
+        for ch in ["a", "b", "c", "d", "e"] {
             type_in(&mut ed, ch);
             ask(&mut ed);
         }
+        assert_eq!(ed.inline_status().as_deref(), Some("Ollama"), "empty replies don't pause");
+        assert!(ed.inline_usage().contains("the last reply was empty"));
+        let (url, count2) = fake_ollama("This Docker Compose file defines two services: `selenium` and `app`. Here's a breakdown of each service:");
+        let mut ed = inline_editor(&[""], json!({ "editor.inlineSuggest.endpoint": url, "editor.inlineSuggest.stopAfter": 1 }));
+        for ch in ["a", "b", "c", "d"] {
+            type_in(&mut ed, ch);
+            ask(&mut ed);
+            assert!(ed.ghost_view().is_none(), "prose shown");
+        }
         assert_eq!(ed.inline_status().as_deref(), Some("Ollama: paused"));
-        type_in(&mut ed, "c");
+        type_in(&mut ed, "x");
         assert!(ed.inline_deadline().is_none(), "a paused provider is not asked");
-        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 2);
-        assert!(ed.inline_usage().contains("2 empty or repeated replies in a row"));
+        assert_eq!((count.load(std::sync::atomic::Ordering::SeqCst), count2.load(std::sync::atomic::Ordering::SeqCst)), (5, 4));
+        assert!(ed.inline_usage().contains("4 replies in a row were dropped (the last: it was prose, not code)"));
 
         let (url, count) = fake_ollama("1");
         let mut ed = inline_editor(&[""], json!({ "editor.inlineSuggest.endpoint": url, "editor.inlineSuggest.dailyRequestLimit": 1 }));
@@ -2999,6 +3008,39 @@ mod tests {
         env.inline_trigger();
         assert!(env.message.as_ref().unwrap().text.contains("No inline suggestions for this file"));
         assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn inline_blocks_are_cut_fences_stripped_and_taken_a_line_at_a_time() {
+        let _one = inline_lock();
+        let strings = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let (url, _) = fake_ollama("if (a) {\n    go();\n  }\n  stop();\n  stop();");
+        let mut ed = inline_editor(&["function f() {", "  ", "}"], json!({ "editor.inlineSuggest.endpoint": url }));
+        ed.move_to(pos(1, 2), false);
+        ed.after_event();
+        type_in(&mut ed, "x");
+        ed.inline.editing = true;
+        ed.backspace(false);
+        ed.after_event();
+        ask(&mut ed);
+        assert_eq!(ed.ghost_view().map(|g| g.2), Some(strings(&["if (a) {", "    go();", "  }"])));
+        ed.inline_accept(2);
+        assert_eq!(text(&ed)[1], "  if (a) {");
+        assert_eq!(ed.ghost_view().map(|g| g.2), Some(strings(&["", "    go();", "  }"])));
+        ed.inline_accept(0);
+        assert_eq!(text(&ed), ["function f() {", "  if (a) {", "    go();", "  }", "}"]);
+        let (url, _) = fake_ollama("```js\nuit();\n```");
+        let mut ed = inline_editor(&[""], json!({ "editor.inlineSuggest.endpoint": url }));
+        type_in(&mut ed, "q");
+        ask(&mut ed);
+        assert_eq!(ed.ghost_view().map(|g| g.2), Some(strings(&["uit();"])));
+        // a blank line after blank lines at the end: nothing after typing, Alt+\ still asks
+        let mut ed = inline_editor(&["a: 1", "", ""], json!({ "editor.inlineSuggest.endpoint": url }));
+        type_in(&mut ed, " ");
+        assert!(ed.inline_deadline().is_none());
+        ed.inline_trigger();
+        while ed.inline.busy && ed.wait_jobs(5000) {}
+        assert!(ed.ghost_view().is_some());
     }
 
     #[test]

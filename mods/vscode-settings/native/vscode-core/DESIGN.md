@@ -493,8 +493,13 @@ palette, Go to Definition and Go to Symbol through the fallback, Expand / Shrink
   settings and their defaults, the deny list (globs on the file name, or on the path for a pattern with `/`), VS Code's
   position rule (the rest of the line blank or closers), the context (whole lines before the cursor up to
   `prefixChars`, so the prompt's start doesn't move while typing; `suffixChars` after it), typing through a suggestion,
-  Accept Next Word, reply cleaning (FIM tokens, repeated prefix / suffix, one-line mode with the next-line case), the
-  pause rule (`Health`), the Ollama request and reply, and the usage file. Unit tests on both sides check the same cases.
+  Accept Next Word / Line, reply cleaning (FIM tokens, Markdown fences, prose, repeated prefix / suffix, the end of a
+  block (`blockCut` / `block_cut`), one-line mode with the next-line case), the trigger rule (`quietEnd`), the pause rule
+  (`Health`), the FIM templates per model family, the Ollama request (raw FIM, streamed) and reply, the model probe
+  (`/api/show`), and the usage file. Unit tests on both sides check the same cases.
+- **Streaming:** JS reads the NDJSON body chunk by chunk; Rust reads curl's unbuffered stdout line by line on the request
+  thread and sends each grown suggestion as a job (`ls.jobs`). Both stop reading (abort / kill curl) when the block ends
+  or the text turns into prose.
 - **Never on the input path.** A keystroke only moves a deadline (`inline.due`, part of `Editor::deadline`); the loop's
   tick sends the request on a thread (`Editor::spawn`, like the language layer) and the reply comes back as a job, dropped
   when its generation, the text version or the cursor changed. JS: `fetch` with an `AbortController`.
@@ -525,3 +530,23 @@ one-line suggestion needs. The first request at a new place (opening a
 file, jumping) pays the whole prompt. Lowering `editor.inlineSuggest.suffixChars` is the main lever on this machine.
 The editor adds nothing measurable per keystroke (a timer reset); a reply of 64 tokens adds ~3 s of generation, which
 the one-line stop (`"\n"`) usually avoids.
+
+### Models, FIM prompts and blocks (measured 2026-11-07, this Mac: M1 Max 32 GB, Ollama 0.40, 100% GPU)
+
+Seven positions (`docker-compose.yml` at its end after a blank line and inside a service, a `Dockerfile` at its end, a TS
+statement and a function body, a Python function under its docstring, a shell `for` body), each asked twice (cold, warm),
+streamed and cut by `blockCut` as the editor does; ms = warm first line / whole block.
+
+| model | prompt | compose end | Dockerfile end | TS `const sum = ` | TS function body | Python body | shell loop |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| qwen2.5-coder:7b (instruct) | Ollama `suffix` | `` ```yaml `` | `` ```dockerfile `` | `xs.reduce(…)` 0.5 s | 6 lines, 2.3 s | 2 lines, 0.6 s | runaway `-lffi` line, 9 s |
+| qwen2.5-coder:7b (instruct) | raw FIM | prose ("This `docker-compose.yml` file defines…"), 3 s | `CMD [...]` 0.5 s | same 0.5 s | 6 lines, 2.4 s | 0.8 s | runaway, >20 s |
+| qwen2.5-coder:7b-base | raw FIM | `volumes:` 0.3 s | `EXPOSE`+`CMD` 0.3/1.7 s | 0.6 s | 3 lines, 0.5/2.1 s (one 5.2 s) | 2 lines, 0.7/1.3 s | 1 line, 0.3 s (one 10.8 s: a long line) |
+| qwen2.5-coder:1.5b-base | raw FIM | `networks:` 0.1 s | `CMD [...]` 0.2 s | 0.1 s | 3 lines, 0.15/0.6 s | 1 line, 0.1–0.75 s | 1 line, 0.14 s |
+
+The bug users saw: Ollama's `suffix` with an empty text after the cursor (the end of a file) takes the model template's
+`else` branch, the chat template, so the instruct model answered in Markdown and prose. Raw FIM (the editor writes the
+tokens) keeps the completion form everywhere; a base model never chats. 1.5b-base is the default: 3–5× faster than
+7b-base on every position with code of the same kind (both complete the same statements; 7b picks richer values, e.g.
+`postgres:13.2-alpine`). A file path (`<|file_sep|>path`) before the prompt changed nothing measurable, so none is sent.
+

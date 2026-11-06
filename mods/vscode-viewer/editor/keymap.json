@@ -23,6 +23,7 @@
     {"id":"editor.action.inlineSuggest.trigger","title":"Trigger Inline Suggestion","keys":{"mac":["alt+\\"],"win":["alt+\\"],"linux":["alt+\\"]}},
     {"id":"editor.action.inlineSuggest.commit","title":"Accept Inline Suggestion","when":"inlineSuggestionVisible","keys":{"mac":["tab"],"win":["tab"],"linux":["tab"]}},
     {"id":"editor.action.inlineSuggest.acceptNextWord","title":"Accept Next Word Of Inline Suggestion","when":"inlineSuggestionVisible","keys":{"mac":["cmd+right"],"win":["ctrl+right"],"linux":["ctrl+right"]}},
+    {"id":"editor.action.inlineSuggest.acceptNextLine","title":"Accept Next Line Of Inline Suggestion","when":"inlineSuggestionVisible","keys":{"mac":[],"win":[],"linux":[]}},
     {"id":"editor.action.inlineSuggest.hide","title":"Hide Inline Suggestion","when":"inlineSuggestionVisible","keys":{"mac":["escape"],"win":["escape"],"linux":["escape"]}},
     {"id":"editor.action.inlineSuggest.showNext","title":"Show Next Inline Suggestion","when":"inlineSuggestionVisible","keys":{"mac":["alt+]"],"win":["alt+]"],"linux":["alt+]"]}},
     {"id":"editor.action.inlineSuggest.showPrevious","title":"Show Previous Inline Suggestion","when":"inlineSuggestionVisible","keys":{"mac":["alt+["],"win":["alt+["],"linux":["alt+["]}},

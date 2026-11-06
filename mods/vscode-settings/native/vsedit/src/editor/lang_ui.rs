@@ -145,7 +145,7 @@ struct ChangeAll {
 
 /// The editor's language state.
 pub struct LangState {
-    jobs: (Sender<Job>, Receiver<Job>),
+    pub(super) jobs: (Sender<Job>, Receiver<Job>),
     pub panel: Option<Panel>,
     /// Call hierarchy's panel: the ctx and direction, for Tab.
     calls: Option<(Ctx, &'static str)>,

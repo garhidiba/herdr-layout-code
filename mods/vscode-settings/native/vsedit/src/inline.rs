@@ -4,12 +4,14 @@
 //! usage file (requests, approximate tokens, latency). The editor (editor/inline_ui.rs) owns timers, keys and drawing.
 
 use serde_json::{json, Map, Value};
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 pub const PROVIDERS: &[&str] = &["ollama", "off"];
+/// Ollama's default model: a base (FIM) model; 1.5B answers in ~0.1–0.6 s here, 7B in 0.3–2.5 s (DESIGN.md).
+pub const OLLAMA_MODEL: &str = "qwen2.5-coder:1.5b-base";
 /// No suggestions in bigger files (characters).
 pub const MAX_FILE_CHARS: usize = 1_000_000;
 const TIMEOUT_S: u32 = 20;
@@ -55,9 +57,9 @@ impl Default for InlineSettings {
             model: String::new(),
             endpoint: String::new(),
             manual: false,
-            multiline: false,
+            multiline: true,
             debounce: 250,
-            max_tokens: 64,
+            max_tokens: 256,
             prefix_chars: 4000,
             suffix_chars: 300,
             stop_after: 5,
@@ -82,7 +84,7 @@ pub fn normalize(raw: &Value) -> InlineSettings {
         v.keep_alive = k;
     }
     v.manual = get("trigger").as_str() == Some("manual");
-    v.multiline = get("multiline").as_bool().unwrap_or(false);
+    v.multiline = get("multiline").as_bool().unwrap_or(true);
     let num = |k: &str, lo: f64, hi: f64| get(k).as_f64().filter(|n| n.is_finite()).map(|n| n.clamp(lo, hi).round());
     if let Some(n) = num("debounce", 0.0, 5000.0) {
         v.debounce = n as u64;
@@ -134,7 +136,7 @@ pub struct Config {
 pub fn config(s: &InlineSettings, usable: impl Fn(&Config) -> bool) -> Config {
     let p = s.provider.as_str();
     let (label, model, endpoint) = match p {
-        "ollama" => ("Ollama", "qwen2.5-coder:7b", "http://127.0.0.1:11434"),
+        "ollama" => ("Ollama", OLLAMA_MODEL, "http://127.0.0.1:11434"),
         _ => ("Inline Suggestions", "", ""),
     };
     let model = if s.model.is_empty() { model.to_string() } else { s.model.clone() };
@@ -201,11 +203,19 @@ pub fn at_suggestable(line: &str, col: usize) -> bool {
     line[col.min(line.len())..].chars().all(|c| c.is_whitespace() || ")]}>\"'`;,.:".contains(c))
 }
 
+/// A blank line after a blank line with nothing below it: no suggestion after typing there (Alt+\ still asks).
+pub fn quiet_end(lines: &[String], line: usize) -> bool {
+    line > 0 && lines[line - 1].trim().is_empty() && lines[line..].iter().all(|l| l.trim().is_empty())
+}
+
 /// The text around the cursor (`col` a byte offset) within the character caps. The prefix starts at a line start (only
 /// the cursor line itself is ever cut), so typing on doesn't shift its start and Ollama's prompt cache keeps it.
+#[derive(Clone, Default)]
 pub struct Context {
     pub prefix: String,
     pub suffix: String,
+    /// A prose or markup file (prose_file): sentences and Markdown fences stay.
+    pub prose: bool,
     /// The cursor ends a finished statement (`;` `{` `}` `)` `,` `:` before it, nothing after): a one-line suggestion
     /// may be the next line.
     pub next_line: bool,
@@ -229,7 +239,7 @@ pub fn context_at(lines: &[String], line: usize, col: usize, prefix_chars: usize
     }
     let n = prefix.chars().count();
     let prefix: String = prefix.chars().skip(n.saturating_sub(prefix_chars)).collect();
-    Context { prefix, suffix: suffix.chars().take(suffix_chars).collect(), next_line }
+    Context { prefix, suffix: suffix.chars().take(suffix_chars).collect(), next_line, prose: false }
 }
 
 // ---------- the ghost text ----------
@@ -263,6 +273,12 @@ pub fn next_word_len(text: &str) -> usize {
     }
 }
 
+/// Bytes of `text` Accept Next Line takes: up to its next line break (a leading one with the line after it).
+pub fn next_line_len(text: &str) -> usize {
+    let from = usize::from(text.starts_with('\n'));
+    text[from..].find('\n').map_or(text.len(), |i| from + i)
+}
+
 /// The suggestion less the end of the line it would repeat (`)` an auto-closed pair already put after the cursor).
 pub fn trim_line_suffix(text: &str, line_suffix: &str) -> String {
     let s = line_suffix.trim_end();
@@ -275,9 +291,120 @@ pub fn trim_line_suffix(text: &str, line_suffix: &str) -> String {
     if text.contains('\n') { format!("{head}\n{last}") } else { last.to_string() }
 }
 
+/// Prose and markup files, where sentences and Markdown fences are what the user writes.
+pub fn prose_file(file: &Path) -> bool {
+    let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default();
+    name == "COMMIT_EDITMSG" || ["md", "markdown", "mdx", "txt", "text", "rst", "adoc", "asciidoc", "org", "tex", "html", "htm", "xml"].contains(&ext.as_str())
+}
+
+/// How a chat model's answer starts ("Here's …", "This file defines …"), matched case-insensitively up to a word end.
+const PROSE: &[&str] = &[
+    "here's", "here is", "here are", "this file", "this code", "this script", "this docker", "this compose", "this function", "this config", "this configuration", "this is",
+    "this will", "this define", "this defines", "the following", "the above", "the code", "the file", "sure", "certainly", "i'm", "i'll", "i am", "i will", "i have",
+    "let's", "note:", "explanation:",
+];
+
+/// A chat model's answer instead of code: a PROSE start, or a sentence: a capitalized word and 3+ more words (no code
+/// characters) up to one ending in . : ! or ?.
+fn prose(line: &str) -> bool {
+    let low = line.to_lowercase();
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    if PROSE.iter().any(|p| low.starts_with(p) && (p.ends_with(':') || !low[p.len()..].starts_with(word))) {
+        return true;
+    }
+    let words: Vec<&str> = line.split(' ').filter(|w| !w.is_empty()).collect();
+    let Some(k) = words.iter().position(|w| w.ends_with(['.', ':', '!', '?'])) else { return false };
+    let first = words[0].as_bytes();
+    k >= 3
+        && first[0].is_ascii_uppercase()
+        && first.len() > 1
+        && first[1..].iter().all(u8::is_ascii_lowercase)
+        && words[..=k].iter().all(|w| w.chars().any(|c| c.is_ascii_alphabetic()) && !w.contains(['=', ';', '{', '}', '(', ')', '<', '>', '$', '[', ']']))
+}
+
+/// The cursor is in a comment or a string (a sentence may belong there): the line starts a comment, a quote on it is
+/// open, or a Python docstring is.
+fn in_text(prefix: &str) -> bool {
+    let line = prefix.rsplit('\n').next().unwrap_or("");
+    let t = line.trim_start();
+    ["#", "//", "/*", "*", "--", "<!--"].iter().any(|m| t.starts_with(m))
+        || ['"', '\'', '`'].iter().any(|q| line.matches(*q).count() % 2 == 1)
+        || ["\"\"\"", "'''"].iter().any(|q| prefix.matches(q).count() % 2 == 1)
+}
+
+/// Bytes of a leading Markdown fence line (```` ```lang ````, its line break too), 0 when the text has none.
+fn leading_fence(text: &str) -> usize {
+    let t = text.trim_start();
+    let Some(rest) = t.strip_prefix("```") else { return 0 };
+    let lang = rest.find(|c: char| !(c.is_ascii_alphanumeric() || "_+.#-".contains(c))).unwrap_or(rest.len());
+    let after = rest[lang..].trim_start_matches([' ', '\t']);
+    let n = text.len() - after.len();
+    if after.is_empty() {
+        n
+    } else if after.starts_with('\n') {
+        n + 1
+    } else {
+        0
+    }
+}
+
+/// Where a block suggestion ends (VS Code / Copilot's rules), over the lines complete so far (all when `last`): before a
+/// line less indented than the block's first line, before one closing a bracket opened before the cursor, after the line
+/// closing a bracket the first line opened, before two blank lines, before the line the text after the cursor goes on
+/// with. At the end of the file a closing line (`}`) ends the block with it. -> (text, a rule cut it)
+pub fn block_cut(text: &str, ctx: &Context, last: bool) -> (String, bool) {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let n = if last { lines.len() } else { lines.len() - 1 };
+    let lead = ctx.prefix.rsplit('\n').next().unwrap_or("");
+    let next = ctx.suffix.split('\n').map(str::trim).find(|l| !l.is_empty());
+    let indent = |l: &str| l.len() - l.trim_start_matches([' ', '\t']).len();
+    let up_to = |k: usize| (lines[..k].join("\n").trim_end().to_string(), true);
+    let (mut base, mut depth, mut opener, mut blanks) = (None, 0i32, false, 0);
+    for (i, line) in lines[..n].iter().enumerate() {
+        let t = line.trim();
+        if t.is_empty() {
+            blanks += 1;
+            if i > 0 && blanks == 2 {
+                return up_to(i - 1);
+            }
+            continue;
+        }
+        blanks = 0;
+        let before = depth;
+        let mut low = depth;
+        for c in line.chars() {
+            if "([{".contains(c) {
+                depth += 1;
+            } else if ")]}".contains(c) {
+                depth -= 1;
+                low = low.min(depth);
+            }
+        }
+        let Some(b) = base else {
+            base = Some(indent(&if i == 0 { format!("{lead}{line}") } else { line.to_string() }));
+            depth = depth.max(0);
+            opener = depth > 0;
+            continue;
+        };
+        if indent(line) < b || low < 0 {
+            return up_to(if ctx.suffix.trim().is_empty() && t.starts_with([')', ']', '}']) { i + 1 } else { i });
+        }
+        if opener && before > 0 && depth == 0 {
+            return up_to(i + 1);
+        }
+        if before == 0 && Some(t) == next {
+            return up_to(i);
+        }
+    }
+    (lines[..n].join("\n"), false)
+}
+
 /// A provider's raw text -> (text, anomaly): None when nothing is left; anomaly "fim" (template tokens: pause now),
-/// "echo" (the text before or after the cursor repeated) or "empty". Cuts what follows a FIM token, a repeat of the
-/// text after the cursor, and (one-line mode) the first line break — after the next line's text when `next_line`.
+/// "prose" (sentences, not code), "fence" (a Markdown fence alone), "echo" (the text before or after the cursor repeated)
+/// or "empty". Cuts what follows a FIM token, Markdown fences (a leading one with its language), a repeat of the text
+/// after the cursor, and the end of a block (block_cut) or, in one-line mode, the first line break — after the next
+/// line's text when `next_line`. Prose files keep sentences and fences.
 pub fn clean(raw: &str, ctx: &Context, multiline: bool) -> (Option<String>, Option<&'static str>) {
     let (prefix, suffix) = (ctx.prefix.as_str(), ctx.suffix.as_str());
     let mut text = raw.replace("\r\n", "\n").replace('\r', "\n");
@@ -286,10 +413,31 @@ pub fn clean(raw: &str, ctx: &Context, multiline: bool) -> (Option<String>, Opti
         text.truncate(i);
         anomaly = Some("fim");
     }
+    if !ctx.prose {
+        let fence = leading_fence(&text);
+        text.drain(..fence);
+        let mut at = 0;
+        let end = text.split('\n').find_map(|l| {
+            let found = l.trim_start_matches([' ', '\t']).starts_with("```").then_some(at);
+            at += l.len() + 1;
+            found
+        });
+        if let Some(e) = end {
+            text.truncate(e);
+        }
+        if (fence > 0 || end.is_some()) && text.trim().is_empty() {
+            return (None, Some("fence"));
+        }
+        if !in_text(prefix) && prose(text.trim().split('\n').next().unwrap_or("")) {
+            return (None, Some("prose"));
+        }
+    }
     if !multiline {
         let next = ctx.next_line && text.starts_with('\n');
         let rest = text.trim_start_matches('\n');
         text = if next { format!("\n{}", rest.split('\n').next().unwrap_or("")) } else { text.split('\n').next().unwrap_or("").to_string() };
+    } else {
+        text = block_cut(&text, ctx, true).0;
     }
     let tail = prefix.rsplit('\n').next().unwrap_or("").trim();
     if tail.chars().count() >= 4 && text.trim_start().starts_with(tail) {
@@ -297,7 +445,8 @@ pub fn clean(raw: &str, ctx: &Context, multiline: bool) -> (Option<String>, Opti
         anomaly = anomaly.or(Some("echo"));
     }
     // the text after the cursor written again: a run of its first lines (4 characters at least) from a line of the reply
-    let after: Vec<&str> = suffix.split('\n').map(str::trim).filter(|l| !l.is_empty()).take(3).collect();
+    // (blocks: block_cut stops at it)
+    let after: Vec<&str> = if multiline { vec![] } else { suffix.split('\n').map(str::trim).filter(|l| !l.is_empty()).take(3).collect() };
     let lines: Vec<&str> = text.split('\n').collect();
     for k in 0..lines.len() {
         let (mut j, mut n) = (0, 0);
@@ -314,38 +463,64 @@ pub fn clean(raw: &str, ctx: &Context, multiline: bool) -> (Option<String>, Opti
         }
     }
     let text = trim_line_suffix(text.trim_end(), suffix.split('\n').next().unwrap_or(""));
+    if !text.trim().is_empty() && suffix.trim_start().starts_with(text.trim()) {
+        return (None, Some("echo")); // only the text after the cursor
+    }
     if text.trim().is_empty() {
         return (None, Some(anomaly.unwrap_or("empty")));
     }
     (Some(text), anomaly)
 }
 
-/// Pauses a provider that keeps misbehaving: FIM tokens at once, `limit` empty/repeated replies or errors in a row.
+/// Why a reply was dropped, for the status bar's tooltip.
+fn dropped(anomaly: &str) -> Option<&'static str> {
+    match anomaly {
+        "echo" => Some("it repeated the text around the cursor"),
+        "prose" => Some("it was prose, not code"),
+        "fence" => Some("it was a Markdown code fence"),
+        _ => None,
+    }
+}
+
+/// Pauses a provider that keeps misbehaving: FIM tokens at once, `limit` errors in a row, 4 × `limit` dropped replies
+/// (prose, fences, repeats) in a row. An empty reply (nothing fits there) counts for nothing. `note`: what happened last.
 pub struct Health {
     limit: u32,
-    bad: u32,
+    errors: u32,
+    dropped: u32,
     pub paused: Option<String>,
+    pub note: Option<String>,
 }
 
 impl Health {
     pub fn new(limit: u32) -> Health {
-        Health { limit, bad: 0, paused: None }
+        Health { limit, errors: 0, dropped: 0, paused: None, note: None }
     }
     pub fn record(&mut self, anomaly: Option<&str>, error: Option<&str>) -> Option<String> {
         if anomaly == Some("fim") {
             self.paused = Some("the reply had FIM template tokens (wrong model or template?)".into());
             return self.paused.clone();
         }
-        if anomaly.is_none() && error.is_none() {
-            self.bad = 0;
-            return None;
+        if let Some(e) = error {
+            self.note = Some(e.to_string());
+            self.errors += 1;
+            if self.errors >= self.limit {
+                self.paused = Some(format!("{} errors in a row: {e}", self.errors));
+            }
+            return self.paused.clone();
         }
-        self.bad += 1;
-        if self.bad >= self.limit {
-            self.paused = Some(match error {
-                Some(e) => format!("{} errors in a row: {e}", self.bad),
-                None => format!("{} empty or repeated replies in a row", self.bad),
-            });
+        self.errors = 0;
+        let Some(why) = anomaly.and_then(dropped) else {
+            self.note = (anomaly == Some("empty")).then(|| "the last reply was empty (nothing to suggest there)".to_string());
+            if anomaly.is_none() {
+                self.dropped = 0;
+            }
+            return None;
+        };
+        self.note = Some(format!("the last reply was dropped: {why}"));
+        self.dropped += 1;
+        if self.dropped >= self.limit * 4 {
+            self.paused = Some(format!("{} replies in a row were dropped (the last: {why}); a base model does better", self.dropped));
         }
         self.paused.clone()
     }
@@ -359,26 +534,134 @@ pub struct Request {
     pub body: Value,
 }
 
-/// The HTTP request for a suggestion.
-pub fn request(cfg: &Config, ctx: &Context) -> Request {
-    let mut options = json!({ "num_predict": cfg.max_tokens, "temperature": 0.2 });
+/// A FIM prompt template, sent raw (Ollama's `suffix` falls back to the chat template when the text after the cursor is
+/// empty, and a chat model answers in prose there). spm: the suffix goes first.
+pub struct Template {
+    spm: bool,
+    pre: &'static str,
+    mid: &'static str,
+    end: &'static str,
+    stop: &'static [&'static str],
+}
+
+const QWEN: Template = Template {
+    spm: false,
+    pre: "<|fim_prefix|>",
+    mid: "<|fim_suffix|>",
+    end: "<|fim_middle|>",
+    stop: &["<|endoftext|>", "<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>", "<|fim_pad|>", "<|file_sep|>", "<|repo_name|>", "<|im_start|>", "<|im_end|>", "<|cursor|>"],
+};
+const CODESTRAL: Template = Template { spm: true, pre: "[SUFFIX]", mid: "[PREFIX] ", end: "", stop: &["[INST]", "[/INST]", "[PREFIX]", "[SUFFIX]", "[MIDDLE]", "</s>"] };
+const DEEPSEEK: Template = Template {
+    spm: false,
+    pre: "<｜fim▁begin｜>",
+    mid: "<｜fim▁hole｜>",
+    end: "<｜fim▁end｜>",
+    stop: &["<｜fim▁begin｜>", "<｜fim▁hole｜>", "<｜fim▁end｜>", "<｜end▁of▁sentence｜>", "<|EOT|>"],
+};
+const STARCODER: Template = Template { spm: false, pre: "<fim_prefix>", mid: "<fim_suffix>", end: "<fim_middle>", stop: &["<fim_prefix>", "<fim_suffix>", "<fim_middle>", "<|endoftext|>", "<file_sep>"] };
+
+/// The FIM template of a model's family (Qwen coder, Codestral, DeepSeek Coder, StarCoder); None: Ollama's `suffix`.
+pub fn template(model: &str) -> Option<&'static Template> {
+    let m = model.to_lowercase();
+    let qwen = m.contains("codeqwen")
+        || m.match_indices("qwen").any(|(i, _)| {
+            let r = m[i + 4..].trim_start_matches(|c: char| c.is_ascii_digit() || c == '.');
+            r.strip_prefix('-').unwrap_or(r).starts_with("coder")
+        });
+    if qwen {
+        Some(&QWEN)
+    } else if m.contains("codestral") {
+        Some(&CODESTRAL)
+    } else if m.contains("deepseek-coder") {
+        Some(&DEEPSEEK)
+    } else if m.contains("starcoder") {
+        Some(&STARCODER)
+    } else {
+        None
+    }
+}
+
+fn fim_prompt(t: &Template, prefix: &str, suffix: &str) -> String {
+    let (a, b) = if t.spm { (suffix, prefix) } else { (prefix, suffix) };
+    format!("{}{a}{}{b}{}", t.pre, t.mid, t.end)
+}
+
+fn json_headers() -> Vec<(String, String)> {
+    vec![("Content-Type".into(), "application/json".into())]
+}
+
+/// The HTTP request for a suggestion (stream: Ollama's NDJSON lines, read by post_stream).
+pub fn request(cfg: &Config, ctx: &Context, stream: bool) -> Request {
+    let t = template(&cfg.model);
+    let mut stop: Vec<&str> = t.map_or(vec![], |t| t.stop.to_vec());
     if !cfg.multiline && !ctx.next_line {
-        options["stop"] = json!(["\n"]);
+        stop.push("\n");
     }
-    Request {
-        url: format!("{}/api/generate", cfg.endpoint),
-        headers: vec![("Content-Type".into(), "application/json".into())],
-        body: json!({ "model": cfg.model, "prompt": ctx.prefix, "suffix": ctx.suffix, "stream": false, "keep_alive": cfg.keep_alive, "options": options }),
+    let mut options = json!({ "num_predict": cfg.max_tokens, "temperature": 0.2 });
+    if !stop.is_empty() {
+        options["stop"] = json!(stop);
     }
+    let mut body = json!({ "model": cfg.model, "stream": stream, "keep_alive": cfg.keep_alive, "options": options });
+    match t {
+        Some(t) => {
+            body["prompt"] = json!(fim_prompt(t, &ctx.prefix, &ctx.suffix));
+            body["raw"] = json!(true);
+        }
+        None => {
+            body["prompt"] = json!(ctx.prefix);
+            body["suffix"] = json!(ctx.suffix);
+        }
+    }
+    Request { url: format!("{}/api/generate", cfg.endpoint), headers: json_headers(), body }
 }
 
 /// Loads the model ahead of the first suggestion (Ollama keeps it keepAlive); None when the provider needs none.
 pub fn warmup(cfg: &Config) -> Option<Request> {
     (cfg.provider == "ollama").then(|| Request {
         url: format!("{}/api/generate", cfg.endpoint),
-        headers: vec![("Content-Type".into(), "application/json".into())],
+        headers: json_headers(),
         body: json!({ "model": cfg.model, "prompt": "", "stream": false, "keep_alive": cfg.keep_alive, "options": { "num_predict": 1 } }),
     })
+}
+
+/// Asks Ollama about the model (/api/show), before the warm-up; None when the provider has nothing to ask.
+pub fn show(cfg: &Config) -> Option<Request> {
+    (cfg.provider == "ollama").then(|| Request { url: format!("{}/api/show", cfg.endpoint), headers: json_headers(), body: json!({ "model": cfg.model }) })
+}
+
+/// What Ollama said about the model: not pulled, or a chat template (.Messages).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ModelInfo {
+    pub missing: bool,
+    pub chat: bool,
+}
+
+/// show's reply -> the model's info, None when the server didn't say.
+pub fn model_info(status: u16, json: &Value) -> Option<ModelInfo> {
+    if status == 404 || json["error"].as_str().is_some_and(|e| e.to_lowercase().contains("not found")) {
+        return Some(ModelInfo { missing: true, chat: false });
+    }
+    let template = json["template"].as_str().filter(|_| status < 400)?;
+    Some(ModelInfo { missing: false, chat: template.contains(".Messages") })
+}
+
+/// Whether to recommend a base model: the template says chat, or (Ollama said nothing) the name has no "base". `info`:
+/// None before the model was asked about.
+pub fn chat_model(cfg: &Config, info: Option<&Option<ModelInfo>>) -> bool {
+    match info {
+        None => false,
+        Some(Some(i)) => i.chat,
+        Some(None) => !cfg.model.to_lowercase().contains("base"),
+    }
+}
+
+pub fn missing_text(cfg: &Config) -> String {
+    format!("{}: model {} not found (run: ollama pull {})", cfg.label, cfg.model, cfg.model)
+}
+
+pub fn chat_hint(cfg: &Config) -> String {
+    format!("{} is a chat model and often answers in prose; a base model completes code (ollama pull {OLLAMA_MODEL}, then set editor.inlineSuggest.model)", cfg.model)
 }
 
 /// A reply (status, parsed JSON) -> the suggestion texts, or a message for the status bar.
@@ -386,7 +669,7 @@ pub fn reply(cfg: &Config, status: u16, json: &Value) -> Result<Vec<String>, Str
     let err = json["error"]["message"].as_str().or(json["error"].as_str());
     if status >= 400 || err.is_some() {
         if cfg.provider == "ollama" && err.is_some_and(|e| e.to_lowercase().contains("not found")) {
-            return Err(format!("Ollama: model {} not found (run: ollama pull {})", cfg.model, cfg.model));
+            return Err(missing_text(cfg));
         }
         return Err(match err {
             Some(e) => format!("{}: {}", cfg.label, e.chars().take(160).collect::<String>()),
@@ -422,10 +705,12 @@ fn quoted(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\r', "\\r").replace('\t', "\\t"))
 }
 
-/// POSTs `req` with curl (its config on stdin, so headers never show in `ps`): Ok((status, JSON)), Err(None) when
-/// cancelled, Err(Some(message)) when it failed.
-pub fn post(req: &Request, cancel: &Cancel) -> Result<(u16, Value), Option<String>> {
+/// Starts curl POSTing `req` (its config on stdin, so headers never show in `ps`); `stream`: its output unbuffered.
+fn curl(req: &Request, cancel: &Cancel, stream: bool) -> Result<std::process::Child, Option<String>> {
     let mut config = format!("url = {}\nrequest = \"POST\"\nsilent\nshow-error\nmax-time = {TIMEOUT_S}\nwrite-out = \"\\n%{{http_code}}\"\n", quoted(&req.url));
+    if stream {
+        config += "no-buffer\n";
+    }
     for (k, v) in &req.headers {
         config += &format!("header = {}\n", quoted(&format!("{k}: {v}")));
     }
@@ -439,18 +724,59 @@ pub fn post(req: &Request, cancel: &Cancel) -> Result<(u16, Value), Option<Strin
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(config.as_bytes());
     }
+    Ok(child)
+}
+
+/// Waits for curl: Err(None) when cancelled, Err(Some(message)) when it failed.
+fn finish(child: std::process::Child, cancel: &Cancel, stopped: bool) -> Result<std::process::Output, Option<String>> {
     let out = child.wait_with_output().map_err(|e| Some(format!("curl: {e}")))?;
     cancel.pid.store(0, Ordering::SeqCst);
     if cancel.cancelled() {
         return Err(None);
     }
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let (body, code) = stdout.rsplit_once('\n').unwrap_or(("", &stdout));
-    if !out.status.success() {
+    if !out.status.success() && !stopped {
         let err = String::from_utf8_lossy(&out.stderr).trim().trim_start_matches("curl: ").to_string();
         return Err(Some(if out.status.code() == Some(7) { "connection refused".into() } else { err }));
     }
+    Ok(out)
+}
+
+/// POSTs `req` with curl: Ok((status, JSON)), Err(None) when cancelled, Err(Some(message)) when it failed.
+pub fn post(req: &Request, cancel: &Cancel) -> Result<(u16, Value), Option<String>> {
+    let out = finish(curl(req, cancel, false)?, cancel, false)?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let (body, code) = stdout.rsplit_once('\n').unwrap_or(("", &stdout));
     Ok((code.trim().parse().unwrap_or(0), serde_json::from_str(body).unwrap_or(Value::Null)))
+}
+
+/// POSTs a streaming request: reads Ollama's NDJSON lines, calling on_text(the text so far) after each; on_text
+/// returning true stops reading (the block is complete) and kills curl. Ok((status, {"response": text} or
+/// {"error": …})) like post.
+pub fn post_stream(req: &Request, cancel: &Cancel, mut on_text: impl FnMut(&str) -> bool) -> Result<(u16, Value), Option<String>> {
+    let mut child = curl(req, cancel, true)?;
+    let (mut text, mut error, mut status, mut stopped) = (String::new(), None, 200, false);
+    if let Some(out) = child.stdout.take() {
+        for line in BufReader::new(out).lines() {
+            let Ok(line) = line else { break };
+            match serde_json::from_str::<Value>(&line) {
+                Ok(v) if !v["error"].is_null() => error = Some(v["error"].clone()),
+                Ok(v) if v["response"].is_string() => {
+                    text += v["response"].as_str().unwrap_or("");
+                    if on_text(&text) {
+                        stopped = true;
+                        let _ = child.kill();
+                        break;
+                    }
+                }
+                _ => status = line.trim().parse().unwrap_or(status),
+            }
+        }
+    }
+    finish(child, cancel, stopped)?;
+    Ok((status, match error {
+        Some(e) => json!({ "error": e }),
+        None => json!({ "response": text }),
+    }))
 }
 
 /// A failed request -> the status bar's words.
@@ -602,7 +928,7 @@ mod tests {
 
     #[test]
     fn replies_are_cut_like_the_js() {
-        let ctx = |p: &str, s: &str, next_line: bool| Context { prefix: p.into(), suffix: s.into(), next_line };
+        let ctx = |p: &str, s: &str, next_line: bool| Context { prefix: p.into(), suffix: s.into(), next_line, prose: false };
         let c = ctx("function add(a, b) {\n  ", "\n}\nconsole.log(add(1, 2));", false);
         assert_eq!(clean("return a + b;<|fim_suffix|>junk", &c, false), (Some("return a + b;".into()), Some("fim")));
         assert_eq!(clean("return a + b;\n}", &c, false), (Some("return a + b;".into()), None));
@@ -615,27 +941,115 @@ mod tests {
     }
 
     #[test]
-    fn a_provider_pauses_after_n_bad_replies_and_at_once_on_fim_tokens() {
+    fn a_provider_pauses_after_n_errors_or_4n_dropped_replies_and_at_once_on_fim_tokens() {
         let mut h = Health::new(3);
-        assert_eq!(h.record(Some("empty"), None), None);
-        assert_eq!(h.record(None, None), None);
-        h.record(Some("empty"), None);
-        h.record(Some("echo"), None);
-        assert!(h.record(None, Some("Ollama is not running")).unwrap().contains("3 errors in a row"));
+        let down = Some("Ollama is not running");
+        h.record(None, down);
+        h.record(None, down);
+        assert_eq!(h.record(None, None), None, "a good reply resets the count");
+        h.record(None, down);
+        h.record(None, down);
+        assert!(h.record(None, down).unwrap().contains("3 errors in a row"));
+        let mut d = Health::new(3);
+        for _ in 0..50 {
+            assert_eq!(d.record(Some("empty"), None), None);
+        }
+        assert!(d.note.as_deref().unwrap().contains("empty"));
+        for i in 0..11 {
+            assert_eq!(d.record(Some(if i % 2 == 1 { "prose" } else { "fence" }), None), None);
+        }
+        assert_eq!(d.note.as_deref(), Some("the last reply was dropped: it was a Markdown code fence"));
+        assert!(d.record(Some("prose"), None).unwrap().contains("12 replies in a row were dropped (the last: it was prose, not code); a base model does better"));
         assert!(Health::new(5).record(Some("fim"), None).unwrap().contains("FIM template tokens"));
     }
 
+    fn cx(prefix: &str, suffix: &str) -> Context {
+        Context { prefix: prefix.into(), suffix: suffix.into(), ..Context::default() }
+    }
+
     #[test]
-    fn defaults_are_ollama_qwen_on_localhost_without_a_daily_limit() {
+    fn fim_prompts_per_model_family_go_raw_with_their_stops() {
         let cfg = config(&normalize(&json!({})), |_| true);
-        assert_eq!((cfg.provider.as_str(), cfg.model.as_str(), cfg.endpoint.as_str(), cfg.enabled, cfg.limit, cfg.max_tokens, cfg.debounce, cfg.manual), ("ollama", "qwen2.5-coder:7b", "http://127.0.0.1:11434", true, 0, 64, 250, false));
+        let body = |model: &str, multiline: bool| request(&Config { model: model.into(), multiline, ..cfg.clone() }, &cx("a(", ")"), true).body;
+        let q = body("qwen2.5-coder:1.5b-base", true);
+        assert_eq!((q["prompt"].as_str(), q["raw"].as_bool(), q["stream"].as_bool()), (Some("<|fim_prefix|>a(<|fim_suffix|>)<|fim_middle|>"), Some(true), Some(true)));
+        assert!(body("qwen2.5-coder:7b", true)["options"]["stop"].as_array().unwrap().contains(&json!("<|endoftext|>")));
+        assert_eq!(body("codestral:22b", true)["prompt"], json!("[SUFFIX])[PREFIX] a("));
+        assert_eq!(body("deepseek-coder:6.7b-base", true)["prompt"], json!("<｜fim▁begin｜>a(<｜fim▁hole｜>)<｜fim▁end｜>"));
+        assert_eq!(body("starcoder2:3b", true)["prompt"], json!("<fim_prefix>a(<fim_suffix>)<fim_middle>"));
+        let l = body("llama3", true);
+        assert_eq!((l["prompt"].as_str(), l["suffix"].as_str(), l["raw"].is_null(), l["options"]["stop"].is_null()), (Some("a("), Some(")"), true, true));
+        assert_eq!(body("llama3", false)["options"]["stop"], json!(["\n"]));
+        assert_eq!(body("qwen2.5-coder:7b", false)["options"]["stop"].as_array().unwrap().last(), Some(&json!("\n")));
+    }
+
+    #[test]
+    fn prose_and_fences_are_dropped_or_stripped_except_in_prose_files_comments_and_strings() {
+        let c = |raw: &str, prefix: &str| clean(raw, &cx(prefix, ""), true);
+        let yml = "services:\n  app:\n\n";
+        assert_eq!(c("This Docker Compose file defines two services: `selenium` and `app`. Here's a breakdown:", yml), (None, Some("prose")));
+        assert_eq!(c("\nThis `docker-compose.yml` file defines two services: `selenium` and `app`.", yml), (None, Some("prose")));
+        assert_eq!(c("Here's the updated file:\n```yaml\nfoo: 1\n```", yml), (None, Some("prose")));
+        assert_eq!(c("```dockerfile", yml), (None, Some("fence")));
+        assert_eq!(c(" ```yaml\n", yml), (None, Some("fence")));
+        assert_eq!(c("```dockerfile\nCMD [\"python\", \"app.py\"]\n```\nThat runs it.", yml), (Some("CMD [\"python\", \"app.py\"]".into()), None));
+        assert_eq!(c("Return the lines without breaks.", "    \"\"\""), (Some("Return the lines without breaks.".into()), None), "a docstring");
+        assert_eq!(c("Starts the app and waits for it.", "  # "), (Some("Starts the app and waits for it.".into()), None), "a comment");
+        assert_eq!(clean("Here's how it works.", &Context { prose: true, ..cx("# Notes\n", "") }, true), (Some("Here's how it works.".into()), None), "Markdown");
+        assert_eq!(c("SELECT name FROM users WHERE id = 1;", ""), (Some("SELECT name FROM users WHERE id = 1;".into()), None));
+        assert_eq!(c("RUN apt-get update && apt-get install -y curl", ""), (Some("RUN apt-get update && apt-get install -y curl".into()), None));
+        assert_eq!(clean("}", &cx("  x();\n", "\n}\n"), true), (None, Some("echo")), "only the text after the cursor");
+        assert!(prose_file(Path::new("/p/README.md")) && prose_file(Path::new("/p/notes.txt")) && !prose_file(Path::new("/p/compose.yml")));
+    }
+
+    #[test]
+    fn a_block_ends_at_a_shallower_line_a_closed_bracket_two_blank_lines_or_the_text_after_the_cursor() {
+        let cut = |text: &str, prefix: &str, suffix: &str| block_cut(text, &cx(prefix, suffix), true);
+        let own = |t: &str| (t.to_string(), true);
+        assert_eq!(cut("const s = xs.sort();\n  return s[0];\n}\n\nfunction g() {", "function f(xs) {\n  ", "\n}"), own("const s = xs.sort();\n  return s[0];"));
+        assert_eq!(cut("if (a) {\n    go();\n  }\n  stop();", "  ", ""), own("if (a) {\n    go();\n  }"));
+        assert_eq!(cut("let n = 0;\n  for (const x of xs) {\n    n += x;\n  }\n  return n;\n}", "  ", "\n}").0, "let n = 0;\n  for (const x of xs) {\n    n += x;\n  }\n  return n;");
+        assert_eq!(cut("\n  return 1;\n}\nnext();", "function f() {", "\nmore();"), own("\n  return 1;"));
+        assert_eq!(cut("\n  return 1;\n}\nnext();", "function f() {", ""), own("\n  return 1;\n}"));
+        assert_eq!(cut("    with open(p) as f:\n        return f.read()\n\ndef main():", "def read(p):\n", "").0, "    with open(p) as f:\n        return f.read()");
+        assert_eq!(cut("  db:\n    image: postgres\n  cache:\n    image: redis\nvolumes:\n  data:", "services:\n  app:\n    build: .\n", "").0, "  db:\n    image: postgres\n  cache:\n    image: redis");
+        assert_eq!(cut("a = 1\n\n\nb = 2", "", ""), own("a = 1"));
+        assert_eq!(cut("xs.reduce((a, b) => a + b, 0);\n  return sum / xs.length;", "  const sum = ", "\n  return sum / xs.length;\n}"), own("xs.reduce((a, b) => a + b, 0);"));
+        assert_eq!(block_cut("if (a) {\n    go();\n  }", &cx("  ", ""), false), ("if (a) {\n    go();".to_string(), false), "while streaming only complete lines count");
+        assert_eq!(clean("if (a) {\n    go();\n  }\n  stop();", &cx("  ", ""), true), (Some("if (a) {\n    go();\n  }".into()), None));
+    }
+
+    #[test]
+    fn quiet_ends_accept_next_line_and_the_model_probe() {
+        assert!(quiet_end(&strings(&["a: 1", "", ""]), 2));
+        assert!(!quiet_end(&strings(&["a: 1", ""]), 1));
+        assert!(!quiet_end(&strings(&["a: 1", "", "", "b: 2"]), 2));
+        assert_eq!((next_line_len("abc\n  d"), next_line_len("\n  d\n  e"), next_line_len("abc")), (3, 4, 3));
+        let cfg = config(&normalize(&json!({})), |_| true);
+        assert_eq!(model_info(404, &json!({ "error": "model 'x' not found" })), Some(ModelInfo { missing: true, chat: false }));
+        assert_eq!(model_info(200, &json!({ "template": "{{- if .Suffix }}<|fim_prefix|>…{{ else }}{{ .Prompt }}{{ end }}" })), Some(ModelInfo { missing: false, chat: false }));
+        assert_eq!(model_info(200, &json!({ "template": "{{- range $i, $_ := .Messages }}…" })), Some(ModelInfo { missing: false, chat: true }));
+        assert_eq!(model_info(500, &Value::Null), None);
+        let instruct = Config { model: "qwen2.5-coder:7b".into(), ..cfg.clone() };
+        assert!(!chat_model(&instruct, None), "not asked yet");
+        assert!(chat_model(&instruct, Some(&None)), "unknown: by its name");
+        assert!(!chat_model(&cfg, Some(&None)));
+        assert_eq!(show(&cfg).unwrap().url, "http://127.0.0.1:11434/api/show");
+    }
+
+    #[test]
+    fn defaults_are_ollama_qwen_base_on_localhost_in_blocks_without_a_daily_limit() {
+        let cfg = config(&normalize(&json!({})), |_| true);
+        assert_eq!((cfg.provider.as_str(), cfg.model.as_str(), cfg.endpoint.as_str(), cfg.enabled, cfg.limit, cfg.max_tokens, cfg.debounce, cfg.manual, cfg.multiline), ("ollama", "qwen2.5-coder:1.5b-base", "http://127.0.0.1:11434", true, 0, 256, 250, false, true));
         assert_eq!((cfg.prefix_chars, cfg.suffix_chars), (4000, 300));
         assert!(!config(&normalize(&json!({})), |_| false).enabled);
         assert!(config(&normalize(&json!({ "editor.inlineSuggest.enabled": true })), |_| false).enabled);
         assert!(!config(&normalize(&json!({ "editor.inlineSuggest.provider": "off" })), |_| true).enabled);
-        let r = request(&cfg, &Context { prefix: "p".into(), suffix: "s".into(), next_line: false });
-        assert!(request(&cfg, &Context { prefix: String::new(), suffix: String::new(), next_line: true }).body["options"]["stop"].is_null());
-        assert_eq!((r.body["prompt"].clone(), r.body["suffix"].clone(), r.body["keep_alive"].clone(), r.body["options"]["num_predict"].clone(), r.body["options"]["stop"].clone()), (json!("p"), json!("s"), json!("30m"), json!(64), json!(["\n"])));
+        let r = request(&cfg, &cx("p", "s"), false);
+        assert_eq!((r.body["prompt"].clone(), r.body["raw"].clone(), r.body["stream"].clone(), r.body["keep_alive"].clone(), r.body["options"]["num_predict"].clone()), (json!("<|fim_prefix|>p<|fim_suffix|>s<|fim_middle|>"), json!(true), json!(false), json!("30m"), json!(256)));
+        assert!(!r.body["options"]["stop"].as_array().unwrap().contains(&json!("\n")));
+        let one = Config { multiline: false, ..cfg.clone() };
+        assert!(!request(&one, &Context { next_line: true, ..cx("", "") }, false).body["options"]["stop"].as_array().unwrap().contains(&json!("\n")));
         assert_eq!(warmup(&cfg).unwrap().body["options"]["num_predict"], json!(1));
     }
 
@@ -673,11 +1087,11 @@ mod tests {
             req
         });
         let cfg = config(&normalize(&json!({ "editor.inlineSuggest.endpoint": format!("http://127.0.0.1:{port}") })), |_| true);
-        let (status, v) = post(&request(&cfg, &Context { prefix: "say \"hi\"\\n\n".into(), suffix: "\t}".into(), next_line: false }), &Cancel::default()).unwrap();
+        let (status, v) = post(&request(&cfg, &cx("say \"hi\"\\n\n", "\t}"), false), &Cancel::default()).unwrap();
         assert_eq!((status, reply(&cfg, status, &v).unwrap()), (200, vec![" a + b;".to_string()]));
         let req = got.join().unwrap();
         let body: Value = serde_json::from_str(&req[req.find("\r\n\r\n").unwrap() + 4..]).unwrap();
-        assert_eq!((body["prompt"].as_str(), body["suffix"].as_str()), (Some("say \"hi\"\\n\n"), Some("\t}")));
+        assert_eq!(body["prompt"].as_str(), Some("<|fim_prefix|>say \"hi\"\\n\n<|fim_suffix|>\t}<|fim_middle|>"));
         // a server that never answers: cancel kills curl
         let silent = TcpListener::bind("127.0.0.1:0").unwrap();
         let cfg = config(&normalize(&json!({ "editor.inlineSuggest.endpoint": format!("http://127.0.0.1:{}", silent.local_addr().unwrap().port()) })), |_| true);
@@ -688,7 +1102,7 @@ mod tests {
             c2.cancel();
         });
         let t0 = std::time::Instant::now();
-        assert_eq!(post(&request(&cfg, &Context { prefix: String::new(), suffix: String::new(), next_line: false }), &cancel).err(), Some(None));
+        assert_eq!(post_stream(&request(&cfg, &cx("", ""), true), &cancel, |_| false).err(), Some(None));
         assert!(t0.elapsed() < std::time::Duration::from_secs(5));
     }
 }

@@ -1206,7 +1206,13 @@ def run_medium_editing(tmp):
 
 
 class FakeOllama(http.server.ThreadingHTTPServer):
-    """/api/generate on 127.0.0.1: the reply depends on how the prompt ends; every request but the warm-up is kept."""
+    """/api/generate on 127.0.0.1: the reply depends on how the text before the cursor (in the raw FIM prompt) ends;
+    every request but the warm-up and /api/show is kept."""
+    REPLIES = {"return": " a + b;", "c": "onsole.log(a + b);",
+               "p": "Here's a breakdown of each service:",            # prose: never shown
+               "q": "```js\nuit();\n```",                              # a fenced reply: shown without its fences
+               "i": "f (a) {\n    go();\n  }\n  stop();\n  stop();"}  # a block: cut after its closing brace
+
     def __init__(self):
         self.requests, self.warmups = [], 0
         server = self
@@ -1217,13 +1223,15 @@ class FakeOllama(http.server.ThreadingHTTPServer):
 
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-                if body.get("prompt") == "" and body.get("options", {}).get("num_predict") == 1:
+                if self.path == "/api/show":
+                    reply = {"template": "{{ .Prompt }}"}
+                elif body.get("prompt") == "" and body.get("options", {}).get("num_predict") == 1:
                     server.warmups += 1
                     reply = {"response": "", "done": True}
                 else:
                     server.requests.append(body)
-                    p = body["prompt"]
-                    reply = {"response": " a + b;" if p.endswith("return") else "onsole.log(a + b);" if p.endswith("c") else "", "done": True}
+                    p = body["prompt"].split("<|fim_suffix|>")[0]
+                    reply = {"response": next((v for k, v in FakeOllama.REPLIES.items() if p.endswith(k)), ""), "done": True}
                 data = json.dumps(reply).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
@@ -1237,7 +1245,9 @@ class FakeOllama(http.server.ThreadingHTTPServer):
 
 def run_inline_suggest(tmp):
     """Ghost text from a fake Ollama after typing pauses (one request for a burst), Tab accepts, typing its own
-    characters keeps the rest without asking again, Ctrl+→ takes a word, Esc hides it; a .env file sends nothing."""
+    characters keeps the rest without asking again, Ctrl+→ takes a word, Esc hides it; a prose reply never shows, a
+    fenced one shows without its fences, a block is cut after its closing brace and Tab takes all of it; a .env file
+    sends nothing."""
     stub = FakeOllama()
     settings = os.path.join(tmp, "inline", "vscode-settings.json")
     os.makedirs(os.path.dirname(settings))
@@ -1254,7 +1264,8 @@ def run_inline_suggest(tmp):
     assert t.read(" a + b;", timeout=3), "no ghost text:\n" + plain(t)[-400:]
     assert sgr("#717378") + " a + b;" in screen_of(t), "the ghost text isn't in editorGhostText's color"
     assert len(stub.requests) == 1, f"{len(stub.requests)} requests for one burst of typing"
-    assert stub.requests[0]["suffix"].startswith("\n}") and stub.requests[0]["options"]["stop"] == ["\n"]
+    first = stub.requests[0]
+    assert first["raw"] and first["prompt"].endswith("<|fim_suffix|>\n}<|fim_middle|>") and "\n" not in first["options"]["stop"], repr(first["prompt"][-40:])
     t.send("\t")                                         # Tab accepts
     t.send("\r"); t.read(timeout=0.4)                    # a new line (its empty reply shows nothing)
     asked = len(stub.requests)
@@ -1270,6 +1281,23 @@ def run_inline_suggest(tmp):
     t.send("\x1b", wait=0.3)                             # Esc hides the rest
     t.send("\x13"); assert t.read("Saved", timeout=2)
     assert open(file).read() == "function add(a, b) {\n  return a + b;\n  console\n}\n", repr(open(file).read())
+    t.send("\x1b[1;5F"); t.send("\x1b[A"); t.send("\x1b[F"); t.send("\r")  # a new line under "console"
+    asked = len(stub.requests)
+    t.out = b""
+    t.send("p"); t.read(timeout=0.8)                     # prose: asked, not shown
+    assert len(stub.requests) == asked + 1 and "breakdown" not in plain(t), "a prose reply showed"
+    t.send("\x7f"); t.out = b""
+    t.send("q")
+    assert t.read("uit();", timeout=3), "no ghost text from the fenced reply"
+    assert "```" not in plain(t), "the fence showed"
+    t.send("\x1b", wait=0.2); t.send("\x7f"); t.out = b""
+    t.send("i")
+    assert t.read("go();", timeout=3), "no block ghost text"
+    t.read(timeout=0.5)
+    assert "stop();" not in plain(t), "the block wasn't cut after its closing brace"
+    t.send("\t")                                        # Tab takes the whole block
+    t.send("\x13"); assert t.read("Saved", timeout=2)
+    assert open(file).read() == "function add(a, b) {\n  return a + b;\n  console\n  if (a) {\n    go();\n  }\n}\n", repr(open(file).read())
     t.send(QUIT)
     assert t.wait_exit() == 0
     assert stub.warmups == 1, f"{stub.warmups} warm-ups"

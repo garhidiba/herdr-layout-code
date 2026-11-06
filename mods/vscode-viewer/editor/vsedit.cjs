@@ -99,7 +99,7 @@ class Editor {
     this.redraw = () => {}; this.onExit = null; this.autoTimer = null;
     // inline suggestions: the ghost text shown, the debounce timer, the request in flight (abort), replies per position
     this.inline = { ghost: null, timer: null, abort: null, gen: 0, busy: false, error: null, cache: new Map(), health: new Map(),
-      warmed: new Set(), seen: null, editing: false };
+      warmed: new Set(), models: new Map(), seen: null, editing: false };
   }
 
   // Everything that belongs to one open file; switching files swaps these fields.
@@ -1400,10 +1400,11 @@ class Editor {
     if (!cfg.enabled) return "Inline suggestions are off (click their status bar item to turn them on)";
     const paused = this.inlineHealth(cfg).paused;
     if (paused) return `${cfg.label} is paused: ${paused} (click its status bar item to resume)`;
+    if (this.inline.models.get(cfg.key)?.missing) return I.missingText(cfg);
     if (this.popup || this.prompt || this.peek || !this.empty) return "ui";
     if (I.denied(this.file, cfg.exclude)) return "No inline suggestions for this file (editor.inlineSuggest.exclude)";
     if (this.textLength() > I.MAX_FILE_CHARS) return "The file is too large for inline suggestions";
-    if (!manual && !I.atSuggestable(this.lines[this.head.line], this.head.col)) return "position";
+    if (!manual && (!I.atSuggestable(this.lines[this.head.line], this.head.col) || I.quietEnd(this.lines, this.head.line))) return "position";
     if (cfg.limit && I.usageOf(cfg.key).requests >= cfg.limit) return `${cfg.label}: today's limit of ${cfg.limit} requests is reached (editor.inlineSuggest.dailyRequestLimit)`;
     return null;
   }
@@ -1446,20 +1447,29 @@ class Editor {
     const at = { ...this.head }, file = this.file, version = this.buf.version;
     const key = `${file}\0${version}\0${at.line}\0${at.col}\0${cfg.key}\0${cfg.multiline}`;
     if (this.inline.cache.has(key)) return this.inlineShow(this.inline.cache.get(key), at, version);
-    const ctx = I.contextAt(this.lines, at.line, at.col, cfg.prefixChars, cfg.suffixChars);
+    const ctx = { ...I.contextAt(this.lines, at.line, at.col, cfg.prefixChars, cfg.suffixChars), multiline: cfg.multiline, prose: I.proseFile(file) };
     this.inlineCancel();
     const ac = new AbortController(), gen = ++this.inline.gen;
     Object.assign(this.inline, { abort: ac, busy: true });
     this.redraw();
     const t0 = Date.now();
     let texts = [], error = null;
-    try { const { status, json } = await I.post(I.request(cfg, ctx), ac.signal); texts = I.reply(cfg, status, json); }
+    // the reply streams in: its complete lines show as they come; reading stops where the block ends (or at prose)
+    const partial = (text) => {
+      if (gen !== this.inline.gen) return true;
+      const r = I.clean(text.slice(0, text.lastIndexOf("\n") + 1), ctx);
+      if (r.anomaly === "prose") return true;
+      if (r.text && r.text !== this.inline.ghost?.items[0]) { this.inlineShow([r.text], at, version); this.redraw(); }
+      return cfg.multiline && I.blockCut(text, ctx, false).done;
+    };
+    try { const { status, json } = await I.postStream(I.request(cfg, ctx, true), ac.signal, partial); texts = I.reply(cfg, status, json); }
     catch (e) { error = I.failure(cfg, e); if (error === null) return; } // aborted: a newer request or an edit
     if (gen !== this.inline.gen) return;
+    if (error === I.missingText(cfg)) this.inline.models.set(cfg.key, { missing: true, chat: false });
     Object.assign(this.inline, { abort: null, busy: false, error });
-    const results = texts.map(t => I.clean(t, { ...ctx, multiline: cfg.multiline })), good = results.filter(r => r.text).map(r => r.text);
+    const results = texts.map(t => I.clean(t, ctx)), good = results.filter(r => r.text).map(r => r.text);
     I.recordUsage(cfg.key, { inChars: ctx.prefix.length + ctx.suffix.length, outChars: texts.join("").length, ms: error ? null : Date.now() - t0 });
-    const anomaly = error ? null : results.some(r => r.anomaly === "fim") ? "fim" : results.find(r => r.anomaly)?.anomaly ?? (results.length ? null : "empty");
+    const anomaly = error ? null : results.some(r => r.anomaly === "fim") ? "fim" : good.length ? null : results.find(r => r.anomaly)?.anomaly ?? "empty";
     const paused = this.inlineHealth(cfg).record(anomaly, error);
     if (paused) this.say(`${cfg.label} paused: ${paused}`, this.colors.warn, 8000);
     else if (error) this.say(error, this.colors.warn, 6000);
@@ -1467,7 +1477,7 @@ class Editor {
       if (this.inline.cache.size >= 50) this.inline.cache.delete(this.inline.cache.keys().next().value);
       this.inline.cache.set(key, good);
       this.inlineShow(good, at, version);
-    }
+    } else if (this.inline.ghost?.version === version && cmp(this.inline.ghost.at, at) === 0) this.inline.ghost = null; // lines shown while streaming
     this.redraw();
   }
   inlineShow(items, at, version) {
@@ -1502,11 +1512,13 @@ class Editor {
     }
     return true;
   }
-  // Tab: the whole suggestion; ⌘→ / Ctrl+→: up to the end of its next word, the rest still showing.
-  inlineAccept(word) {
+  // Tab: the whole suggestion; ⌘→ / Ctrl+→ ("word"): up to the end of its next word; Accept Next Line ("line"): up to its
+  // next line break; the rest still showing.
+  inlineAccept(part = null) {
     const g = this.inline.ghost;
     if (!g) return;
-    const text = g.items[g.index], part = word ? text.slice(0, I.nextWordLength(text)) : text;
+    const text = g.items[g.index];
+    part = text.slice(0, part === "word" ? I.nextWordLength(text) : part === "line" ? I.nextLineLength(text) : text.length);
     this.insert(part); this.buf.seal();
     const rest = text.slice(part.length);
     this.inline.ghost = rest ? { ...g, items: [rest], index: 0, version: this.buf.version, at: { ...this.head } } : null;
@@ -1514,25 +1526,34 @@ class Editor {
   inlineHide() { this.inline.ghost = null; this.inlineCancel(); }
   inlineCycle(dir) { const g = this.inline.ghost; if (g) g.index = (g.index + dir + g.items.length) % g.items.length; }
   inlineTrigger() { this.inline.ghost = null; this.inlineRequest(true); }
-  // Loads the provider's model in the background once per provider and model (Ollama), so the first suggestion is quick.
+  // Once per provider and model (Ollama): asks whether the model is pulled and a chat model, then loads it in the
+  // background, so the first suggestion is quick.
   inlineWarmup() {
-    const cfg = this.inlineCfg, req = cfg.enabled && !this.inline.warmed.has(cfg.key) && I.warmup(cfg);
+    const cfg = this.inlineCfg, req = cfg.enabled && !this.inline.warmed.has(cfg.key) && I.show(cfg);
     if (!req) return;
     this.inline.warmed.add(cfg.key);
-    I.post(req).catch(() => {});
+    I.post(req).then(({ status, json }) => {
+      const info = I.modelInfo(status, json);
+      this.inline.models.set(cfg.key, info);
+      if (!info?.missing) I.post(I.warmup(cfg)).catch(() => {});
+      this.redraw();
+    }).catch(() => {});
   }
   // The status bar item: the provider and its state; a click turns suggestions on/off (and resumes a paused provider),
   // the pointer on it shows today's usage. Hidden while the provider is off or can't run here and nothing was set.
   inlineStatus() {
     const cfg = this.inlineCfg;
     if (cfg.provider === "off" || (!cfg.enabled && this.settings["editor.inlineSuggest.enabled"] == null)) return null;
-    const paused = this.inlineHealth(cfg).paused, limited = cfg.enabled && cfg.limit && I.usageOf(cfg.key).requests >= cfg.limit;
-    const state = !cfg.enabled ? ": off" : paused ? ": paused" : limited ? ": limit" : this.inline.busy ? " …" : this.inline.error ? ": error" : "";
-    return { text: cfg.label + state, run: () => this.toggleInline(), hover: () => (paused ? `${cfg.label} paused: ${paused} · ` : "") + I.usageText(cfg, I.usageOf(cfg.key)) };
+    const h = this.inlineHealth(cfg), paused = h.paused, limited = cfg.enabled && cfg.limit && I.usageOf(cfg.key).requests >= cfg.limit;
+    const info = this.inline.models.get(cfg.key), missing = info?.missing, chat = I.chatModel(cfg, info);
+    const state = !cfg.enabled ? ": off" : missing ? `: ollama pull ${cfg.model}` : paused ? ": paused" : limited ? ": limit" : this.inline.busy ? " …" :
+      this.inline.error ? ": error" : chat ? ": chat model" : "";
+    const notes = [paused ? `${cfg.label} paused: ${paused}` : h.note, missing && I.missingText(cfg), chat && I.chatHint(cfg)].filter(Boolean);
+    return { text: cfg.label + state, run: () => this.toggleInline(), hover: () => [...notes, I.usageText(cfg, I.usageOf(cfg.key))].join(" · ") };
   }
   toggleInline() {
     const cfg = this.inlineCfg;
-    this.inline.health.delete(cfg.key); this.inline.error = null;
+    this.inline.health.delete(cfg.key); this.inline.models.delete(cfg.key); this.inline.warmed.delete(cfg.key); this.inline.error = null;
     this.inlineHide();
     try { this.applySettings(S.update("editor.inlineSuggest.enabled", !cfg.enabled)); this.say(`Inline suggestions ${cfg.enabled ? "off" : "on"}`); }
     catch (e) { this.say(`Cannot write settings: ${e.message}`, this.colors.error, 6000); }

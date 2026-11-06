@@ -8,7 +8,7 @@ const path = require("path");
 
 const PROVIDERS = ["ollama", "off"];
 const LABELS = { ollama: "Ollama", off: "Inline Suggestions" };
-const MODELS = { ollama: "qwen2.5-coder:7b" };
+const MODELS = { ollama: "qwen2.5-coder:1.5b-base" };
 const ENDPOINTS = { ollama: "http://127.0.0.1:11434" };
 const MAX_FILE_CHARS = 1_000_000; // no suggestions in bigger files
 const TIMEOUT = 20000;
@@ -21,15 +21,15 @@ const P = "editor.inlineSuggest.";
 const DEFAULTS = {
   [P + "enabled"]: null,           // null: on when the provider can run here (Ollama installed, …)
   [P + "provider"]: "ollama",      // "ollama" | "off"
-  [P + "model"]: "",               // "": the provider's default (Ollama: qwen2.5-coder:7b)
+  [P + "model"]: "",               // "": the provider's default (Ollama: qwen2.5-coder:1.5b-base)
   [P + "endpoint"]: "",            // "": the provider's default (Ollama: http://127.0.0.1:11434)
   [P + "trigger"]: "auto",         // "auto" (after typing pauses) | "manual" (Trigger Inline Suggestion only)
-  [P + "multiline"]: false,        // false: one line at a time ("\n" stops the reply)
+  [P + "multiline"]: true,         // true: a block (cut where it ends: blockCut); false: one line ("\n" stops the reply)
   [P + "debounce"]: 250,           // ms typing must pause before a request
-  [P + "maxTokens"]: 64,
+  [P + "maxTokens"]: 256,
   [P + "prefixChars"]: 4000,       // text sent before the cursor
   [P + "suffixChars"]: 300,        // and after it (re-read on every request: Qwen's FIM puts it after the prefix)
-  [P + "stopAfter"]: 5,            // empty / repeated replies or errors in a row that pause the provider for this session
+  [P + "stopAfter"]: 5,            // errors in a row that pause the provider for this session (4x as many dropped replies)
   [P + "dailyRequestLimit"]: 0,    // requests a day before suggestions stop until tomorrow; 0: unlimited
   [P + "keepAlive"]: "30m",        // Ollama: how long the model stays loaded after a request
   [P + "exclude"]: [],             // more file patterns never sent (on top of EXCLUDE)
@@ -90,6 +90,8 @@ function denied(file, patterns) {
 // VS Code's rule: a suggestion only where the rest of the line is blank or closing characters (not inside a word).
 const CLOSERS = /^[\s)\]}>"'`;,.:]*$/;
 const atSuggestable = (lineText, col) => CLOSERS.test(lineText.slice(col));
+// A blank line after a blank line with nothing below it: no suggestion after typing there (Alt+\ still asks).
+const quietEnd = (lines, line) => line > 0 && !lines[line - 1].trim() && lines.slice(line).every(l => !l.trim());
 
 // The text around the cursor: { prefix, suffix, nextLine } within the configured character caps. The prefix starts at
 // a line start (only the cursor line itself is ever cut), so typing on doesn't shift its start and the provider's
@@ -117,6 +119,11 @@ function nextWordLength(text) {
   const m = /^(?:\r?\n[\t ]*|[\t ]*[\p{L}\p{N}_$]+|[\t ]*[^\s\p{L}\p{N}_$]+|[\t ]+)/u.exec(text);
   return m ? m[0].length : text.length;
 }
+// How much of `text` Accept Next Line takes: up to its next line break (a leading one with the line after it).
+function nextLineLength(text) {
+  const i = text.indexOf("\n", text.startsWith("\n") ? 1 : 0);
+  return i < 0 ? text.length : i;
+}
 // The suggestion less the end of the line it would repeat (`)` an auto-closed pair already put after the cursor).
 function trimLineSuffix(text, lineSuffix) {
   const s = lineSuffix.trimEnd();
@@ -132,60 +139,148 @@ const FIM_TOKENS = ["<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>", "<|fim
   "<|im_start|>", "<|im_end|>", "<fim_prefix>", "<fim_suffix>", "<fim_middle>", "<file_sep>", "<｜fim▁begin｜>", "<｜fim▁hole｜>", "<｜fim▁end｜>",
   "<｜end▁of▁sentence｜>", "[PREFIX]", "[SUFFIX]", "[MIDDLE]", "<PRE>", "<SUF>", "<MID>", "<EOT>"];
 const firstToken = (text) => Math.min(...FIM_TOKENS.map(t => text.indexOf(t)).filter(i => i >= 0));
+// Prose and markup files, where sentences and Markdown fences are what the user writes.
+const proseFile = (file) => /\.(md|markdown|mdx|txt|text|rst|adoc|asciidoc|org|tex|html?|xml)$/i.test(file) || /(^|[\\/])COMMIT_EDITMSG$/.test(file);
+// A chat model's answer instead of code: "Here's …", "This file defines …", or a sentence: a capitalized word and 3+
+// more words (no code characters) up to one ending in . : ! or ?.
+const PROSE = /^(?:here(?:'s| is| are)\b|this (?:file|code|script|docker|compose|function|config|configuration|is|will|defines?)\b|the (?:following|above|code|file)\b|sure\b|certainly\b|i(?:'m|'ll| am| will| have)\b|let's\b|note:|explanation:)/i;
+function sentence(line) {
+  const words = line.split(/ +/), k = words.findIndex(w => /[.:!?]$/.test(w));
+  return k >= 3 && /^[A-Z][a-z]+$/.test(words[0]) && words.slice(0, k + 1).every(w => /[A-Za-z]/.test(w) && !/[=;{}()<>$[\]]/.test(w));
+}
+// The cursor is in a comment or a string (a sentence may belong there): the line starts a comment, a quote on it is
+// open, or a Python docstring is.
+function inText(prefix) {
+  const line = prefix.slice(prefix.lastIndexOf("\n") + 1);
+  return /^\s*(?:#|\/\/|\/\*|\*|--|<!--)/.test(line) || ['"', "'", "`"].some(q => line.split(q).length % 2 === 0) ||
+    ['"""', "'''"].some(q => prefix.split(q).length % 2 === 0);
+}
+// Where a block suggestion ends (VS Code / Copilot's rules), over the lines complete so far (all when `final`): before a
+// line less indented than the block's first line, before one closing a bracket opened before the cursor, after the line
+// closing a bracket the first line opened, before two blank lines, before the line the text after the cursor goes on
+// with. At the end of the file a closing line (`}`) ends the block with it. -> { text, done: a rule cut it }
+function blockCut(text, { prefix, suffix }, final = true) {
+  const lines = text.split("\n"), n = final ? lines.length : lines.length - 1;
+  const lead = prefix.slice(prefix.lastIndexOf("\n") + 1), next = suffix.split("\n").map(l => l.trim()).find(Boolean);
+  const indent = (l) => /^[ \t]*/.exec(l)[0].length;
+  const upTo = (k) => ({ text: lines.slice(0, k).join("\n").trimEnd(), done: true });
+  let base = -1, depth = 0, opener = false, blanks = 0;
+  for (let i = 0; i < n; i++) {
+    const t = lines[i].trim();
+    if (!t) { if (i && ++blanks === 2) return upTo(i - 1); continue; }
+    blanks = 0;
+    const before = depth;
+    let low = depth;
+    for (const c of lines[i]) if ("([{".includes(c)) depth++; else if (")]}".includes(c)) low = Math.min(low, --depth);
+    if (base < 0) { base = indent(i ? lines[i] : lead + lines[i]); depth = Math.max(depth, 0); opener = depth > 0; continue; }
+    if (indent(lines[i]) < base || low < 0) return upTo(!suffix.trim() && /^[)\]}]/.test(t) ? i + 1 : i);
+    if (opener && before > 0 && depth === 0) return upTo(i + 1);
+    if (before === 0 && t === next) return upTo(i);
+  }
+  return { text: lines.slice(0, n).join("\n"), done: false };
+}
 // A provider's raw text -> { text (null when nothing is left), anomaly: null | "fim" (template tokens: pause now) |
-// "echo" (the text before or after the cursor repeated) | "empty" }. Cuts what follows a FIM token, a repeat of the
-// text after the cursor, and (one-line mode) the first line break — after the next line's text when nextLine.
-function clean(raw, { prefix, suffix, multiline, nextLine = false }) {
+// "prose" (sentences, not code) | "fence" (a Markdown fence alone) | "echo" (the text before or after the cursor
+// repeated) | "empty" }. Cuts what follows a FIM token, Markdown fences (a leading one with its language), a repeat of
+// the text after the cursor, and the end of a block (blockCut) or, in one-line mode, the first line break — after the
+// next line's text when nextLine. Prose files (`prose`) keep sentences and fences.
+function clean(raw, { prefix, suffix, multiline, nextLine = false, prose = false }) {
   let text = String(raw ?? "").replace(/\r\n?/g, "\n"), anomaly = null;
   const fim = firstToken(text);
   if (fim !== Infinity) { text = text.slice(0, fim); anomaly = "fim"; }
+  if (!prose) {
+    const fence = /^\s*```[\w+.#-]*[ \t]*(?:\n|$)/.exec(text), end = (fence ? text.slice(fence[0].length) : text).search(/^[ \t]*```/m);
+    if (fence) text = text.slice(fence[0].length);
+    if (end >= 0) text = text.slice(0, end);
+    if ((fence || end >= 0) && !text.trim()) return { text: null, anomaly: "fence" };
+    const first = text.trim().split("\n")[0];
+    if (!inText(prefix) && (PROSE.test(first) || sentence(first))) return { text: null, anomaly: "prose" };
+  }
   if (!multiline) { const m = nextLine && /^\n+([^\n]*)/.exec(text); text = m ? "\n" + m[1] : text.split("\n")[0]; }
+  else text = blockCut(text, { prefix, suffix }).text;
   const tail = prefix.slice(prefix.lastIndexOf("\n") + 1).trim();
   if (tail.length >= 4 && text.trimStart().startsWith(tail)) { text = text.trimStart().slice(tail.length); anomaly ??= "echo"; }
   // the text after the cursor written again: a run of its first lines (4 characters at least) from a line of the reply
-  const after = suffix.split("\n").map(l => l.trim()).filter(Boolean).slice(0, 3), lines = text.split("\n");
+  // (blocks: blockCut stops at it)
+  const after = multiline ? [] : suffix.split("\n").map(l => l.trim()).filter(Boolean).slice(0, 3), lines = text.split("\n");
   for (let k = 0; k < lines.length; k++) {
     let j = 0, n = 0;
     while (j < after.length && k + j < lines.length && lines[k + j].trim() === after[j]) n += after[j++].length;
     if (j && (n >= 4 || k + j === lines.length && j === after.length)) { text = lines.slice(0, k).join("\n"); if (!text.trim()) anomaly ??= "echo"; break; }
   }
   text = trimLineSuffix(text.trimEnd(), suffix.split("\n")[0]);
+  if (text.trim() && suffix.trimStart().startsWith(text.trim())) return { text: null, anomaly: "echo" }; // only the text after the cursor
   if (!text.trim()) return { text: null, anomaly: anomaly ?? "empty" };
   return { text, anomaly };
 }
 
-// Pauses a provider that keeps misbehaving: FIM tokens at once, `limit` empty/repeated replies or errors in a row.
+// Why a reply was dropped, for the status bar's tooltip.
+const DROPPED = { echo: "it repeated the text around the cursor", prose: "it was prose, not code", fence: "it was a Markdown code fence" };
+// Pauses a provider that keeps misbehaving: FIM tokens at once, `limit` errors in a row, 4 × `limit` dropped replies
+// (prose, fences, repeats) in a row. An empty reply (nothing fits there) counts for nothing. `note`: what happened last.
 class Health {
-  constructor(limit) { this.limit = limit; this.bad = 0; this.paused = null; }
+  constructor(limit) { this.limit = limit; this.errors = 0; this.dropped = 0; this.paused = null; this.note = null; }
   record(anomaly, error = null) {
     if (anomaly === "fim") return (this.paused = "the reply had FIM template tokens (wrong model or template?)");
-    if (!anomaly && !error) { this.bad = 0; return null; }
-    if (++this.bad >= this.limit) this.paused = error ? `${this.bad} errors in a row: ${error}` : `${this.bad} empty or repeated replies in a row`;
+    if (error) {
+      this.note = error;
+      if (++this.errors >= this.limit) this.paused = `${this.errors} errors in a row: ${error}`;
+      return this.paused;
+    }
+    this.errors = 0;
+    if (!DROPPED[anomaly]) { this.note = anomaly === "empty" ? "the last reply was empty (nothing to suggest there)" : null; if (!anomaly) this.dropped = 0; return null; }
+    this.note = `the last reply was dropped: ${DROPPED[anomaly]}`;
+    if (++this.dropped >= this.limit * 4) this.paused = `${this.dropped} replies in a row were dropped (the last: ${DROPPED[anomaly]}); a base model does better`;
     return this.paused;
   }
 }
 
 // ---------- providers ----------
-// The HTTP request for a suggestion: { url, headers, body }.
-function request(cfg, ctx) {
+// FIM prompts per model family, sent raw (Ollama's `suffix` falls back to the chat template when the text after the
+// cursor is empty, and a chat model answers in prose there). spm: the suffix goes first. Other models use `suffix`.
+const TEMPLATES = [
+  { re: /qwen[\d.]*-?coder|codeqwen/i, pre: "<|fim_prefix|>", mid: "<|fim_suffix|>", end: "<|fim_middle|>",
+    stop: ["<|endoftext|>", "<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>", "<|fim_pad|>", "<|file_sep|>", "<|repo_name|>", "<|im_start|>", "<|im_end|>", "<|cursor|>"] },
+  { re: /codestral/i, spm: true, pre: "[SUFFIX]", mid: "[PREFIX] ", end: "", stop: ["[INST]", "[/INST]", "[PREFIX]", "[SUFFIX]", "[MIDDLE]", "</s>"] },
+  { re: /deepseek-coder/i, pre: "<｜fim▁begin｜>", mid: "<｜fim▁hole｜>", end: "<｜fim▁end｜>", stop: ["<｜fim▁begin｜>", "<｜fim▁hole｜>", "<｜fim▁end｜>", "<｜end▁of▁sentence｜>", "<|EOT|>"] },
+  { re: /starcoder/i, pre: "<fim_prefix>", mid: "<fim_suffix>", end: "<fim_middle>", stop: ["<fim_prefix>", "<fim_suffix>", "<fim_middle>", "<|endoftext|>", "<file_sep>"] },
+];
+const template = (model) => TEMPLATES.find(t => t.re.test(model)) ?? null;
+const fimPrompt = (t, prefix, suffix) => t.spm ? t.pre + suffix + t.mid + prefix + t.end : t.pre + prefix + t.mid + suffix + t.end;
+const JSON_HEADERS = { "Content-Type": "application/json" };
+// The HTTP request for a suggestion: { url, headers, body } (stream: Ollama's NDJSON lines, read by postStream).
+function request(cfg, ctx, stream = false) {
   if (cfg.provider === "ollama") {
-    return { url: `${cfg.endpoint}/api/generate`, headers: { "Content-Type": "application/json" },
-      body: { model: cfg.model, prompt: ctx.prefix, suffix: ctx.suffix, stream: false, keep_alive: cfg.keepAlive,
-        options: { num_predict: cfg.maxTokens, temperature: 0.2, ...(cfg.multiline || ctx.nextLine ? {} : { stop: ["\n"] }) } } };
+    const t = template(cfg.model), stop = [...(t?.stop ?? []), ...(cfg.multiline || ctx.nextLine ? [] : ["\n"])];
+    const prompt = t ? { prompt: fimPrompt(t, ctx.prefix, ctx.suffix), raw: true } : { prompt: ctx.prefix, suffix: ctx.suffix };
+    return { url: `${cfg.endpoint}/api/generate`, headers: JSON_HEADERS,
+      body: { model: cfg.model, ...prompt, stream, keep_alive: cfg.keepAlive, options: { num_predict: cfg.maxTokens, temperature: 0.2, ...(stop.length ? { stop } : {}) } } };
   }
   throw new Error(`Unknown inline suggestion provider: ${cfg.provider}`);
 }
 // Loads the model ahead of the first suggestion (Ollama keeps it keepAlive): null when the provider needs none.
 function warmup(cfg) {
   if (cfg.provider !== "ollama") return null;
-  return { url: `${cfg.endpoint}/api/generate`, headers: { "Content-Type": "application/json" },
+  return { url: `${cfg.endpoint}/api/generate`, headers: JSON_HEADERS,
     body: { model: cfg.model, prompt: "", stream: false, keep_alive: cfg.keepAlive, options: { num_predict: 1 } } };
 }
+// Asks Ollama about the model (/api/show), before the warm-up: null when the provider has nothing to ask.
+const show = (cfg) => cfg.provider === "ollama" ? { url: `${cfg.endpoint}/api/show`, headers: JSON_HEADERS, body: { model: cfg.model } } : null;
+// show's reply -> { missing: not pulled, chat: a chat template (.Messages) } | null (the server didn't say).
+function modelInfo(status, json) {
+  if (status === 404 || /not found/i.test(json?.error ?? "")) return { missing: true, chat: false };
+  if (status >= 400 || typeof json?.template !== "string") return null;
+  return { missing: false, chat: /\.Messages\b/.test(json.template) };
+}
+// Whether to recommend a base model: the template says chat, or (Ollama said nothing) the name has no "base".
+const chatModel = (cfg, info) => info === undefined ? false : info ? info.chat : !/base/i.test(cfg.model);
+const missingText = (cfg) => `${cfg.label}: model ${cfg.model} not found (run: ollama pull ${cfg.model})`;
+const chatHint = (cfg) => `${cfg.model} is a chat model and often answers in prose; a base model completes code (ollama pull ${MODELS.ollama}, then set editor.inlineSuggest.model)`;
 // A reply (status, parsed JSON) -> the suggestion texts; throws a message for the status bar.
 function reply(cfg, status, json) {
   const err = json?.error?.message ?? json?.error;
   if (status >= 400 || err) {
-    if (cfg.provider === "ollama" && /not found/i.test(err ?? "")) throw new Error(`Ollama: model ${cfg.model} not found (run: ollama pull ${cfg.model})`);
+    if (cfg.provider === "ollama" && /not found/i.test(err ?? "")) throw new Error(missingText(cfg));
     throw new Error(`${cfg.label}: ${err ? String(err).slice(0, 160) : `HTTP ${status}`}`);
   }
   if (cfg.provider === "ollama") return [json?.response ?? ""];
@@ -207,6 +302,27 @@ async function post(req, signal) {
   let json = null;
   try { json = JSON.parse(text); } catch {}
   return { status: res.status, json };
+}
+// POSTs a streaming request: reads Ollama's NDJSON lines, calling onText(the text so far) after each chunk; onText
+// returning true stops reading (the block is complete) and closes the connection. Resolves { status, json } like post,
+// json.response holding the text read.
+async function postStream(req, signal, onText) {
+  const stop = new AbortController();
+  const res = await fetch(req.url, { method: "POST", headers: req.headers, body: JSON.stringify(req.body),
+    signal: AbortSignal.any([stop.signal, AbortSignal.timeout(TIMEOUT), ...(signal ? [signal] : [])]) });
+  const dec = new TextDecoder();
+  let text = "", rest = "", error = null;
+  const take = (line) => { let j = null; try { j = JSON.parse(line); } catch {} if (j?.error) error = j.error; else if (typeof j?.response === "string") text += j.response; };
+  try {
+    for await (const chunk of res.body) {
+      const lines = (rest + dec.decode(chunk, { stream: true })).split("\n");
+      rest = lines.pop();
+      lines.forEach(take);
+      if (!error && onText(text)) { stop.abort(); rest = ""; break; }
+    }
+  } catch (e) { if (!stop.signal.aborted) throw e; }
+  if (rest.trim()) take(rest);
+  return { status: res.status, json: error ? { error } : { response: text } };
 }
 
 // ---------- usage: <herdr home>/.vscode-inline-usage.json, per local date and provider:model ----------
@@ -235,6 +351,7 @@ function usageText(cfg, u) {
     ` · ~${tokens(u.inChars)} in / ${tokens(u.outChars)} out tokens` + (p50 == null ? "" : ` · p50 ${p50} ms, p95 ${p95} ms`);
 }
 
-module.exports = { PROVIDERS, DEFAULTS, EXCLUDE, MAX_FILE_CHARS, normalize, config, globRe, denied, atSuggestable, contextAt,
-  typeThrough, nextWordLength, trimLineSuffix, clean, Health, request, warmup, reply, failure, post,
+module.exports = { PROVIDERS, MODELS, DEFAULTS, EXCLUDE, MAX_FILE_CHARS, normalize, config, globRe, denied, atSuggestable, quietEnd, contextAt,
+  typeThrough, nextWordLength, nextLineLength, trimLineSuffix, proseFile, blockCut, clean, Health, template, request, warmup, show, modelInfo,
+  chatModel, missingText, chatHint, reply, failure, post, postStream,
   usageFile, today, usageOf, recordUsage, percentile, usageText };

@@ -41,7 +41,8 @@ pub enum Act {
     ContextMenu,
     /// Inline suggestions: Trigger, Accept (true: the next word only), Hide, Show Next (1) / Previous (-1).
     InlineTrigger,
-    InlineAccept(bool),
+    /// 0: all, 1: the next word, 2: the next line
+    InlineAccept(u8),
     InlineHide,
     InlineCycle(i32),
     Copy(bool),
@@ -150,8 +151,9 @@ pub fn act_of(id: &str) -> Option<Act> {
         "editor.action.formatDocument" => FormatDocument,
         "editor.action.formatSelection" => FormatSelection,
         "editor.action.inlineSuggest.trigger" => InlineTrigger,
-        "editor.action.inlineSuggest.commit" => InlineAccept(false),
-        "editor.action.inlineSuggest.acceptNextWord" => InlineAccept(true),
+        "editor.action.inlineSuggest.commit" => InlineAccept(0),
+        "editor.action.inlineSuggest.acceptNextWord" => InlineAccept(1),
+        "editor.action.inlineSuggest.acceptNextLine" => InlineAccept(2),
         "editor.action.inlineSuggest.hide" => InlineHide,
         "editor.action.inlineSuggest.showNext" => InlineCycle(1),
         "editor.action.inlineSuggest.showPrevious" => InlineCycle(-1),

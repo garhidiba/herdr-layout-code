@@ -4,7 +4,7 @@
 
 use super::Editor;
 use crate::buffer::Pos;
-use crate::inline::{self, Cancel, Config, Health};
+use crate::inline::{self, Cancel, Config, Health, ModelInfo};
 use crate::keys::Ev;
 use crate::term;
 use std::collections::{HashMap, HashSet};
@@ -35,6 +35,8 @@ pub struct InlineState {
     cache: Vec<(String, Vec<String>)>,
     health: HashMap<String, Health>,
     warmed: HashSet<String>,
+    /// What Ollama said about each provider:model (absent: not asked yet; None: it didn't say).
+    models: HashMap<String, Option<ModelInfo>>,
     seen: Option<(PathBuf, u64, Pos)>,
     /// The event being handled edited by typing (asks again once typing pauses).
     pub editing: bool,
@@ -79,6 +81,9 @@ impl Editor {
         if let Some(p) = self.health(cfg).paused.clone() {
             return Some(format!("{} is paused: {p} (click its status bar item to resume)", cfg.label));
         }
+        if self.inline.models.get(&cfg.key).is_some_and(|i| i.is_some_and(|i| i.missing)) {
+            return Some(inline::missing_text(cfg));
+        }
         if self.popup.is_some() || self.prompt.is_some() || self.ls.peek.is_some() || !self.empty() {
             return Some("ui".into());
         }
@@ -89,7 +94,7 @@ impl Editor {
             return Some("The file is too large for inline suggestions".into());
         }
         let h = self.head();
-        if !manual && !inline::at_suggestable(&self.buf.lines[h.line], h.col) {
+        if !manual && (!inline::at_suggestable(&self.buf.lines[h.line], h.col) || inline::quiet_end(&self.buf.lines, h.line)) {
             return Some("position".into());
         }
         if Self::limited(cfg) {
@@ -163,7 +168,7 @@ impl Editor {
             let items = items.clone();
             return self.inline_show(items, at, version);
         }
-        let ctx = inline::context_at(&self.buf.lines, at.line, at.col, cfg.prefix_chars, cfg.suffix_chars);
+        let ctx = inline::Context { prose: inline::prose_file(&file), ..inline::context_at(&self.buf.lines, at.line, at.col, cfg.prefix_chars, cfg.suffix_chars) };
         self.inline_cancel();
         let cancel = Arc::new(Cancel::default());
         self.inline.cancel = Some(cancel.clone());
@@ -172,9 +177,30 @@ impl Editor {
         self.inline.busy = true;
         let t0 = Instant::now();
         let work_cfg = cfg.clone();
-        let req = inline::request(&work_cfg, &ctx);
+        let req = inline::request(&work_cfg, &ctx, true);
+        // the reply streams in: its complete lines show as they come (a job each); reading stops where the block ends
+        // (or at prose)
+        let (tx, part_ctx) = (self.ls.jobs.0.clone(), ctx.clone());
+        let mut shown = String::new();
+        let partial = move |text: &str| {
+            let (r, why) = inline::clean(&text[..text.rfind('\n').map_or(0, |i| i + 1)], &part_ctx, work_cfg.multiline);
+            if why == Some("prose") {
+                return true;
+            }
+            if let Some(r) = r.filter(|r| *r != shown) {
+                shown = r.clone();
+                let _ = tx.send(Box::new(move |ed: &mut Editor| {
+                    if ed.inline.gen == gen {
+                        ed.inline_show(vec![r], at, version);
+                    }
+                }));
+                term::wake();
+            }
+            work_cfg.multiline && inline::block_cut(text, &part_ctx, false).1
+        };
+        let work_cfg = cfg.clone();
         self.spawn(
-            move || match inline::post(&req, &cancel) {
+            move || match inline::post_stream(&req, &cancel, partial) {
                 Ok((status, json)) => Some(inline::reply(&work_cfg, status, &json)),
                 Err(None) => None,
                 Err(Some(e)) => Some(Err(inline::failure(&work_cfg, &e))),
@@ -190,6 +216,9 @@ impl Editor {
                     Ok(t) => (t, None),
                     Err(e) => (vec![], Some(e)),
                 };
+                if error.as_deref() == Some(&inline::missing_text(&cfg)) {
+                    ed.inline.models.insert(cfg.key.clone(), Some(ModelInfo { missing: true, chat: false }));
+                }
                 ed.inline.error = error.clone();
                 let results: Vec<_> = texts.iter().map(|t| inline::clean(t, &ctx, cfg.multiline)).collect();
                 let good: Vec<String> = results.iter().filter_map(|r| r.0.clone()).collect();
@@ -199,8 +228,10 @@ impl Editor {
                     None
                 } else if results.iter().any(|r| r.1 == Some("fim")) {
                     Some("fim")
+                } else if !good.is_empty() {
+                    None
                 } else {
-                    results.iter().find_map(|r| r.1).or(if results.is_empty() { Some("empty") } else { None })
+                    Some(results.iter().find_map(|r| r.1).unwrap_or("empty"))
                 };
                 let paused = ed.health(&cfg).record(anomaly, error.as_deref());
                 let w = ed.c.warn.clone();
@@ -215,6 +246,8 @@ impl Editor {
                     }
                     ed.inline.cache.push((key, good.clone()));
                     ed.inline_show(good, at, version);
+                } else if ed.inline.ghost.as_ref().is_some_and(|g| g.version == version && g.at == at) {
+                    ed.inline.ghost = None; // lines shown while streaming
                 }
             },
         );
@@ -265,11 +298,16 @@ impl Editor {
             _ => false,
         }
     }
-    /// Tab: the whole suggestion; ⌘→ / Ctrl+→: up to the end of its next word, the rest still showing.
-    pub fn inline_accept(&mut self, word: bool) {
+    /// Tab: the whole suggestion; ⌘→ / Ctrl+→ (`part` 1): up to the end of its next word; Accept Next Line (2): up to
+    /// its next line break; the rest still showing.
+    pub fn inline_accept(&mut self, part: u8) {
         let Some(g) = self.inline.ghost.clone() else { return };
         let text = &g.items[g.index];
-        let n = if word { inline::next_word_len(text) } else { text.len() };
+        let n = match part {
+            1 => inline::next_word_len(text),
+            2 => inline::next_line_len(text),
+            _ => text.len(),
+        };
         let (part, rest) = text.split_at(n);
         self.insert(part, false);
         self.buf.seal();
@@ -289,17 +327,29 @@ impl Editor {
         self.inline.ghost = None;
         self.inline_request(true);
     }
-    /// Loads the provider's model in the background once per provider and model (Ollama).
+    /// Once per provider and model (Ollama): asks whether the model is pulled and a chat model, then loads it in the
+    /// background.
     pub fn inline_warmup(&mut self) {
         let cfg = self.inline_cfg();
         if !cfg.enabled || self.inline.warmed.contains(&cfg.key) {
             return;
         }
-        let Some(req) = inline::warmup(&cfg) else { return };
+        let (Some(show), Some(load)) = (inline::show(&cfg), inline::warmup(&cfg)) else { return };
         self.inline.warmed.insert(cfg.key.clone());
-        std::thread::spawn(move || {
-            let _ = inline::post(&req, &Cancel::default());
-        });
+        self.spawn(
+            move || {
+                let info = inline::post(&show, &Cancel::default()).ok().map(|(status, json)| inline::model_info(status, &json));
+                if info.is_some_and(|i| !i.is_some_and(|i| i.missing)) {
+                    let _ = inline::post(&load, &Cancel::default());
+                }
+                info
+            },
+            move |ed, info| {
+                if let Some(info) = info {
+                    ed.inline.models.insert(cfg.key, info);
+                }
+            },
+        );
     }
     /// The status bar item: the provider and its state (None while the provider is off or can't run here and nothing
     /// was set).
@@ -309,8 +359,12 @@ impl Editor {
             return None;
         }
         let paused = self.health(&cfg).paused.is_some();
+        let info = self.inline.models.get(&cfg.key).copied();
+        let pull = format!(": ollama pull {}", cfg.model);
         let state = if !cfg.enabled {
             ": off"
+        } else if info.is_some_and(|i| i.is_some_and(|i| i.missing)) {
+            &pull
         } else if paused {
             ": paused"
         } else if Self::limited(&cfg) {
@@ -319,21 +373,35 @@ impl Editor {
             " …"
         } else if self.inline.error.is_some() {
             ": error"
+        } else if inline::chat_model(&cfg, info.as_ref()) {
+            ": chat model"
         } else {
             ""
         };
         Some(format!("{}{state}", cfg.label))
     }
-    /// What the pointer on the item shows: today's usage (and why the provider is paused).
+    /// What the pointer on the item shows: why the provider is paused (else what happened to the last reply), a model
+    /// to pull or a chat model's hint, and today's usage.
     pub fn inline_usage(&mut self) -> String {
         let cfg = self.inline_cfg();
-        let paused = self.health(&cfg).paused.clone().map(|p| format!("{} paused: {p} · ", cfg.label)).unwrap_or_default();
-        paused + &inline::usage_text(&cfg, &inline::usage_of(&cfg.key, &inline::usage_file(), &inline::today()))
+        let h = self.health(&cfg);
+        let mut notes: Vec<String> = h.paused.clone().map(|p| format!("{} paused: {p}", cfg.label)).or(h.note.clone()).into_iter().collect();
+        let info = self.inline.models.get(&cfg.key).copied();
+        if info.is_some_and(|i| i.is_some_and(|i| i.missing)) {
+            notes.push(inline::missing_text(&cfg));
+        }
+        if inline::chat_model(&cfg, info.as_ref()) {
+            notes.push(inline::chat_hint(&cfg));
+        }
+        notes.push(inline::usage_text(&cfg, &inline::usage_of(&cfg.key, &inline::usage_file(), &inline::today())));
+        notes.join(" · ")
     }
     /// A click on the item: suggestions on/off (resuming a paused provider).
     pub fn toggle_inline(&mut self) {
         let cfg = self.inline_cfg();
         self.inline.health.remove(&cfg.key);
+        self.inline.models.remove(&cfg.key);
+        self.inline.warmed.remove(&cfg.key);
         self.inline.error = None;
         self.inline_hide();
         match crate::settings::update(&crate::settings::settings_file(), "editor.inlineSuggest.enabled", serde_json::json!(!cfg.enabled)) {

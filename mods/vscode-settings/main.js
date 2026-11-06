@@ -362,7 +362,7 @@ export default class Settings extends View {
         this.segmented(t, "editor.cursorBlinking", [["blink", "Blink"], ["smooth", "Smooth"], ["phase", "Phase"], ["expand", "Expand"], ["solid", "Solid"]])))
       .child(this.row(t, "Editor", "Inline Suggestions", "Gray ghost text from a code model while you type: Tab accepts, Esc hides, ⌘→ / Ctrl+→ takes a word. The status bar item turns it on and off.",
         this.toggle(t, "editor.inlineSuggest.enabled", "Inline Suggestions")))
-      .child(this.row(t, "Editor", "Inline Suggestion Provider", "Ollama runs the model on this machine (ollama pull qwen2.5-coder:7b); model, endpoint and limits are in settings.json.",
+      .child(this.row(t, "Editor", "Inline Suggestion Provider", "Ollama runs the model on this machine (ollama pull qwen2.5-coder:1.5b-base); model, endpoint and limits are in settings.json.",
         this.segmented(t, "editor.inlineSuggest.provider", [["ollama", "Ollama"], ["off", "Off"]])));
   }
 
