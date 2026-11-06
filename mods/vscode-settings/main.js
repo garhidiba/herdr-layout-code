@@ -9,7 +9,7 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { theme, props, run, exec, hc, spaces, appHome, readTextFile, writeTextFile, closeOverlay, keys } from "herdr";
 import { FILE, normalize, parse, loose, withSetting, withDefaults, rewrite, updateFile, stepDelay, coreStatus, coreCurrent, DEFAULTS,
-  PAGE_FILE, requestedPage } from "./settings.js";
+  PAGE_FILE, requestedPage, editorStatus, editorCurrent } from "./settings.js";
 import { FILE as KB_FILE, fromHerdr, label, matchesRow, conflicts, parseFile, serializeFile, withKey, withoutKey, withReset,
   hasUserEntries, herdrRoute, withPassthrough, recordStep } from "./keybindings.js";
 import { createOpenTab } from "./launch.js";
@@ -19,6 +19,7 @@ const settingsPath = () => `${appHome()}/${FILE}`;
 const kbPath = () => `${appHome()}/${KB_FILE}`;
 const keysPath = () => `${appHome()}/keys.json`;
 const corePath = () => `${appHome()}/vscode-core/vscode-core`;
+const editorPath = () => `${appHome()}/vscode-core/vsedit`; // the Rust editor, built with the core
 const EDITOR = "mods/vscode-viewer/editor/vsedit.sh"; // same launcher the Explorer opens files with
 const KB_TABLE = "mods/vscode-viewer/editor/keybindings.cjs"; // `--table <file>`: the editor's commands and keys in effect
 // Herdr starts with PATH=/usr/bin:/bin, so node (Homebrew, ~/.local) is looked up there too (as the viewer does).
@@ -28,8 +29,8 @@ const herdrKeys = () => { try { return keys() ?? []; } catch { return []; } };
 
 export default class Settings extends View {
   init(_props, cx) {
-    this.v = { ...DEFAULTS };
-    this.error = null; this.saved = 0; this.core = null; this.built = false;
+    this.v = normalize({});
+    this.error = null; this.saved = 0; this.core = null; this.built = false; this.editor = null; this.editorBuilt = false;
     this.inputs = {};
     this.number("files.autoSaveDelay");
     this.number("editor.tabSize");
@@ -164,10 +165,12 @@ export default class Settings extends View {
 
   checkCore(cx) {
     cx.spawn(async (cx) => {
-      const r = await exec(corePath(), ["--version"]).catch(() => null);
+      const [r, e] = await Promise.all([corePath(), editorPath()].map((bin) => exec(bin, ["--version"]).catch(() => null)));
       this.built = r?.code === 0 && coreCurrent(r.stdout);
       this.core = coreStatus(r?.code === 0 ? r.stdout : null);
-      if (this.built) this.building = false;
+      this.editorBuilt = e?.code === 0 && editorCurrent(e.stdout);
+      this.editor = editorStatus(e?.code === 0 ? e.stdout : null);
+      if (!this.needsBuild()) this.building = false;
       cx.notify();
     });
   }
@@ -244,11 +247,16 @@ export default class Settings extends View {
       .hover((s) => s.opacity(0.88)).on_click(onClick).child(label);
   }
 
-  coreLine(t) {
-    const needsBuild = this.v["core.engine"] === "rust" && this.core && !this.built;
+  // A chosen Rust engine whose binary is missing or out of date (one build makes both: build-core.sh).
+  needsBuild() {
+    return Boolean((this.v["core.engine"] === "rust" && this.core && !this.built) || (this.v["editor.engine"] === "rust" && this.editor && !this.editorBuilt));
+  }
+
+  // The binary's status, and the Build button (on the core's row, else the editor's) while a chosen one isn't current.
+  statusLine(t, id, status, built, checking, button) {
     return h_flex().gap(10).items_center()
-      .child(div().flex_1().text_size(11.5).text_color(this.built ? t.done : t.dim).child(this.core ?? "Rust core: checking…"))
-      .when(needsBuild, (el) => el.child(this.button(t, "build-core", this.building ? "Building… (see tab)" : "Build Rust core", () => this.buildCore())));
+      .child(div().flex_1().text_size(11.5).text_color(built ? t.done : t.dim).child(status ?? checking))
+      .when(button && this.needsBuild(), (el) => el.child(this.button(t, id, this.building ? "Building… (see tab)" : "Build Rust core", () => this.buildCore())));
   }
 
   // ----- keyboard shortcuts page -----
@@ -331,7 +339,11 @@ export default class Settings extends View {
     return v_flex().id("body").flex_1().min_h(0).px(18).pb(10).overflow_y_scrollbar()
       .child(this.section(t, "Core engine"))
       .child(this.row(t, "Core", "Engine", "File and git scanning for the explorer and source control. JavaScript works everywhere; Rust is faster but must be built first.",
-        this.segmented(t, "core.engine", [["js", "JavaScript"], ["rust", "Rust"]]), this.coreLine(t)))
+        this.segmented(t, "core.engine", [["js", "JavaScript"], ["rust", "Rust"]]),
+        this.statusLine(t, "build-core", this.core, this.built, "Rust core: checking…", this.v["core.engine"] === "rust")))
+      .child(this.row(t, "Editor", "Engine", "The terminal editor; follows the core's engine until you pick one. Rust opens files faster and never stalls typing on long lines; language features (Go to Definition, rename, hover, the command palette and context menu) are JavaScript-only for now.",
+        this.segmented(t, "editor.engine", [["js", "JavaScript"], ["rust", "Rust"]]),
+        this.statusLine(t, "build-editor", this.editor, this.editorBuilt, "Rust editor: checking…", this.v["core.engine"] !== "rust")))
       .child(this.section(t, "Files"))
       .child(this.row(t, "Files", "Auto Save", "Save dirty editors automatically.",
         this.segmented(t, "files.autoSave", [["off", "Off"], ["afterDelay", "After Delay"], ["onFocusChange", "On Focus Change"]])))

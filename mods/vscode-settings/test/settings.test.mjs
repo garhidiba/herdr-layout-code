@@ -1,7 +1,8 @@
 // node --test mods/vscode-settings/test/settings.test.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
-import { DEFAULTS, parse, normalize, coreEngine, withSetting, withDefaults, serialize, updateFile, stepDelay, coreStatus, coreCurrent } from "../settings.js";
+import { DEFAULTS, parse, normalize, coreEngine, editorEngine, withSetting, withDefaults, serialize, updateFile, stepDelay, coreStatus, coreCurrent,
+  editorStatus, editorCurrent } from "../settings.js";
 
 // An in-memory file with writeTextFile's contract: writes only when `expected` still matches.
 function memoryFile(text, { raceOnce = null } = {}) {
@@ -18,11 +19,21 @@ function memoryFile(text, { raceOnce = null } = {}) {
 }
 
 test("a missing or empty file means every default, engine js", () => {
-  assert.deepEqual(normalize(parse(null)), DEFAULTS);
-  assert.deepEqual(normalize(parse("  ")), DEFAULTS);
+  assert.deepEqual(normalize(parse(null)), { ...DEFAULTS, "editor.engine": "js" });
+  assert.deepEqual(normalize(parse("  ")), { ...DEFAULTS, "editor.engine": "js" });
   assert.equal(coreEngine({}), "js");
   assert.equal(coreEngine({ "core.engine": "rust" }), "rust");
   assert.equal(coreEngine({ "core.engine": "go" }), "js");
+});
+
+test("the editor's engine follows the core's until it is set, as vsedit.sh picks it", () => {
+  assert.equal(editorEngine({}), "js");
+  assert.equal(editorEngine({ "core.engine": "rust" }), "rust");
+  assert.equal(editorEngine({ "core.engine": "rust", "editor.engine": "js" }), "js");
+  assert.equal(editorEngine({ "editor.engine": "rust" }), "rust");
+  assert.equal(editorEngine({ "core.engine": "rust", "editor.engine": "go" }), "rust");
+  assert.throws(() => withSetting({}, "editor.engine", "go"));
+  assert.deepEqual(withDefaults({ "editor.engine": "rust", "core.engine": "rust", "my.key": 1 }), { "my.key": 1, ...DEFAULTS });
 });
 
 test("comments and trailing commas are read; a non-object file is refused", () => {
@@ -82,6 +93,15 @@ test("the Rust core status reads its version", () => {
   assert.equal(coreStatus('{"version":"1.0.0","backend":"git","git":"2.54.0"}\n'), "Rust core: built (v1.0.0)");
   assert.equal(coreStatus('{"version":"0.1.0"}'), "Rust core: v0.1.0 is out of date (rebuild it)");
   assert.equal(coreStatus("ok"), "Rust core: built");
+});
+
+test("the Rust editor status reads its version and launch API", () => {
+  assert.equal(editorStatus(null), "Rust editor: not built");
+  assert.equal(editorStatus("vsedit 1.0.0 (api 1)\n"), "Rust editor: built (v1.0.0)");
+  assert.equal(editorStatus("vsedit 1.0.0 (api 2)"), "Rust editor: v1.0.0 is out of date (rebuild it)");
+  assert.equal(editorStatus("vsedit 0.9.0"), "Rust editor: v0.9.0 is out of date (rebuild it)");
+  assert.equal(editorCurrent("vsedit 1.0.0 (api 1)"), true);
+  assert.equal(editorCurrent(null), false);
 });
 
 test("only a binary of the mods' major version counts as built", () => {

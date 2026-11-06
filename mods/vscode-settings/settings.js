@@ -13,7 +13,7 @@ export const DEFAULTS = {
   "editor.tabSize": 4,                // 1-16, for files without indentation to detect
   "editor.insertSpaces": true,
 };
-export const CHOICES = { "core.engine": ["js", "rust"], "files.autoSave": ["off", "afterDelay", "onFocusChange"] };
+export const CHOICES = { "core.engine": ["js", "rust"], "editor.engine": ["js", "rust"], "files.autoSave": ["off", "afterDelay", "onFocusChange"] };
 const NUMBERS = { "files.autoSaveDelay": [0.1, 3600, false], "editor.tabSize": [1, 16, true] }; // [min, max, integer]
 
 // VS Code settings files allow comments and trailing commas (same rule as the editor's highlight.cjs `loose`).
@@ -39,15 +39,19 @@ export function coerce(key, value) {
   return value;
 }
 
-// Raw object -> every known setting with a valid value (invalid or missing ones are the default).
+// Raw object -> every known setting with a valid value (invalid or missing ones are the default), plus the editor's
+// engine in effect.
 export function normalize(raw = {}) {
   const v = {};
   for (const k of Object.keys(DEFAULTS)) v[k] = coerce(k, raw[k]) ?? DEFAULTS[k];
+  v["editor.engine"] = coerce("editor.engine", raw["editor.engine"]) ?? v["core.engine"];
   return v;
 }
 
 // The engine the mods should use: "js" unless the file says "rust". The one reader other mods may copy.
 export const coreEngine = (raw) => normalize(raw)["core.engine"];
+// The terminal editor's engine, as mods/vscode-viewer/editor/vsedit.sh picks it: "editor.engine" when set, else the core's.
+export const editorEngine = (raw) => normalize(raw)["editor.engine"];
 
 // raw with key set to a valid value (throws on an invalid one); the other keys, known or not, are kept.
 export function withSetting(raw, key, value) {
@@ -56,8 +60,8 @@ export function withSetting(raw, key, value) {
   return { ...raw, [key]: v };
 }
 
-// raw with every known setting back to its default; unknown keys are kept.
-export const withDefaults = (raw) => ({ ...raw, ...DEFAULTS });
+// raw with every known setting back to its default (the editor's engine follows the core's again); unknown keys are kept.
+export const withDefaults = ({ "editor.engine": _, ...raw }) => ({ ...raw, ...DEFAULTS });
 
 export const serialize = (raw) => JSON.stringify(raw, null, 2) + "\n";
 
@@ -102,4 +106,16 @@ export function coreStatus(stdout) {
   const v = coreVersion(stdout);
   if (v && !coreCurrent(stdout)) return `Rust core: v${v} is out of date (rebuild it)`;
   return `Rust core: built${v ? ` (v${v})` : ""}`;
+}
+
+// The launch contract of the Rust editor that mods/vscode-viewer/editor/vsedit.sh accepts (its API, `vsedit --api`).
+export const EDITOR_API = 1;
+// True when `vsedit --version` output ("vsedit 1.0.0 (api 1)") is a binary the launcher runs.
+export const editorCurrent = (stdout) => Number(stdout?.match(/\(api (\d+)\)/)?.[1]) === EDITOR_API;
+// `vsedit --version` output -> its status; null output means not built.
+export function editorStatus(stdout) {
+  if (stdout == null) return "Rust editor: not built";
+  const v = coreVersion(stdout);
+  if (!editorCurrent(stdout)) return `Rust editor: ${v ? `v${v} ` : ""}is out of date (rebuild it)`;
+  return `Rust editor: built${v ? ` (v${v})` : ""}`;
 }
