@@ -520,6 +520,7 @@ def run_scrollbars(tmp):
     sc = screen_of(t)
     assert re.search(r"\x1b\[2;100H" + BAR_CELL, sc), "no vertical bar in the last column"
     assert "\x1b[?1003h" in sc, "hover reports not on"
+    t.read(timeout=0.5)                           # the word highlight's frame, 250 ms after the cursor rests
     t.out = b""
     t.send("\x1b[<35;100;2M")                     # buttonless motion onto the thumb: the bar alone repaints
     assert b"\x1b7" in t.out and b"Ln 1, Col 1" not in t.out, "hover repainted more than the bar"
@@ -569,7 +570,7 @@ def bg(hexcolor):
 
 def run_decorations(tmp):
     """Indent guides in the theme's editorIndentGuide colors (the cursor's block in activeBackground); the bracket pair at
-    the cursor on editorBracketMatch.background."""
+    the cursor on editorBracketMatch.background; the word at the cursor's occurrences after 250 ms."""
     file = os.path.join(tmp, "deco.go")
     open(file, "w").write("package main\n\nfunc main() {\n\tif true {\n\t\tprintln(1)\n\t}\n}\n")
     t = Term(file)
@@ -585,6 +586,11 @@ def run_decorations(tmp):
     assert t.read("Ln 5, Col 17", timeout=2)
     sc = screen_of(t)
     assert re.search(re.escape(bg("#515a6b")) + r"\((?:\x1b\[[\d;]*m)*1(?:\x1b\[[\d;]*m)*" + re.escape(bg("#515a6b")) + r"\)", sc), "brackets not highlighted"
+    t.send("\x07")
+    t.out = b""
+    t.send("3:7\r")                              # on `main` of func main
+    t.read(timeout=0.5)
+    assert screen_of(t).count(bg("#474d59") + "main") >= 2, "occurrences of main not on wordHighlightBackground"
     t.send("\x11")
     assert t.wait_exit() == 0
     print("decorations: ok")

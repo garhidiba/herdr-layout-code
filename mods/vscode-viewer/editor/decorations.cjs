@@ -1,5 +1,7 @@
 // Editor decorations from the text, computed for the visible lines only: indent guides (editor.guides.indentation, with
-// the active one) and the matching bracket. Pure functions over lines.
+// the active one), the matching bracket, and word / selection occurrences. Pure functions over lines.
+const { wordOccurrences } = require("./lang/fallback.cjs");
+
 const SCAN = 1000;     // lines walked from a line to find its block or the content around a blank line
 const BRACKETS = { "(": ")", "[": "]", "{": "}" };
 const OPENS = { ")": "(", "]": "[", "}": "{" };
@@ -89,4 +91,18 @@ function partner(lines, at, ch, code, limit) {
   return null;
 }
 
-module.exports = { leadCols, guideLevels, activeGuide, indentGuides, matchBracket };
+// Whole-word matches of `word` on lines [first, last]: [{ line, col, len }].
+function wordMatches(lines, first, last, word) {
+  return wordOccurrences(lines.slice(first, last + 1), word).map(o => ({ line: o.start.line + first, col: o.start.col, len: word.length }));
+}
+// Exact (case-sensitive) matches of `text` on lines [first, last], not overlapping: [{ line, col, len }].
+function textMatches(lines, first, last, text) {
+  const out = [];
+  if (!text) return out;
+  for (let l = first; l <= Math.min(last, lines.length - 1); l++) {
+    for (let i = lines[l].indexOf(text); i !== -1; i = lines[l].indexOf(text, i + text.length)) out.push({ line: l, col: i, len: text.length });
+  }
+  return out;
+}
+
+module.exports = { leadCols, guideLevels, activeGuide, indentGuides, matchBracket, wordMatches, textMatches };

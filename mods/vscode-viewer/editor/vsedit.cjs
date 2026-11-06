@@ -55,6 +55,7 @@ function wordLeft(line, col) {
 
 // ---------- the editor ----------
 const DOC_FIELDS = ["file", "doc", "buf", "hl", "indent", "scope", "language", "comment", "crumbs", "root", "session", "sel", "goal", "top", "left", "seenVersion"];
+const WORD_DELAY = 250; // ms the cursor rests on a word before its occurrences highlight, like VS Code
 const NOT_FOUND = { definition: "definition", typeDefinition: "type definition", implementation: "implementation", references: "references" };
 const PEEK_TITLE = { definition: "Definition", typeDefinition: "Type Definition", implementation: "Implementations", references: "References" };
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
@@ -848,10 +849,12 @@ class Editor {
     this.vbar.layout(v, 2, this.cols, height, height, n + height - 1, this.top);
     this.hbar.layout(h, height + 2, this.gutter + 1, width, width, widest + 5, this.left);
   }
-  // Overview ruler marks on the vertical bar, like VS Code's: find matches, the selection's other end, the cursor line.
-  rulerMarks(ms) {
+  // Overview ruler marks on the vertical bar, like VS Code's: find matches, word / selection occurrences, the selection's
+  // other end, the cursor line.
+  rulerMarks(ms, hits) {
     const n = this.lines.length, len = this.vbar.length, marks = new Array(len).fill(null), c = this.colors;
     for (const m of ms) marks[SB.markCell(m.line, n, len)] = c.rulerFind;
+    for (const h of hits?.list ?? []) marks[SB.markCell(h.line, n, len)] = hits.ruler;
     if (!this.empty) marks[SB.markCell(this.sel.anchor.line, n, len)] = c.rulerSelection;
     marks[SB.markCell(this.head.line, n, len)] = c.rulerCursor;
     return marks;
@@ -933,7 +936,8 @@ class Editor {
     const showMatches = this.prompt?.kind === "find" && this.find.query;
     const ms = showMatches ? this.matches() : [];
     const guides = this.guidesFor(height), brackets = this.bracketPair() ?? [];
-    let mi = 0;
+    const hits = showMatches ? null : this.highlights(height), occ = hits?.list ?? []; // Find shows its own matches
+    let mi = 0, hi = 0;
 
     // breadcrumbs
     P.move(1, 1);
@@ -951,9 +955,12 @@ class Editor {
       while (mi < ms.length && ms[mi].line < l) mi++;
       const lineMatches = [];
       for (let k = mi; k < ms.length && ms[k].line === l; k++) lineMatches.push(ms[k]);
-      this.paintLine(P, l, lineBg, ss, se, lineMatches, width, { guide: guides[r], brackets: brackets.filter(b => b.line === l) });
+      while (hi < occ.length && occ[hi].line < l) hi++;
+      const lineHits = [];
+      for (let k = hi; k < occ.length && occ[k].line === l; k++) lineHits.push(occ[k]);
+      this.paintLine(P, l, lineBg, ss, se, lineMatches, width, { guide: guides[r], brackets: brackets.filter(b => b.line === l), hits: lineHits, hitBg: hits?.bg });
     }
-    this.marks = this.vbar.shown ? this.rulerMarks(ms) : null;
+    this.marks = this.vbar.shown ? this.rulerMarks(ms, hits) : null;
     this.vbar.paint(P, c, this.marks);
     if (this.hbar.shown) { P.move(height + 2, 1); P.text(" ".repeat(this.cols), c.fg, c.bg); this.hbar.paint(P, c); }
 
@@ -993,7 +1000,36 @@ class Editor {
     }
     return this._brackets.pair;
   }
-  // deco: { guide: { count, active }, brackets: [{ col }] } for this line.
+  // The word whose occurrences highlight: the one at the cursor once it has rested there WORD_DELAY ms (a redraw is
+  // scheduled for then), null before that, while typing or with a selection.
+  restingWord() {
+    const w = this.empty ? this.wordAt() : null;
+    const key = w && `${this.file}:${this.buf.version}:${w.start.line}:${w.start.col}:${w.text}`;
+    if (key !== this.wordKey) {
+      this.wordKey = key; this.wordSince = Date.now();
+      clearTimeout(this.wordTimer);
+      if (key) (this.wordTimer = setTimeout(() => this.redraw(), WORD_DELAY)).unref?.();
+      return null;
+    }
+    return key && Date.now() - this.wordSince >= WORD_DELAY ? w.text : null;
+  }
+  // Occurrences to highlight { list: [{ line, col, len }], bg, ruler } or null: exact matches of a one-line selection
+  // (selection highlight), else whole-word matches of the resting word (occurrence highlight). The whole file up to
+  // 20,000 lines (for the overview ruler), else the visible lines; cached per text version and needle.
+  highlights(height) {
+    const [s, e] = this.range(), sel = !this.empty && s.line === e.line ? this.buf.getText(s, e) : null;
+    const text = sel?.trim() ? sel : null, word = this.restingWord();
+    if (!text && !word) return null;
+    const whole = this.lines.length <= 20000, a = whole ? 0 : this.top, b = whole ? this.lines.length - 1 : this.top + height - 1;
+    const key = `${this.buf.version}:${a}:${b}:${text ? "s" + text : "w" + word}`;
+    if (this._hits?.key !== key || this._hits.buf !== this.buf) {
+      const c = this.colors;
+      this._hits = { key, buf: this.buf, list: text ? D.textMatches(this.lines, a, b, text) : D.wordMatches(this.lines, a, b, word),
+        bg: text ? c.selectionHighlight : c.wordHighlight, ruler: text ? c.rulerSelection : c.rulerWord };
+    }
+    return this._hits;
+  }
+  // deco: { guide: { count, active }, brackets: [{ col }], hits: [{ col, len }], hitBg } for this line.
   paintLine(P, l, lineBg, ss, se, lineMatches, width, deco = {}) {
     const c = this.colors, text = this.lines[l], g = deco.guide, size = this.tab;
     const selFrom = l < ss.line || l > se.line ? -1 : l === ss.line ? ss.col : 0;
@@ -1003,7 +1039,8 @@ class Editor {
       const m = lineMatches.find(m => i >= m.col && i < m.col + m.len);
       if (m) return cur && cur.line === l && cur.col === m.col ? c.match : c.matchOther;
       if (selFrom !== -1 && i >= selFrom && i < selTo) return c.selection;
-      return deco.brackets?.some(b => b.col === i) ? c.bracketMatch : null;
+      if (deco.brackets?.some(b => b.col === i)) return c.bracketMatch;
+      return deco.hits?.some(h => i >= h.col && i < h.col + h.len) ? deco.hitBg : null;
     };
     // a guide at every indent step the line has, the active block's in its own color
     const guideAt = g?.count ? (k) => (k % size === 0 && k / size < g.count ? (k / size === g.active ? c.guideActive : c.guide) : null) : null;

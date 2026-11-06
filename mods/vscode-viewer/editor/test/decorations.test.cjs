@@ -80,3 +80,42 @@ test("both brackets are painted on editorBracketMatch.background", async () => {
   assert.ok(out.includes(bgOf(ed.colors.bracketMatch) + "("), "( highlighted");
   assert.ok(out.includes(bgOf(ed.colors.bracketMatch) + ")"), ") highlighted");
 });
+
+// ---------- occurrences ----------
+test("word occurrences are whole words only; selection matches are exact and case-sensitive", () => {
+  const lines = ["foo food foo_x foo", "x = foo + Foo"];
+  assert.deepEqual(D.wordMatches(lines, 0, 1, "foo").map(m => [m.line, m.col]), [[0, 0], [0, 15], [1, 4]]);
+  assert.deepEqual(D.textMatches(lines, 0, 1, "foo").map(m => [m.line, m.col]), [[0, 0], [0, 4], [0, 9], [0, 15], [1, 4]]);
+  assert.deepEqual(D.textMatches(lines, 1, 1, "Foo").map(m => [m.line, m.col]), [[1, 10]], "only the lines asked for");
+});
+
+test("the word at the cursor highlights 250 ms after the cursor rests, in wordHighlightBackground, with ruler marks", async () => {
+  const ed = await editor(["let a = b + a;", "a"], "source.ts", "/tmp/x.ts");
+  ed.moveTo({ line: 0, col: 4 });
+  assert.equal(ed.highlights(10), null, "not before the delay");
+  ed.wordSince -= 300;
+  const h = ed.highlights(10);
+  assert.deepEqual(h.list.map(m => [m.line, m.col]), [[0, 4], [0, 12], [1, 0]]);
+  assert.equal(h.bg, ed.colors.wordHighlight);
+  assert.equal(h.ruler, ed.colors.rulerWord);
+  ed.typed("x");
+  assert.equal(ed.highlights(10), null, "typing restarts the delay");
+  ed.moveTo({ line: 0, col: 3 });
+  ed.wordSince -= 300;
+  assert.equal(ed.highlights(10), null, "no word at the cursor");
+});
+
+test("a one-line selection highlights its other exact matches at once, in selectionHighlightBackground", async () => {
+  const ed = await editor(["ab ab", "xab", "a b"], "source.ts", "/tmp/x.ts");
+  ed.sel = { anchor: { line: 0, col: 0 }, head: { line: 0, col: 2 } };
+  const h = ed.highlights(10);
+  assert.deepEqual(h.list.map(m => [m.line, m.col]), [[0, 0], [0, 3], [1, 1]]);
+  assert.equal(h.bg, ed.colors.selectionHighlight);
+  ed.rows = 8; ed.cols = 30;
+  const bgOf = (hex) => fgSGR(hex).replace("[38;", "[48;");
+  assert.ok(ed.render().out.includes(bgOf(ed.colors.selectionHighlight) + "ab"), "the other match is painted");
+  ed.sel = { anchor: { line: 0, col: 0 }, head: { line: 1, col: 1 } };
+  assert.equal(ed.highlights(10), null, "a multi-line selection has none");
+  ed.sel = { anchor: { line: 2, col: 1 }, head: { line: 2, col: 2 } };
+  assert.equal(ed.highlights(10), null, "nor a whitespace-only one");
+});
