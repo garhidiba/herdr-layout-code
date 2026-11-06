@@ -172,7 +172,9 @@ export default class SourceControl extends View {
     if (this.loading || this.busy) { this.queued = !this.busy; return; }
     const { cwd, on } = location(), context = key();
     if (context !== this.context) {
-      this.context = context; this.on = on; this.repos = []; this.selected = this.chosen.get(context) ?? null;
+      // Each project's last repo list stays, so switching back shows it at once while it refreshes.
+      (this.seen ??= new Map()).set(this.context, this.repos);
+      this.context = context; this.on = on; this.repos = this.seen.get(context) ?? []; this.selected = this.chosen.get(context) ?? null;
       this.clearRepo(); this.error = null; this.watched = null;
     }
     if (!cwd) return;
