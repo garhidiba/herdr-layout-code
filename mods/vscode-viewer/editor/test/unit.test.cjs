@@ -523,3 +523,14 @@ test("live() reads the file again when it changes", () => {
   assert.equal(kb.poll(), true);
   assert.equal(kb.keymap.byChord.get("cmd+e"), "undo");
 });
+
+test("Find: Alt+Enter in Replace replaces every match as one undo step", async () => {
+  const ed = await plainEditor(["a b a", "ba"]);
+  ed.openFind(true);
+  ed.handle({ type: "text", text: "a" });
+  ed.find.field = "replace"; ed.handle({ type: "text", text: "z" });
+  press(ed, "enter", { alt: true });
+  assert.deepEqual(ed.lines, ["z b z", "bz"]);
+  ed.undo();
+  assert.deepEqual(ed.lines, ["a b a", "ba"]);
+});

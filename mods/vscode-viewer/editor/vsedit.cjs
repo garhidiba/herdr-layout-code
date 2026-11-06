@@ -368,7 +368,7 @@ class Editor {
     this.insert(this.find.replace);
     this.findNext(1, endOf(s, this.find.replace));
   }
-  replaceAll() {
+  replaceAllMatches() {
     const ms = this.matches();
     if (!ms.length) return;
     const before = this.sel;
@@ -569,7 +569,7 @@ class Editor {
     if (name === "tab" && p.replace) { f.field = f.field === "query" ? "replace" : "query"; return; }
     if (chord === "ctrl+h" || chord === "cmd+alt+f") { p.replace = true; f.field = "replace"; return; }
     if (chord === "ctrl+f" || chord === "cmd+f") { p.replace = false; f.field = "query"; return; }
-    if (name === "enter" && (alt || cmd) && p.replace) return this.replaceAll();
+    if (name === "enter" && (alt || cmd) && p.replace) return this.replaceAllMatches();
     if (name === "enter" && f.field === "replace") return this.replaceOne();
     if (name === "g" && cmd) return this.findNext(shift ? -1 : 1);
     if (name === "enter" || name === "f3" || name === "down") return this.findNext(shift ? -1 : 1);
