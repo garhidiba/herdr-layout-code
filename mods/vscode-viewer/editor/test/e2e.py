@@ -2,11 +2,17 @@
 """End-to-end: runs vsedit.cjs in a 100x30 pseudo-terminal, types, saves, quits, and checks colors against tokenize.cjs;
 scrollbars (editor and hex viewer), the context menu, Kitty ⌘ keys, user keybindings, tsserver definition/references/rename, gofmt, the save dialog, auto save and hot exit;
 find widget toggles, status bar items, symbol breadcrumbs, Go to Symbol and diagnostics.
-usage: python3 -I mods/vscode-viewer/editor/test/e2e.py"""
+usage: python3 -I mods/vscode-viewer/editor/test/e2e.py [scenario ...]
+VSEDIT_BIN=<path to the Rust vsedit> runs the same scenarios against the Rust editor through the launcher (vsedit.sh);
+the language-feature scenarios (phase 3, still JS-only) are skipped then, and each result says which editor ran."""
 import fcntl, json, os, pty, re, select, shutil, signal, struct, subprocess, sys, tempfile, termios, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 EDITOR = os.path.join(HERE, "..", "vsedit.cjs")
+LAUNCHER = os.path.join(HERE, "..", "vsedit.sh")
+RUST_BIN = os.environ.get("VSEDIT_BIN")
+# Scenarios of features that stay in the JS editor until phase 3 (language servers, context menu, command palette).
+PHASE3 = {"run_menu_and_cmd_save", "run_typescript", "run_format", "run_symbols_and_problems"}
 TOKENIZE = os.path.join(HERE, "..", "..", "vscode", "tokenize.cjs")
 
 TSX = '''import React from "react";
@@ -34,6 +40,7 @@ ISOLATED = {}
 QUIT = "\x17"                       # Ctrl+W: Close Editor (Windows/Linux)
 MAC = {"VSEDIT_OS": "mac"}
 MAC_QUIT = "\x1b[119;9u"            # ⌘W as Kitty CSI-u
+TERMS = []  # every editor started, killed after its scenario
 
 
 class Term:
@@ -43,9 +50,13 @@ class Term:
             e = {k: v for k, v in os.environ.items() if k != "HC_TERMINAL_ID"}
             e.update(ISOLATED)
             e.update(env or {})
+            if RUST_BIN:
+                e.update(VSEDIT_ENGINE="rust", VSEDIT_RUST_BIN=RUST_BIN)
+                os.execvpe("sh", ["sh", LAUNCHER, file, *args], e)
             os.execvpe("node", ["node", EDITOR, file, *args], e)
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
         self.pid, self.fd, self.out = pid, fd, b""
+        TERMS.append(self)
 
     def read(self, until=None, timeout=5.0):
         end = time.time() + timeout
@@ -776,7 +787,10 @@ def run_folding(tmp):
     assert "⌄" in last(), "no chevrons with the pointer on the gutter"
     t.send("\x1b[<0;6;2M"); t.send("\x1b[<0;6;2m", wait=0.3)  # click line 1's chevron
     assert "›function a() { ⋯" in last() and "const z" in last() and "if (x)" not in last(), "the chevron click did not fold:\n" + last()[-600:]
-    t.send("\x1bOP"); t.send("Unfold All", wait=0.3); t.send("\r", wait=0.3)
+    if RUST_BIN:  # no command palette until phase 3: the key instead
+        t.send("\x1b[93;7u", wait=0.3)
+    else:
+        t.send("\x1bOP"); t.send("Unfold All", wait=0.3); t.send("\r", wait=0.3)
     assert "one();" in last(), "Unfold All from the palette"
     t.send("\x1b[107;5u")                               # Ctrl+K: the chord's first key
     assert "(Ctrl+K) was pressed. Waiting for second key o" in last(), "no chord hint: " + repr(last()[-500:])
@@ -795,12 +809,41 @@ def main():
     tmp = tempfile.mkdtemp(prefix="vsedit-e2e-")
     ISOLATED.update(VSEDIT_SETTINGS=os.path.join(tmp, "settings", "vscode-settings.json"), VSEDIT_BACKUPS=os.path.join(tmp, "backups"),
                     VSEDIT_KEYBINDINGS=os.path.join(tmp, "settings", "vscode-keybindings.json"), VSEDIT_OS="linux")
+    engines = os.path.join(tmp, "engines.log")
+    ISOLATED.update(VSEDIT_ENGINE_LOG=engines)
+    scenarios = [run_tsx, run_go, run_crlf, run_hex, run_error_page, run_drag_scroll, run_minified, run_scrollbars, run_decorations,
+                 run_autoclose, run_git_gutter, run_folding, run_menu_and_cmd_save, run_save_dialog, run_auto_save, run_hot_exit,
+                 run_keybindings, run_mac_keys, run_format, run_typescript, run_find_and_status, run_symbols_and_problems]
+    only = set(sys.argv[1:])
+    results = []
     try:
-        run_tsx(tmp); run_go(tmp); run_crlf(tmp); run_hex(tmp); run_error_page(tmp); run_drag_scroll(tmp); run_minified(tmp); run_scrollbars(tmp); run_decorations(tmp); run_autoclose(tmp); run_git_gutter(tmp); run_folding(tmp)
-        run_menu_and_cmd_save(tmp); run_save_dialog(tmp); run_auto_save(tmp); run_hot_exit(tmp); run_keybindings(tmp); run_mac_keys(tmp)
-        run_format(tmp); run_typescript(tmp); run_find_and_status(tmp); run_symbols_and_problems(tmp)
+        for run in scenarios:
+            name = run.__name__
+            if only and name not in only and name[4:] not in only:
+                continue
+            if RUST_BIN and name in PHASE3:
+                results.append((name, "skipped (phase 3)", "")); continue
+            open(engines, "w").close()
+            try:
+                run(tmp); status = "pass"
+            except Exception as e:  # noqa: BLE001 - every failure is reported in the table
+                status = f"FAIL: {str(e).splitlines()[0][:100] if str(e) else type(e).__name__}"
+            for t in TERMS:
+                try:
+                    os.kill(t.pid, signal.SIGKILL); os.waitpid(t.pid, 0)
+                except OSError:
+                    pass
+                os.close(t.fd)
+            TERMS.clear()
+            used = sorted(set(open(engines).read().split("\n")) - {""}) if RUST_BIN else ["js"]
+            results.append((name, status, ", ".join(used)))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+    print("\nscenario | result | editor")
+    for name, status, used in results:
+        print(f"{name[4:]} | {status} | {used}")
+    if any(s.startswith("FAIL") for _, s, _ in results):
+        sys.exit(1)
     print("e2e: all passed")
 
 
