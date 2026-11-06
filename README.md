@@ -5,7 +5,8 @@ A VS Code–style layout for [Herdr](https://herdr.dev):
 - **Explorer:** Material Icon Theme icons and VS Code git colors, including repos nested in the folder.
 - **Source Control:** every repo under the folder, changes and commit, and a commit graph whose commits expand to their files.
 - **Diff tab:** VS Code-style inline diff with VS Code's own syntax colors.
-- **Editor:** files open in their own tab as an Atom One Dark editor; images open as a preview, markdown opens rendered with an Edit toggle.
+- **Editor:** code files open in a terminal tab in a VS Code-like editor colored by VS Code's own tokenizer (Atom One Dark); images and markdown open in a viewer tab.
+- **Explorer menu:** VS Code's right-click menu (new, open with, reveal, cut/copy/paste, copy path, rename, delete to Trash).
 - **Pane menu:** Open in VS Code / Finder.
 - **Status bar:** Claude and Codex usage meters; Codex limit resets can be redeemed from the card.
 
@@ -28,7 +29,9 @@ Optional Claude meter: set Claude Code's `statusLine.command` to `sh ~/.config/h
 
 - `sh`, `git`, `find` (Explorer listing and git status; Source Control repos, status, log, a commit's files, and `git add -A` + `git commit` when you commit; the diff tab's `git cat-file blob`)
 - `node` (diff tab colors: `mods/vscode-diff/tokens.cjs` with the engine in `mods/vscode-viewer/vscode/`)
-- `code` (Open in VS Code), `open` (Finder)
+- `node` (the terminal editor; must be on PATH), `pbcopy`/`pbpaste` (its clipboard)
+- `cp`, `mv`, `mkdir`, `test`, `pbcopy`, `trash` or `osascript` (Explorer menu)
+- `code` (Open in VS Code), `open` (Finder, Reveal in Finder, System Default)
 - `stat`, `cp`, `sips` (image preview: copies the image into `mods/vscode-viewer/.cache/`)
 - `node` + `codex app-server` (Codex usage and limit resets, with your Codex login: it reads every 5 min and redeems a reset only when you click Use a reset and confirm)
 - `grep` over `~/.codex/sessions` (Codex usage when the app-server is unavailable)
@@ -39,4 +42,4 @@ Only `codex app-server` reaches the network (OpenAI, as Codex itself does).
 
 - Icons from [Material Icon Theme](https://github.com/material-extensions/vscode-material-icon-theme) (MIT).
 - Colors from [Atom One Dark](https://github.com/akamud/vscode-theme-onedark) (MIT).
-- File-type data from VS Code's built-in extensions (MIT).
+- File-type data and TextMate grammars from VS Code's built-in extensions (MIT); [vscode-textmate](https://github.com/microsoft/vscode-textmate) and [vscode-oniguruma](https://github.com/microsoft/vscode-oniguruma) (MIT).
