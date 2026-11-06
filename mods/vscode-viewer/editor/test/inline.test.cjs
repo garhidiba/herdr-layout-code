@@ -15,6 +15,20 @@ const { Editor } = require("../vsedit.cjs");
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "vsedit-inline-"));
 process.env.VSEDIT_INLINE_USAGE = path.join(tmp, "usage.json");
 process.env.VSEDIT_SETTINGS = path.join(tmp, "settings.json");
+// Keys never come from this machine's keychain, secrets file or environment: a fake `security` keeps its items in a file.
+const FAKE_SECURITY = `#!/bin/sh
+echo "$*" >> "$FAKE_KEYCHAIN.argv"
+case "$1" in
+  find-generic-password) k=$(grep "^$3	" "$FAKE_KEYCHAIN" 2>/dev/null | tail -1 | cut -f2); [ -n "$k" ] && echo "$k" && exit 0; exit 44;;
+  delete-generic-password) grep -v "^$3	" "$FAKE_KEYCHAIN" > "$FAKE_KEYCHAIN.tmp" 2>/dev/null; mv "$FAKE_KEYCHAIN.tmp" "$FAKE_KEYCHAIN"; exit 0;;
+  -i) read -r line; svc=$(echo "$line" | sed -n 's/.* -s \\([^ ]*\\) .*/\\1/p'); key=$(echo "$line" | sed -n 's/.* -w "\\(.*\\)"$/\\1/p')
+      printf '%s\\t%s\\n' "$svc" "$key" >> "$FAKE_KEYCHAIN"; exit 0;;
+esac
+exit 1
+`;
+fs.writeFileSync(path.join(tmp, "security"), FAKE_SECURITY, { mode: 0o755 });
+Object.assign(process.env, { VSEDIT_SECURITY: path.join(tmp, "security"), FAKE_KEYCHAIN: path.join(tmp, "keychain"), VSEDIT_SECRETS: path.join(tmp, "secrets.json") });
+for (const p of Object.values(I.HOSTED)) delete process.env[p.env];
 test.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
@@ -426,4 +440,155 @@ test("typing on a blank line after blank lines at the end asks nothing; Alt+\\ s
   key(ed, "\\", { alt: true });
   assert.ok(await waitFor(() => ghost(ed) === "volumes:"));
   s.server.close();
+});
+
+
+// ---------- hosted providers (Codestral, DeepSeek, Mercury): one FIM adapter, keys, limits, cost ----------
+test("hosted providers: one FIM request shape, their URLs and models, a Bearer key, Codestral's cache key", () => {
+  const cfgOf = (provider, extra = {}) => I.config(S.normalize({ "editor.inlineSuggest.provider": provider, ...extra }), () => true);
+  const want = { codestral: ["https://api.mistral.ai/v1/fim/completions", "codestral-latest"], deepseek: ["https://api.deepseek.com/beta/completions", "deepseek-flash"],
+    mercury: ["https://api.inceptionlabs.ai/v1/fim/completions", "mercury-edit-2"] };
+  for (const [p, [url, model]] of Object.entries(want)) {
+    const cfg = cfgOf(p), r = I.request(cfg, { prefix: "a(", suffix: ")", file: "/p/x.ts" }, true, "sk-test");
+    assert.deepEqual([r.url, r.body.model, r.body.prompt, r.body.suffix, r.body.max_tokens, r.body.stream, r.body.stop, r.headers.Authorization],
+      [url, model, "a(", ")", 256, true, undefined, "Bearer sk-test"], p);
+    assert.equal("prompt_cache_key" in r.body, p === "codestral", p);
+    assert.deepEqual([cfg.limit, cfg.hosted], [2000, true], "2,000 requests a day unless set");
+  }
+  assert.deepEqual(I.request(cfgOf("deepseek", { "editor.inlineSuggest.multiline": false }), { prefix: "", suffix: "" }).body.stop, ["\n"]);
+  assert.equal(I.request(cfgOf("codestral"), { prefix: "", suffix: "", file: "/p/x.ts" }).body.prompt_cache_key, I.cacheKey("/p/x.ts"));
+  assert.equal(cfgOf("codestral", { "editor.inlineSuggest.dailyRequestLimit": 0 }).limit, 0);
+  assert.equal(cfgOf("ollama").limit, 0);
+  assert.equal(cfgOf("codestral", { "editor.inlineSuggest.endpoint": "http://127.0.0.1:9/fim" }).endpoint, "http://127.0.0.1:9/fim");
+});
+
+test("replies of every shape; errors and a refused key say what to do", () => {
+  const cfg = I.config(S.normalize({ "editor.inlineSuggest.provider": "codestral" }), () => true);
+  assert.deepEqual(I.reply(cfg, 200, { choices: [{ message: { content: "x" } }] }), ["x"]);
+  assert.deepEqual(I.reply(cfg, 200, { choices: [{ text: "y" }] }), ["y"]);
+  assert.deepEqual(I.reply(cfg, 200, { response: "z" }), ["z"]);
+  assert.throws(() => I.reply(cfg, 401, { message: "Unauthorized" }), /Codestral: the API key was refused \(HTTP 401\); no API key: security add-generic-password -U -s herdr-vscode-codestral/);
+  assert.throws(() => I.reply(cfg, 429, { error: { message: "Rate limit" } }), /^Error: Codestral: Rate limit$/);
+  assert.throws(() => I.reply(cfg, 422, { object: "error", message: "bad suffix" }), /Codestral: bad suffix/);
+});
+
+test("usage shows today's approximate cost at the provider's price, which settings override", () => {
+  const u = { requests: 2, inChars: 4_000_000, outChars: 400_000, ms: [] }; // 1M tokens in, 0.1M out
+  const cfgOf = (extra = {}) => I.config(S.normalize({ "editor.inlineSuggest.provider": "codestral", ...extra }), () => true);
+  assert.match(I.usageText(cfgOf(), u), /today 2 requests \(limit 2000\) · ~1000.0k in \/ 100.0k out tokens · ~\$0\.39$/);
+  assert.match(I.usageText(cfgOf({ "editor.inlineSuggest.price": { input: 1, output: 10 } }), u), /~\$2\.00$/);
+  assert.equal(I.cost(I.config(S.normalize({})), u), null, "Ollama is free");
+});
+
+test("API keys: the keychain, then the secrets file only at mode 600, then the environment; saved through stdin", () => {
+  const kc = process.env.FAKE_KEYCHAIN, file = process.env.VSEDIT_SECRETS;
+  fs.rmSync(kc, { force: true }); fs.rmSync(kc + ".argv", { force: true }); fs.rmSync(file, { force: true });
+  assert.deepEqual(I.apiKey("codestral"), { key: null, loose: false });
+  process.env.MISTRAL_API_KEY = "env-key";
+  assert.deepEqual(I.apiKey("codestral"), { key: "env-key", from: "env" });
+  fs.writeFileSync(file, JSON.stringify({ codestral: "file-key" }), { mode: 0o644 });
+  fs.chmodSync(file, 0o644);
+  assert.deepEqual(I.apiKey("codestral"), { key: "env-key", from: "env" }, "a file others can read is ignored");
+  fs.chmodSync(file, 0o600);
+  assert.deepEqual(I.apiKey("codestral"), { key: "file-key", from: "file" });
+  assert.equal(I.saveKey("codestral", "kc-key-1234567890"), "keychain");
+  assert.deepEqual(I.apiKey("codestral"), { key: "kc-key-1234567890", from: "keychain" });
+  assert.ok(!fs.readFileSync(kc + ".argv", "utf8").includes("kc-key"), "the key was in security's arguments");
+  I.removeKey("codestral");
+  delete process.env.MISTRAL_API_KEY;
+  assert.deepEqual(I.apiKey("codestral"), { key: null, loose: false }, "removed from the keychain and the file");
+  // no keychain: the file, created at 600
+  process.env.VSEDIT_SECURITY = "/usr/bin/false";
+  fs.rmSync(file, { force: true });
+  assert.equal(I.saveKey("mercury", "m-key"), "file");
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  assert.deepEqual(I.apiKey("mercury"), { key: "m-key", from: "file" });
+  assert.throws(() => I.saveKey("mercury", 'a "quoted" key'), /characters/);
+  process.env.VSEDIT_SECURITY = path.join(tmp, "security");
+  assert.equal(I.maskKey("sk-abcdefghijklmnop"), "sk-a…mnop");
+});
+
+// A fake hosted FIM API: SSE events in the provider's shape (Mistral's chat-like delta, DeepSeek / Mercury's text).
+async function hostedStub(provider, answer) {
+  const s = { bodies: [], auth: [] };
+  s.server = http.createServer((req, res) => {
+    let data = "";
+    req.on("data", d => { data += d; });
+    req.on("end", () => {
+      const body = JSON.parse(data), text = answer(body);
+      s.bodies.push(body); s.auth.push(req.headers.authorization);
+      if (req.headers.authorization !== "Bearer sk-good") { res.statusCode = 401; return res.end(JSON.stringify({ message: "Unauthorized" })); }
+      res.setHeader("Content-Type", "text/event-stream");
+      for (const piece of text.match(/[^\n]*\n?/g).filter(Boolean)) {
+        const choice = provider === "codestral" ? { delta: { content: piece } } : { text: piece };
+        res.write(`data: ${JSON.stringify({ choices: [choice] })}\n\n`);
+      }
+      res.end("data: [DONE]\n\n");
+    });
+  });
+  await new Promise(r => s.server.listen(0, "127.0.0.1", r));
+  s.endpoint = `http://127.0.0.1:${s.server.address().port}/v1/fim/completions`;
+  return s;
+}
+
+test("hosted providers in the editor: streamed blocks cut, fences stripped, prose dropped; no key says how to add one", async () => {
+  fs.rmSync(process.env.VSEDIT_SECRETS, { force: true }); fs.rmSync(process.env.FAKE_KEYCHAIN, { force: true });
+  const replies = { q: "```js\nuit();\n```", p: "Here's a breakdown of each service:", i: "f (a) {\n    go();\n  }\n  stop();" };
+  for (const provider of ["codestral", "deepseek", "mercury"]) {
+    const s = await hostedStub(provider, (b) => replies[b.prompt.at(-1)] ?? "");
+    const env = I.HOSTED[provider].env;
+    process.env[env] = "sk-good";
+    const ed = await editorWith(s.endpoint, ["function f() {", "  ", "}"], { "editor.inlineSuggest.provider": provider });
+    ed.moveTo({ line: 1, col: 2 }); ed.afterEvent();
+    type(ed, "i");
+    assert.ok(await waitFor(() => ghost(ed) === "f (a) {\n    go();\n  }" && !ed.inline.busy), `${provider}: the block`);
+    assert.equal(s.auth[0], "Bearer sk-good");
+    key(ed, "backspace"); type(ed, "q");
+    assert.ok(await waitFor(() => ghost(ed) === "uit();"), `${provider}: the fenced reply`);
+    key(ed, "escape"); key(ed, "backspace"); type(ed, "p");
+    assert.ok(await waitFor(() => !ed.inline.busy && s.bodies.at(-1).prompt.endsWith("p")), provider);
+    assert.equal(ghost(ed), null, `${provider}: prose shown`);
+    assert.equal(ed.inlineStatus().text, LABEL[provider]);
+    assert.match(ed.inlineStatus().hover(), /the last reply was dropped: it was prose/);
+    delete process.env[env];
+    s.server.close();
+  }
+  const ed = await editorWith("http://127.0.0.1:9/fim", ["x = "], { "editor.inlineSuggest.provider": "deepseek" });
+  assert.equal(ed.inlineStatus().text, "DeepSeek: no API key");
+  ed.inlineTrigger();
+  assert.match(ed.message.text, /DeepSeek: no API key: security add-generic-password -U -s herdr-vscode-deepseek -a herdr -w <key>/);
+});
+const LABEL = { codestral: "Codestral", deepseek: "DeepSeek", mercury: "Mercury" };
+
+test("a refused key is an error in the status bar", async () => {
+  const s = await hostedStub("mercury", () => "x");
+  process.env.INCEPTION_API_KEY = "sk-bad";
+  const ed = await editorWith(s.endpoint, ["x = "], { "editor.inlineSuggest.provider": "mercury" });
+  type(ed, "1");
+  assert.ok(await waitFor(() => ed.inline.error));
+  assert.match(ed.inline.error, /Mercury: the API key was refused \(HTTP 401\)/);
+  assert.equal(ed.inlineStatus().text, "Mercury: error");
+  delete process.env.INCEPTION_API_KEY;
+  s.server.close();
+});
+
+test("the Settings dialog's helper: a masked key, saving from a file it deletes, a test request, the model lists", async () => {
+  const cli = (...args) => require("child_process").spawnSync(process.execPath, [path.join(__dirname, "..", "inline.cjs"), ...args], { encoding: "utf8", env: process.env });
+  const out = (...args) => JSON.parse(cli(...args).stdout);
+  fs.rmSync(process.env.FAKE_KEYCHAIN, { force: true });
+  assert.match(out("--key", "codestral").help, /security add-generic-password/);
+  const dir = fs.mkdtempSync(path.join(tmp, "key-")), file = path.join(dir, "key");
+  fs.writeFileSync(file, "sk-good\n", { mode: 0o600 });
+  assert.deepEqual(out("--save-key", "codestral", file), { from: "keychain", masked: "••••" });
+  assert.ok(!fs.existsSync(dir), "the key file and its folder are deleted");
+  assert.deepEqual(out("--key", "codestral"), { from: "keychain", masked: "••••" });
+  const s = await hostedStub("codestral", () => " a + b");
+  const ok = await new Promise(r => require("child_process").execFile(process.execPath, [path.join(__dirname, "..", "inline.cjs"), "--test", "codestral", "", s.endpoint], { env: process.env }, (_e, o) => r(JSON.parse(o))));
+  assert.equal(ok.ok, true); assert.equal(typeof ok.ms, "number");
+  assert.equal(s.bodies[0].max_tokens, 16);
+  s.server.close();
+  assert.deepEqual(out("--remove-key", "codestral"), { removed: true });
+  assert.equal(out("--key", "codestral").from, null);
+  assert.deepEqual(out("--models", "mercury").recommended, ["mercury-edit-2"]);
+  assert.match(cli("--key", "ollama").stdout, /needs no API key/);
 });

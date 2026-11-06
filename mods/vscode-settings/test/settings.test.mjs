@@ -123,6 +123,7 @@ test("inline suggestions: on unless set off, the provider one of the editor's, R
   assert.equal(normalize({ "editor.inlineSuggest.enabled": false })["editor.inlineSuggest.enabled"], false);
   assert.equal(normalize({ "editor.inlineSuggest.provider": "nope" })["editor.inlineSuggest.provider"], "ollama");
   assert.deepEqual(withSetting({}, "editor.inlineSuggest.provider", "off"), { "editor.inlineSuggest.provider": "off" });
+  for (const p of ["codestral", "deepseek", "mercury"]) assert.equal(normalize({ "editor.inlineSuggest.provider": p })["editor.inlineSuggest.provider"], p);
   assert.throws(() => withSetting({}, "editor.inlineSuggest.enabled", "yes"));
   assert.equal("editor.inlineSuggest.enabled" in withDefaults({ "editor.inlineSuggest.enabled": false }), false);
 });

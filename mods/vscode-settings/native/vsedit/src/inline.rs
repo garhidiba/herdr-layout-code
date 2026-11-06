@@ -9,7 +9,27 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
-pub const PROVIDERS: &[&str] = &["ollama", "off"];
+pub const PROVIDERS: &[&str] = &["ollama", "codestral", "deepseek", "mercury", "off"];
+/// Hosted FIM APIs, one adapter (POST {model, prompt, suffix, max_tokens, stop, stream} with a Bearer key): label, model,
+/// URL, the key's environment variable, USD per million input / output tokens (editor.inlineSuggest.price overrides).
+pub struct Hosted {
+    pub id: &'static str,
+    label: &'static str,
+    model: &'static str,
+    url: &'static str,
+    pub env: &'static str,
+    price: (f64, f64),
+}
+pub const HOSTED: &[Hosted] = &[
+    Hosted { id: "codestral", label: "Codestral", model: "codestral-latest", url: "https://api.mistral.ai/v1/fim/completions", env: "MISTRAL_API_KEY", price: (0.3, 0.9) },
+    Hosted { id: "deepseek", label: "DeepSeek", model: "deepseek-flash", url: "https://api.deepseek.com/beta/completions", env: "DEEPSEEK_API_KEY", price: (0.3, 1.2) },
+    Hosted { id: "mercury", label: "Mercury", model: "mercury-edit-2", url: "https://api.inceptionlabs.ai/v1/fim/completions", env: "INCEPTION_API_KEY", price: (0.25, 0.75) },
+];
+/// Requests a day by default for a paid provider (Ollama: unlimited).
+const HOSTED_LIMIT: u64 = 2000;
+fn hosted(provider: &str) -> Option<&'static Hosted> {
+    HOSTED.iter().find(|h| h.id == provider)
+}
 /// Ollama's default model: a base (FIM) model; 1.5B answers in ~0.1–0.6 s here, 7B in 0.3–2.5 s (DESIGN.md).
 pub const OLLAMA_MODEL: &str = "qwen2.5-coder:1.5b-base";
 /// No suggestions in bigger files (characters).
@@ -43,8 +63,10 @@ pub struct InlineSettings {
     pub prefix_chars: usize,
     pub suffix_chars: usize,
     pub stop_after: u32,
-    /// requests a day before suggestions stop until tomorrow; 0: unlimited
-    pub daily_limit: u64,
+    /// requests a day before suggestions stop until tomorrow; 0: unlimited; None: 2,000 for a paid provider, Ollama 0
+    pub daily_limit: Option<u64>,
+    /// USD per million input / output tokens for the cost estimate; None: HOSTED's
+    pub price: Option<(f64, f64)>,
     pub keep_alive: String,
     pub exclude: Vec<String>,
 }
@@ -63,7 +85,8 @@ impl Default for InlineSettings {
             prefix_chars: 4000,
             suffix_chars: 300,
             stop_after: 5,
-            daily_limit: 0,
+            daily_limit: None,
+            price: None,
             keep_alive: "30m".into(),
             exclude: vec![],
         }
@@ -102,7 +125,11 @@ pub fn normalize(raw: &Value) -> InlineSettings {
         v.stop_after = n as u32;
     }
     if let Some(n) = num("dailyRequestLimit", 0.0, 1e7) {
-        v.daily_limit = n as u64;
+        v.daily_limit = Some(n as u64);
+    }
+    let price = get("price");
+    if let (Some(i), Some(o)) = (price["input"].as_f64().filter(|n| *n >= 0.0), price["output"].as_f64().filter(|n| *n >= 0.0)) {
+        v.price = Some((i, o));
     }
     v.exclude = get("exclude").as_array().into_iter().flatten().filter_map(Value::as_str).filter(|s| !s.trim().is_empty()).map(String::from).collect();
     v
@@ -127,6 +154,10 @@ pub struct Config {
     pub exclude: Vec<String>,
     /// requests a day, 0: unlimited
     pub limit: u64,
+    /// A paid hosted FIM API (HOSTED)
+    pub hosted: bool,
+    /// USD per million input / output tokens, None: free
+    pub price: Option<(f64, f64)>,
     /// provider:model, the usage file's and the pauses' key
     pub key: String,
     pub enabled: bool,
@@ -135,8 +166,10 @@ pub struct Config {
 /// Settings -> the config; `usable` says whether the provider can run here (the default of `enabled`).
 pub fn config(s: &InlineSettings, usable: impl Fn(&Config) -> bool) -> Config {
     let p = s.provider.as_str();
-    let (label, model, endpoint) = match p {
-        "ollama" => ("Ollama", OLLAMA_MODEL, "http://127.0.0.1:11434"),
+    let h = hosted(p);
+    let (label, model, endpoint) = match (p, h) {
+        ("ollama", _) => ("Ollama", OLLAMA_MODEL, "http://127.0.0.1:11434"),
+        (_, Some(h)) => (h.label, h.model, h.url),
         _ => ("Inline Suggestions", "", ""),
     };
     let model = if s.model.is_empty() { model.to_string() } else { s.model.clone() };
@@ -157,7 +190,9 @@ pub fn config(s: &InlineSettings, usable: impl Fn(&Config) -> bool) -> Config {
         stop_after: s.stop_after,
         keep_alive: s.keep_alive.clone(),
         exclude: EXCLUDE.iter().map(|e| e.to_string()).chain(s.exclude.iter().cloned()).collect(),
-        limit: s.daily_limit,
+        limit: s.daily_limit.unwrap_or(if h.is_some() { HOSTED_LIMIT } else { 0 }),
+        hosted: h.is_some(),
+        price: s.price.or(h.map(|h| h.price)),
         enabled: false,
     };
     cfg.enabled = p != "off" && s.enabled.unwrap_or_else(|| usable(&cfg));
@@ -214,6 +249,8 @@ pub fn quiet_end(lines: &[String], line: usize) -> bool {
 pub struct Context {
     pub prefix: String,
     pub suffix: String,
+    /// The file's path (Codestral's prompt_cache_key).
+    pub file: String,
     /// A prose or markup file (prose_file): sentences and Markdown fences stay.
     pub prose: bool,
     /// The cursor ends a finished statement (`;` `{` `}` `)` `,` `:` before it, nothing after): a one-line suggestion
@@ -239,7 +276,7 @@ pub fn context_at(lines: &[String], line: usize, col: usize, prefix_chars: usize
     }
     let n = prefix.chars().count();
     let prefix: String = prefix.chars().skip(n.saturating_sub(prefix_chars)).collect();
-    Context { prefix, suffix: suffix.chars().take(suffix_chars).collect(), next_line, prose: false }
+    Context { prefix, suffix: suffix.chars().take(suffix_chars).collect(), next_line, ..Context::default() }
 }
 
 // ---------- the ghost text ----------
@@ -591,8 +628,26 @@ fn json_headers() -> Vec<(String, String)> {
     vec![("Content-Type".into(), "application/json".into())]
 }
 
-/// The HTTP request for a suggestion (stream: Ollama's NDJSON lines, read by post_stream).
-pub fn request(cfg: &Config, ctx: &Context, stream: bool) -> Request {
+/// A short stable id of a file (FNV-1a), Codestral's prompt_cache_key: the same file reuses the provider's prompt cache.
+pub fn cache_key(file: &str) -> String {
+    format!("vsedit-{:08x}", file.bytes().fold(0x811c9dc5u32, |h, b| (h ^ b as u32).wrapping_mul(0x01000193)))
+}
+
+/// The HTTP request for a suggestion (stream: Ollama's NDJSON lines or the hosted APIs' SSE events, read by
+/// post_stream); `key`: a hosted provider's API key.
+pub fn request(cfg: &Config, ctx: &Context, stream: bool, key: &str) -> Request {
+    if cfg.hosted {
+        let mut body = json!({ "model": cfg.model, "prompt": ctx.prefix, "suffix": ctx.suffix, "max_tokens": cfg.max_tokens, "stream": stream });
+        if !cfg.multiline && !ctx.next_line {
+            body["stop"] = json!(["\n"]);
+        }
+        if cfg.provider == "codestral" && !ctx.file.is_empty() {
+            body["prompt_cache_key"] = json!(cache_key(&ctx.file));
+        }
+        let mut headers = json_headers();
+        headers.push(("Authorization".into(), format!("Bearer {key}")));
+        return Request { url: cfg.endpoint.clone(), headers, body };
+    }
     let t = template(&cfg.model);
     let mut stop: Vec<&str> = t.map_or(vec![], |t| t.stop.to_vec());
     if !cfg.multiline && !ctx.next_line {
@@ -664,19 +719,90 @@ pub fn chat_hint(cfg: &Config) -> String {
     format!("{} is a chat model and often answers in prose; a base model completes code (ollama pull {OLLAMA_MODEL}, then set editor.inlineSuggest.model)", cfg.model)
 }
 
+/// The text of one reply or streamed event: Ollama's `response`, a completion's `choices[0].text`, a chat-shaped one's
+/// `delta.content` / `message.content` (Mistral's FIM).
+fn reply_text(j: &Value) -> Option<&str> {
+    let c = &j["choices"][0];
+    j["response"].as_str().or(c["text"].as_str()).or(c["delta"]["content"].as_str()).or(c["message"]["content"].as_str())
+}
+
+/// An error body's message: OpenAI's {error: {message}}, Ollama's {error}, Mistral's {message} / {detail}.
+fn error_text(j: &Value) -> Option<String> {
+    let e = if !j["error"]["message"].is_null() {
+        &j["error"]["message"]
+    } else if !j["error"].is_null() {
+        &j["error"]
+    } else if j["object"] == "error" || !j["detail"].is_null() {
+        if j["message"].is_null() { &j["detail"] } else { &j["message"] }
+    } else {
+        return None;
+    };
+    Some(e.as_str().map_or_else(|| e.to_string(), String::from))
+}
+
 /// A reply (status, parsed JSON) -> the suggestion texts, or a message for the status bar.
 pub fn reply(cfg: &Config, status: u16, json: &Value) -> Result<Vec<String>, String> {
-    let err = json["error"]["message"].as_str().or(json["error"].as_str());
+    let err = error_text(json);
     if status >= 400 || err.is_some() {
-        if cfg.provider == "ollama" && err.is_some_and(|e| e.to_lowercase().contains("not found")) {
+        if cfg.provider == "ollama" && err.as_ref().is_some_and(|e| e.to_lowercase().contains("not found")) {
             return Err(missing_text(cfg));
+        }
+        if cfg.hosted && (status == 401 || status == 403) {
+            return Err(format!("{}: the API key was refused (HTTP {status}); {}", cfg.label, key_help(&cfg.provider)));
         }
         return Err(match err {
             Some(e) => format!("{}: {}", cfg.label, e.chars().take(160).collect::<String>()),
             None => format!("{}: HTTP {status}", cfg.label),
         });
     }
-    Ok(if cfg.provider == "ollama" { vec![json["response"].as_str().unwrap_or("").to_string()] } else { vec![] })
+    Ok(vec![reply_text(json).unwrap_or("").to_string()])
+}
+
+// ---------- API keys: the macOS keychain, then <herdr home>/vscode-secrets.json (mode 600), then the environment ----------
+
+fn secrets_file() -> PathBuf {
+    std::env::var_os("VSEDIT_SECRETS").map(PathBuf::from).unwrap_or_else(|| crate::settings::herdr_home().join("vscode-secrets.json"))
+}
+
+fn security_bin() -> Option<PathBuf> {
+    std::env::var_os("VSEDIT_SECURITY").map(PathBuf::from).or_else(|| cfg!(target_os = "macos").then(|| PathBuf::from("/usr/bin/security")))
+}
+
+/// How to give a provider its key, for the status bar.
+pub fn key_help(provider: &str) -> String {
+    let env = hosted(provider).map_or("", |h| h.env);
+    format!(
+        "no API key: security add-generic-password -U -s herdr-vscode-{provider} -a herdr -w <key> (or Settings › Inline Suggestions; elsewhere {} with {{\"{provider}\": \"<key>\"}}, chmod 600; or {env})",
+        secrets_file().display()
+    )
+}
+
+/// The provider's key and where it came from ("keychain", "file", "env"); Err(the secrets file is readable by others)
+/// when there is none. The file is read only when no one else may read it.
+pub fn api_key(provider: &str) -> Result<(String, &'static str), bool> {
+    if let Some(sec) = security_bin() {
+        let service = format!("herdr-vscode-{provider}");
+        if let Ok(out) = Command::new(sec).args(["find-generic-password", "-s", &service, "-w"]).stdin(Stdio::null()).stderr(Stdio::null()).output() {
+            let key = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if out.status.success() && !key.is_empty() {
+                return Ok((key, "keychain"));
+            }
+        }
+    }
+    let file = secrets_file();
+    let mut loose = false;
+    if let Ok(meta) = std::fs::metadata(&file) {
+        use std::os::unix::fs::PermissionsExt;
+        loose = meta.permissions().mode() & 0o077 != 0;
+        let key = (!loose).then(|| std::fs::read_to_string(&file).ok()).flatten().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v[provider].as_str().map(|k| k.trim().to_string()));
+        if let Some(key) = key.filter(|k| !k.is_empty()) {
+            return Ok((key, "file"));
+        }
+    }
+    match hosted(provider).and_then(|h| std::env::var(h.env).ok()).map(|k| k.trim().to_string()).filter(|k| !k.is_empty()) {
+        Some(key) => Ok((key, "env")),
+        None => Err(loose),
+    }
 }
 
 /// A request in flight that a newer one (or an edit) cancels: the curl process is killed.
@@ -758,10 +884,11 @@ pub fn post_stream(req: &Request, cancel: &Cancel, mut on_text: impl FnMut(&str)
     if let Some(out) = child.stdout.take() {
         for line in BufReader::new(out).lines() {
             let Ok(line) = line else { break };
-            match serde_json::from_str::<Value>(&line) {
-                Ok(v) if !v["error"].is_null() => error = Some(v["error"].clone()),
-                Ok(v) if v["response"].is_string() => {
-                    text += v["response"].as_str().unwrap_or("");
+            let line = line.strip_prefix("data:").map_or(line.as_str(), str::trim_start);
+            match serde_json::from_str::<Value>(line) {
+                Ok(v) if error_text(&v).is_some() => error = Some(v),
+                Ok(v) if reply_text(&v).is_some() => {
+                    text += reply_text(&v).unwrap_or("");
                     if on_text(&text) {
                         stopped = true;
                         let _ = child.kill();
@@ -773,10 +900,7 @@ pub fn post_stream(req: &Request, cancel: &Cancel, mut on_text: impl FnMut(&str)
         }
     }
     finish(child, cancel, stopped)?;
-    Ok((status, match error {
-        Some(e) => json!({ "error": e }),
-        None => json!({ "response": text }),
-    }))
+    Ok((status, error.unwrap_or_else(|| json!({ "response": text }))))
 }
 
 /// A failed request -> the status bar's words.
@@ -873,17 +997,58 @@ fn tokens(chars: u64) -> String {
     if t >= 1000 { format!("{:.1}k", t as f64 / 1000.0) } else { t.to_string() }
 }
 
-/// "Ollama qwen2.5-coder:7b · today 12 requests (limit 2000) · ~3.1k in / 40 out tokens · p50 140 ms, p95 900 ms"
+/// Today's approximate cost in USD (tokens: characters ÷ 4) at cfg.price; None for a free provider.
+pub fn cost(cfg: &Config, u: &Usage) -> Option<f64> {
+    cfg.price.map(|(i, o)| (u.in_chars as f64 / 4.0 * i + u.out_chars as f64 / 4.0 * o) / 1e6)
+}
+
+/// "Ollama qwen2.5-coder:7b · today 12 requests (limit 2000) · ~3.1k in / 40 out tokens · ~$0.0012 · p50 140 ms, p95 900 ms"
 pub fn usage_text(cfg: &Config, u: &Usage) -> String {
     let mut s = format!("{} {} · today {} request{}", cfg.label, cfg.model, u.requests, if u.requests == 1 { "" } else { "s" });
     if cfg.limit > 0 {
         s += &format!(" (limit {})", cfg.limit);
     }
     s += &format!(" · ~{} in / {} out tokens", tokens(u.in_chars), tokens(u.out_chars));
+    if let Some(usd) = cost(cfg, u) {
+        s += &if usd < 0.1 { format!(" · ~${usd:.4}") } else { format!(" · ~${usd:.2}") };
+    }
     if let (Some(a), Some(b)) = (percentile(&u.ms, 50.0), percentile(&u.ms, 95.0)) {
         s += &format!(" · p50 {a} ms, p95 {b} ms");
     }
     s
+}
+
+/// Tests that set the process's environment (usage file, keys) run one at a time.
+#[cfg(test)]
+pub fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// A fake `security` keeping its items in $FAKE_KEYCHAIN (its arguments logged to $FAKE_KEYCHAIN.argv): VSEDIT_SECURITY
+/// for tests, so no test reads or writes the real keychain. The same script as inline.test.cjs's.
+#[cfg(test)]
+pub fn fake_security(dir: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let script = r#"#!/bin/sh
+echo "$*" >> "$FAKE_KEYCHAIN.argv"
+case "$1" in
+  find-generic-password) k=$(grep "^$3	" "$FAKE_KEYCHAIN" 2>/dev/null | tail -1 | cut -f2); [ -n "$k" ] && echo "$k" && exit 0; exit 44;;
+  delete-generic-password) grep -v "^$3	" "$FAKE_KEYCHAIN" > "$FAKE_KEYCHAIN.tmp" 2>/dev/null; mv "$FAKE_KEYCHAIN.tmp" "$FAKE_KEYCHAIN"; exit 0;;
+esac
+exit 1
+"#;
+    std::fs::create_dir_all(dir).unwrap();
+    let path = dir.join("security");
+    std::fs::write(&path, script).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::env::set_var("VSEDIT_SECURITY", &path);
+    std::env::set_var("FAKE_KEYCHAIN", dir.join("keychain"));
+    std::env::set_var("VSEDIT_SECRETS", dir.join("secrets.json"));
+    for h in HOSTED {
+        std::env::remove_var(h.env);
+    }
+    path
 }
 
 #[cfg(test)]
@@ -928,7 +1093,7 @@ mod tests {
 
     #[test]
     fn replies_are_cut_like_the_js() {
-        let ctx = |p: &str, s: &str, next_line: bool| Context { prefix: p.into(), suffix: s.into(), next_line, prose: false };
+        let ctx = |p: &str, s: &str, next_line: bool| Context { prefix: p.into(), suffix: s.into(), next_line, ..Context::default() };
         let c = ctx("function add(a, b) {\n  ", "\n}\nconsole.log(add(1, 2));", false);
         assert_eq!(clean("return a + b;<|fim_suffix|>junk", &c, false), (Some("return a + b;".into()), Some("fim")));
         assert_eq!(clean("return a + b;\n}", &c, false), (Some("return a + b;".into()), None));
@@ -970,7 +1135,7 @@ mod tests {
     #[test]
     fn fim_prompts_per_model_family_go_raw_with_their_stops() {
         let cfg = config(&normalize(&json!({})), |_| true);
-        let body = |model: &str, multiline: bool| request(&Config { model: model.into(), multiline, ..cfg.clone() }, &cx("a(", ")"), true).body;
+        let body = |model: &str, multiline: bool| request(&Config { model: model.into(), multiline, ..cfg.clone() }, &cx("a(", ")"), true, "").body;
         let q = body("qwen2.5-coder:1.5b-base", true);
         assert_eq!((q["prompt"].as_str(), q["raw"].as_bool(), q["stream"].as_bool()), (Some("<|fim_prefix|>a(<|fim_suffix|>)<|fim_middle|>"), Some(true), Some(true)));
         assert!(body("qwen2.5-coder:7b", true)["options"]["stop"].as_array().unwrap().contains(&json!("<|endoftext|>")));
@@ -1045,11 +1210,11 @@ mod tests {
         assert!(!config(&normalize(&json!({})), |_| false).enabled);
         assert!(config(&normalize(&json!({ "editor.inlineSuggest.enabled": true })), |_| false).enabled);
         assert!(!config(&normalize(&json!({ "editor.inlineSuggest.provider": "off" })), |_| true).enabled);
-        let r = request(&cfg, &cx("p", "s"), false);
+        let r = request(&cfg, &cx("p", "s"), false, "");
         assert_eq!((r.body["prompt"].clone(), r.body["raw"].clone(), r.body["stream"].clone(), r.body["keep_alive"].clone(), r.body["options"]["num_predict"].clone()), (json!("<|fim_prefix|>p<|fim_suffix|>s<|fim_middle|>"), json!(true), json!(false), json!("30m"), json!(256)));
         assert!(!r.body["options"]["stop"].as_array().unwrap().contains(&json!("\n")));
         let one = Config { multiline: false, ..cfg.clone() };
-        assert!(!request(&one, &Context { next_line: true, ..cx("", "") }, false).body["options"]["stop"].as_array().unwrap().contains(&json!("\n")));
+        assert!(!request(&one, &Context { next_line: true, ..cx("", "") }, false, "").body["options"]["stop"].as_array().unwrap().contains(&json!("\n")));
         assert_eq!(warmup(&cfg).unwrap().body["options"]["num_predict"], json!(1));
     }
 
@@ -1087,7 +1252,7 @@ mod tests {
             req
         });
         let cfg = config(&normalize(&json!({ "editor.inlineSuggest.endpoint": format!("http://127.0.0.1:{port}") })), |_| true);
-        let (status, v) = post(&request(&cfg, &cx("say \"hi\"\\n\n", "\t}"), false), &Cancel::default()).unwrap();
+        let (status, v) = post(&request(&cfg, &cx("say \"hi\"\\n\n", "\t}"), false, ""), &Cancel::default()).unwrap();
         assert_eq!((status, reply(&cfg, status, &v).unwrap()), (200, vec![" a + b;".to_string()]));
         let req = got.join().unwrap();
         let body: Value = serde_json::from_str(&req[req.find("\r\n\r\n").unwrap() + 4..]).unwrap();
@@ -1102,7 +1267,66 @@ mod tests {
             c2.cancel();
         });
         let t0 = std::time::Instant::now();
-        assert_eq!(post_stream(&request(&cfg, &cx("", ""), true), &cancel, |_| false).err(), Some(None));
+        assert_eq!(post_stream(&request(&cfg, &cx("", ""), true, ""), &cancel, |_| false).err(), Some(None));
         assert!(t0.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn hosted_providers_share_one_fim_request_with_a_bearer_key() {
+        let cfg_of = |p: &str, extra: Value| {
+            let mut raw = json!({ "editor.inlineSuggest.provider": p });
+            raw.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            config(&normalize(&raw), |_| true)
+        };
+        for (p, url, model) in [
+            ("codestral", "https://api.mistral.ai/v1/fim/completions", "codestral-latest"),
+            ("deepseek", "https://api.deepseek.com/beta/completions", "deepseek-flash"),
+            ("mercury", "https://api.inceptionlabs.ai/v1/fim/completions", "mercury-edit-2"),
+        ] {
+            let cfg = cfg_of(p, json!({}));
+            let r = request(&cfg, &Context { file: "/p/x.ts".into(), ..cx("a(", ")") }, true, "sk-test");
+            assert_eq!((r.url.as_str(), &r.body["model"], &r.body["prompt"], &r.body["suffix"], &r.body["max_tokens"], &r.body["stream"]), (url, &json!(model), &json!("a("), &json!(")"), &json!(256), &json!(true)), "{p}");
+            assert!(r.body["stop"].is_null() && r.headers.contains(&("Authorization".into(), "Bearer sk-test".into())), "{p}");
+            assert_eq!(r.body["prompt_cache_key"].is_string(), p == "codestral", "{p}");
+            assert_eq!((cfg.limit, cfg.hosted), (2000, true), "{p}");
+        }
+        assert_eq!(request(&cfg_of("deepseek", json!({ "editor.inlineSuggest.multiline": false })), &cx("", ""), false, "k").body["stop"], json!(["\n"]));
+        assert_eq!(cache_key("/p/x.ts"), "vsedit-".to_string() + &format!("{:08x}", "/p/x.ts".bytes().fold(0x811c9dc5u32, |h, b| (h ^ b as u32).wrapping_mul(0x01000193))));
+        assert_eq!(cache_key("/a/b.ts"), "vsedit-cf0c965f", "the JS editor's key for the same file");
+        assert_eq!(cfg_of("codestral", json!({ "editor.inlineSuggest.dailyRequestLimit": 0 })).limit, 0);
+        assert_eq!(cfg_of("ollama", json!({})).limit, 0);
+        let cfg = cfg_of("codestral", json!({}));
+        assert_eq!(reply(&cfg, 200, &json!({ "choices": [{ "message": { "content": "x" } }] })), Ok(vec!["x".to_string()]));
+        assert_eq!(reply(&cfg, 200, &json!({ "choices": [{ "text": "y" }] })), Ok(vec!["y".to_string()]));
+        assert!(reply(&cfg, 401, &json!({ "message": "Unauthorized" })).unwrap_err().starts_with("Codestral: the API key was refused (HTTP 401); no API key: security add-generic-password -U -s herdr-vscode-codestral"));
+        assert_eq!(reply(&cfg, 429, &json!({ "error": { "message": "Rate limit" } })), Err("Codestral: Rate limit".into()));
+        assert_eq!(reply(&cfg, 422, &json!({ "object": "error", "message": "bad suffix" })), Err("Codestral: bad suffix".into()));
+        let u = Usage { requests: 2, in_chars: 4_000_000, out_chars: 400_000, ms: vec![] };
+        assert!(usage_text(&cfg, &u).ends_with("today 2 requests (limit 2000) · ~1000.0k in / 100.0k out tokens · ~$0.39"), "{}", usage_text(&cfg, &u));
+        assert!(usage_text(&cfg_of("codestral", json!({ "editor.inlineSuggest.price": { "input": 1, "output": 10 } })), &u).ends_with("~$2.00"));
+        assert_eq!(cost(&cfg_of("ollama", json!({})), &u), None);
+    }
+
+    #[test]
+    fn api_keys_come_from_the_keychain_then_a_600_file_then_the_environment() {
+        use std::os::unix::fs::PermissionsExt;
+        let _env = test_env_lock();
+        let dir = std::env::temp_dir().join(format!("vsedit-keys-{}", std::process::id()));
+        fake_security(&dir);
+        let file = dir.join("secrets.json");
+        assert_eq!(api_key("codestral"), Err(false));
+        std::env::set_var("MISTRAL_API_KEY", "env-key");
+        assert_eq!(api_key("codestral"), Ok(("env-key".into(), "env")));
+        std::fs::write(&file, r#"{"codestral": "file-key"}"#).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(api_key("codestral"), Ok(("env-key".into(), "env")), "a file others can read is ignored");
+        std::env::remove_var("MISTRAL_API_KEY");
+        assert_eq!(api_key("codestral"), Err(true));
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(api_key("codestral"), Ok(("file-key".into(), "file")));
+        std::fs::write(dir.join("keychain"), "herdr-vscode-codestral\tkc-key\n").unwrap();
+        assert_eq!(api_key("codestral"), Ok(("kc-key".into(), "keychain")));
+        assert!(key_help("mercury").contains("security add-generic-password -U -s herdr-vscode-mercury -a herdr -w <key>") && key_help("mercury").contains("INCEPTION_API_KEY"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

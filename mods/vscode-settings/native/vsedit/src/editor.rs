@@ -2906,8 +2906,7 @@ mod tests {
     }
     /// Inline tests run one at a time: each editor has its own usage file (VSEDIT_INLINE_USAGE is the process's).
     fn inline_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+        crate::inline::test_env_lock()
     }
     fn inline_editor(lines: &[&str], settings: Value) -> Editor {
         std::env::set_var("VSEDIT_INLINE_USAGE", scratch().join(format!("usage-{}.json", rand_id())));
@@ -3041,6 +3040,76 @@ mod tests {
         ed.inline_trigger();
         while ed.inline.busy && ed.wait_jobs(5000) {}
         assert!(ed.ghost_view().is_some());
+    }
+
+    /// A fake hosted FIM API: SSE events in the provider's shape (Mistral's chat-like delta, DeepSeek / Mercury's text),
+    /// 401 unless the key is sk-good; the requests' Authorization headers.
+    fn fake_hosted(provider: &'static str, reply: &'static str) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{Read, Write};
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://127.0.0.1:{}/v1/fim/completions", server.local_addr().unwrap().port());
+        let auth = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+        let seen = auth.clone();
+        std::thread::spawn(move || {
+            for mut s in server.incoming().flatten() {
+                let mut req = String::new();
+                let mut buf = vec![0; 65536];
+                while !req.contains("\r\n\r\n") || !req.trim_end().ends_with('}') {
+                    match s.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(k) => req += &String::from_utf8_lossy(&buf[..k]),
+                    }
+                }
+                let a = req.lines().find_map(|l| l.strip_prefix("Authorization: ")).unwrap_or("").to_string();
+                seen.lock().unwrap().push(a.clone());
+                if a != "Bearer sk-good" {
+                    let body = r#"{"message":"Unauthorized"}"#;
+                    let _ = write!(s, "HTTP/1.1 401 Unauthorized\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+                    continue;
+                }
+                let mut body = String::new();
+                for piece in reply.split_inclusive('\n') {
+                    let choice = if provider == "codestral" { json!({ "delta": { "content": piece } }) } else { json!({ "text": piece }) };
+                    body += &format!("data: {}\n\n", json!({ "choices": [choice] }));
+                }
+                body += "data: [DONE]\n\n";
+                let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+            }
+        });
+        (url, auth)
+    }
+
+    #[test]
+    fn hosted_inline_suggestions_stream_blocks_strip_fences_drop_prose_and_need_a_key() {
+        let _one = inline_lock();
+        crate::inline::fake_security(&scratch().join(format!("keys-{}", rand_id())));
+        for (provider, env) in [("codestral", "MISTRAL_API_KEY"), ("deepseek", "DEEPSEEK_API_KEY"), ("mercury", "INCEPTION_API_KEY")] {
+            std::env::set_var(env, "sk-good");
+            for (reply, want) in [("f (a) {\n    go();\n  }\n  stop();", Some(vec!["f (a) {", "    go();", "  }"])), ("```js\nuit();\n```", Some(vec!["uit();"])), ("Here's a breakdown of each service:", None)] {
+                let (url, auth) = fake_hosted(provider, reply);
+                let mut ed = inline_editor(&["function f() {", "  ", "}"], json!({ "editor.inlineSuggest.endpoint": url, "editor.inlineSuggest.provider": provider }));
+                ed.move_to(pos(1, 2), false);
+                ed.after_event();
+                type_in(&mut ed, "i");
+                ask(&mut ed);
+                let want = want.map(|w| w.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+                assert_eq!(ed.ghost_view().map(|g| g.2), want, "{provider}: {reply}");
+                assert_eq!(auth.lock().unwrap().as_slice(), ["Bearer sk-good"]);
+            }
+            std::env::set_var(env, "sk-bad");
+            let (url, _) = fake_hosted(provider, "x");
+            let mut ed = inline_editor(&["x = "], json!({ "editor.inlineSuggest.endpoint": url, "editor.inlineSuggest.provider": provider }));
+            type_in(&mut ed, "1");
+            ask(&mut ed);
+            assert_eq!(ed.inline_status().map(|s| s.ends_with(": error")), Some(true), "{provider}");
+            assert!(ed.message.as_ref().unwrap().text.contains("the API key was refused (HTTP 401)"), "{provider}");
+            std::env::remove_var(env);
+        }
+        let mut ed = inline_editor(&["x = "], json!({ "editor.inlineSuggest.endpoint": "http://127.0.0.1:9/fim", "editor.inlineSuggest.provider": "deepseek" }));
+        assert_eq!(ed.inline_status().as_deref(), Some("DeepSeek: no API key"));
+        ed.inline_trigger();
+        assert!(ed.message.as_ref().unwrap().text.contains("DeepSeek: no API key: security add-generic-password -U -s herdr-vscode-deepseek -a herdr -w <key>"));
+        assert!(ed.inline_usage().contains("today 0 requests (limit 2000)"));
     }
 
     #[test]

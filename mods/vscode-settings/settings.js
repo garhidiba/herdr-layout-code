@@ -17,7 +17,7 @@ export const DEFAULTS = {
   "editor.inlineSuggest.provider": "ollama", // the editor's inline suggestions (mods/vscode-viewer/editor/inline.cjs)
 };
 export const CHOICES = { "core.engine": ["js", "rust"], "editor.engine": ["js", "rust"], "files.autoSave": ["off", "afterDelay", "onFocusChange"],
-  "editor.inlineSuggest.provider": ["ollama", "off"],
+  "editor.inlineSuggest.provider": ["ollama", "codestral", "deepseek", "mercury", "off"],
   "editor.cursorStyle": ["line", "block", "underline", "line-thin", "underline-thin", "block-outline"],
   "editor.cursorBlinking": ["blink", "smooth", "phase", "expand", "solid"] };
 // editor.inlineSuggest.enabled: absent, the editor turns suggestions on when the provider can run there (Ollama

@@ -1316,6 +1316,81 @@ def run_inline_suggest(tmp):
     print("inline suggestions: ok")
 
 
+class FakeHosted(http.server.ThreadingHTTPServer):
+    """A hosted FIM API (Codestral / DeepSeek / Mercury) on 127.0.0.1: SSE events in the provider's shape (Mistral's
+    chat-like delta, the others' text), the reply chosen as FakeOllama's by how the prompt ends; 401 for a wrong key."""
+    def __init__(self, provider):
+        self.requests, self.auth = [], []
+        server = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                server.requests.append(body)
+                server.auth.append(self.headers.get("Authorization"))
+                if self.headers.get("Authorization") != "Bearer sk-e2e":
+                    self.send_response(401); self.send_header("Content-Length", "2"); self.end_headers(); self.wfile.write(b"{}")
+                    return
+                text = next((v for k, v in FakeOllama.REPLIES.items() if body["prompt"].endswith(k)), "")
+                events = ""
+                for piece in re.findall(r"[^\n]*\n?", text):
+                    if piece:
+                        choice = {"delta": {"content": piece}} if provider == "codestral" else {"text": piece}
+                        events += f"data: {json.dumps({'choices': [choice]})}\n\n"
+                data = (events + "data: [DONE]\n\n").encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+        super().__init__(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.serve_forever, daemon=True).start()
+
+
+def run_inline_hosted(tmp):
+    """Codestral, DeepSeek and Mercury through fake APIs: the key (from the environment here; the keychain is a stub
+    that has none) goes as a Bearer header, a block is cut after its closing brace, a fenced reply shows without its
+    fences, prose never shows; with no key the status bar says so."""
+    for provider, env_var in [("codestral", "MISTRAL_API_KEY"), ("deepseek", "DEEPSEEK_API_KEY"), ("mercury", "INCEPTION_API_KEY")]:
+        stub = FakeHosted(provider)
+        settings = os.path.join(tmp, "hosted-" + provider, "vscode-settings.json")
+        os.makedirs(os.path.dirname(settings))
+        json.dump({"editor.inlineSuggest.provider": provider, "editor.inlineSuggest.endpoint": f"http://127.0.0.1:{stub.server_port}/v1/fim/completions",
+                   "editor.inlineSuggest.debounce": 80}, open(settings, "w"))
+        env = {"VSEDIT_SETTINGS": settings, "VSEDIT_SECURITY": "/usr/bin/false", "VSEDIT_SECRETS": os.path.join(tmp, "no-secrets.json"), env_var: "sk-e2e"}
+        file = os.path.join(tmp, f"hosted-{provider}.js")
+        open(file, "w").write("function f() {\n  \n}\n")
+        t = Term(file, env=env)
+        assert colored_frame(t), "no colored frame"
+        t.send("\x07"); t.send("2:3\r")
+        t.out = b""
+        t.send("i")
+        assert t.read("go();", timeout=3), f"{provider}: no block ghost text:\n" + plain(t)[-300:]
+        t.read(timeout=0.5)
+        assert "stop();" not in plain(t), f"{provider}: the block wasn't cut"
+        t.send("\x1b", wait=0.2); t.send("\x7f"); t.out = b""
+        t.send("q")
+        assert t.read("uit();", timeout=3) and "```" not in plain(t), f"{provider}: the fenced reply"
+        t.send("\x1b", wait=0.2); t.send("\x7f"); t.out = b""
+        t.send("p"); t.read(timeout=0.8)
+        assert "breakdown" not in plain(t), f"{provider}: prose showed"
+        assert stub.auth and set(stub.auth) == {"Bearer sk-e2e"}, stub.auth
+        assert all(r["stream"] and "suffix" in r for r in stub.requests), stub.requests[0]
+        t.send(QUIT); t.send("d")
+        t.wait_exit()
+        stub.shutdown()
+    del env[env_var]
+    t = Term(file, env=env)
+    assert t.read("Mercury: no API key", timeout=5), "no 'no API key' in the status bar"
+    t.send(QUIT)
+    t.wait_exit()
+    print("hosted inline suggestions: ok")
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="vsedit-e2e-")
     ISOLATED.update(VSEDIT_SETTINGS=os.path.join(tmp, "settings", "vscode-settings.json"), VSEDIT_BACKUPS=os.path.join(tmp, "backups"),
@@ -1328,7 +1403,7 @@ def main():
     scenarios = [run_tsx, run_go, run_crlf, run_hex, run_error_page, run_drag_scroll, run_shift_click, run_minified, run_scrollbars, run_decorations,
                  run_autoclose, run_git_gutter, run_folding, run_menu_and_cmd_save, run_save_dialog, run_auto_save, run_cursor_style, run_hot_exit,
                  run_keybindings, run_mac_keys, run_format, run_typescript, run_find_and_status, run_symbols_and_problems, run_install_prompt, run_small_batch,
-                 run_files_and_navigation, run_medium_language, run_medium_editing, run_inline_suggest, run_references_and_lenses]
+                 run_files_and_navigation, run_medium_language, run_medium_editing, run_inline_suggest, run_references_and_lenses, run_inline_hosted]
     only = set(sys.argv[1:])
     results = []
     try:

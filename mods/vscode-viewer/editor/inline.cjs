@@ -5,11 +5,18 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const { spawnSync } = require("child_process");
 
-const PROVIDERS = ["ollama", "off"];
-const LABELS = { ollama: "Ollama", off: "Inline Suggestions" };
-const MODELS = { ollama: "qwen2.5-coder:1.5b-base" };
-const ENDPOINTS = { ollama: "http://127.0.0.1:11434" };
+const PROVIDERS = ["ollama", "codestral", "deepseek", "mercury", "off"];
+const LABELS = { ollama: "Ollama", codestral: "Codestral", deepseek: "DeepSeek", mercury: "Mercury", off: "Inline Suggestions" };
+const MODELS = { ollama: "qwen2.5-coder:1.5b-base", codestral: "codestral-latest", deepseek: "deepseek-flash", mercury: "mercury-edit-2" };
+const ENDPOINTS = { ollama: "http://127.0.0.1:11434", codestral: "https://api.mistral.ai/v1/fim/completions",
+  deepseek: "https://api.deepseek.com/beta/completions", mercury: "https://api.inceptionlabs.ai/v1/fim/completions" };
+// Hosted FIM APIs, one adapter (POST {model, prompt, suffix, max_tokens, stop, stream} with a Bearer key): the key's
+// environment variable and the price in USD per million input / output tokens (editor.inlineSuggest.price overrides).
+const HOSTED = { codestral: { env: "MISTRAL_API_KEY", price: [0.3, 0.9] }, deepseek: { env: "DEEPSEEK_API_KEY", price: [0.3, 1.2] },
+  mercury: { env: "INCEPTION_API_KEY", price: [0.25, 0.75] } };
+const HOSTED_LIMIT = 2000; // requests a day by default for a paid provider (Ollama: unlimited)
 const MAX_FILE_CHARS = 1_000_000; // no suggestions in bigger files
 const TIMEOUT = 20000;
 // Never sent to a provider (file names, or paths when the pattern has a "/"); editor.inlineSuggest.exclude adds to it.
@@ -20,9 +27,9 @@ const EXCLUDE = [".env", ".env.*", "*.env", ".envrc", "*.pem", "*.key", "*.p12",
 const P = "editor.inlineSuggest.";
 const DEFAULTS = {
   [P + "enabled"]: null,           // null: on when the provider can run here (Ollama installed, …)
-  [P + "provider"]: "ollama",      // "ollama" | "off"
+  [P + "provider"]: "ollama",      // "ollama" | "codestral" | "deepseek" | "mercury" | "off"
   [P + "model"]: "",               // "": the provider's default (Ollama: qwen2.5-coder:1.5b-base)
-  [P + "endpoint"]: "",            // "": the provider's default (Ollama: http://127.0.0.1:11434)
+  [P + "endpoint"]: "",            // "": the provider's default (ENDPOINTS: Ollama's server, the hosted APIs' FIM URL)
   [P + "trigger"]: "auto",         // "auto" (after typing pauses) | "manual" (Trigger Inline Suggestion only)
   [P + "multiline"]: true,         // true: a block (cut where it ends: blockCut); false: one line ("\n" stops the reply)
   [P + "debounce"]: 250,           // ms typing must pause before a request
@@ -30,7 +37,8 @@ const DEFAULTS = {
   [P + "prefixChars"]: 4000,       // text sent before the cursor
   [P + "suffixChars"]: 300,        // and after it (re-read on every request: Qwen's FIM puts it after the prefix)
   [P + "stopAfter"]: 5,            // errors in a row that pause the provider for this session (4x as many dropped replies)
-  [P + "dailyRequestLimit"]: 0,    // requests a day before suggestions stop until tomorrow; 0: unlimited
+  [P + "dailyRequestLimit"]: null, // requests a day before suggestions stop until tomorrow; 0: unlimited; null: 2,000 for a paid provider, Ollama 0
+  [P + "price"]: null,             // { input, output } USD per million tokens for the cost estimate; null: HOSTED's
   [P + "keepAlive"]: "30m",        // Ollama: how long the model stays loaded after a request
   [P + "exclude"]: [],             // more file patterns never sent (on top of EXCLUDE)
 };
@@ -50,6 +58,8 @@ function normalize(raw = {}) {
     if (typeof n === "number" && Number.isFinite(n)) v[P + k] = Math.round(Math.max(lo, Math.min(hi, n)));
   }
   if (Array.isArray(get("exclude"))) v[P + "exclude"] = get("exclude").filter(s => typeof s === "string" && s.trim());
+  const price = get("price");
+  if ([price?.input, price?.output].every(n => typeof n === "number" && n >= 0)) v[P + "price"] = { input: price.input, output: price.output };
   return v;
 }
 
@@ -63,7 +73,10 @@ function config(values, usable = () => true) {
     prefixChars: v("prefixChars"), suffixChars: v("suffixChars"), stopAfter: v("stopAfter"), keepAlive: v("keepAlive") || "30m",
     exclude: [...EXCLUDE, ...v("exclude")],
   };
-  cfg.limit = v("dailyRequestLimit");
+  cfg.hosted = !!HOSTED[provider];
+  cfg.limit = v("dailyRequestLimit") ?? (cfg.hosted ? HOSTED_LIMIT : 0);
+  const price = v("price") ?? (cfg.hosted ? { input: HOSTED[provider].price[0], output: HOSTED[provider].price[1] } : null);
+  cfg.price = price;
   cfg.key = `${provider}:${cfg.model}`;
   cfg.enabled = provider !== "off" && (v("enabled") ?? !!usable(cfg));
   return cfg;
@@ -248,8 +261,21 @@ const TEMPLATES = [
 const template = (model) => TEMPLATES.find(t => t.re.test(model)) ?? null;
 const fimPrompt = (t, prefix, suffix) => t.spm ? t.pre + suffix + t.mid + prefix + t.end : t.pre + prefix + t.mid + suffix + t.end;
 const JSON_HEADERS = { "Content-Type": "application/json" };
-// The HTTP request for a suggestion: { url, headers, body } (stream: Ollama's NDJSON lines, read by postStream).
-function request(cfg, ctx, stream = false) {
+// A short stable id of a file (FNV-1a), Codestral's prompt_cache_key: the same file reuses the provider's prompt cache.
+function cacheKey(file) {
+  let h = 0x811c9dc5;
+  for (const b of Buffer.from(file)) h = Math.imul(h ^ b, 0x01000193) >>> 0;
+  return `vsedit-${h.toString(16).padStart(8, "0")}`;
+}
+// The HTTP request for a suggestion: { url, headers, body } (stream: Ollama's NDJSON lines or the hosted APIs' SSE
+// events, read by postStream). key: a hosted provider's API key.
+function request(cfg, ctx, stream = false, key = "") {
+  if (cfg.hosted) {
+    const stop = cfg.multiline || ctx.nextLine ? [] : ["\n"];
+    return { url: cfg.endpoint, headers: { ...JSON_HEADERS, Authorization: `Bearer ${key}` },
+      body: { model: cfg.model, prompt: ctx.prefix, suffix: ctx.suffix, max_tokens: cfg.maxTokens, stream, ...(stop.length ? { stop } : {}),
+        ...(cfg.provider === "codestral" && ctx.file ? { prompt_cache_key: cacheKey(ctx.file) } : {}) } };
+  }
   if (cfg.provider === "ollama") {
     const t = template(cfg.model), stop = [...(t?.stop ?? []), ...(cfg.multiline || ctx.nextLine ? [] : ["\n"])];
     const prompt = t ? { prompt: fimPrompt(t, ctx.prefix, ctx.suffix), raw: true } : { prompt: ctx.prefix, suffix: ctx.suffix };
@@ -276,15 +302,21 @@ function modelInfo(status, json) {
 const chatModel = (cfg, info) => info === undefined ? false : info ? info.chat : !/base/i.test(cfg.model);
 const missingText = (cfg) => `${cfg.label}: model ${cfg.model} not found (run: ollama pull ${cfg.model})`;
 const chatHint = (cfg) => `${cfg.model} is a chat model and often answers in prose; a base model completes code (ollama pull ${MODELS.ollama}, then set editor.inlineSuggest.model)`;
+// The text of one reply or streamed event: Ollama's `response`, a completion's `choices[0].text`, a chat-shaped one's
+// `delta.content` / `message.content` (Mistral's FIM).
+const replyText = (j) => { const c = j?.choices?.[0]; return j?.response ?? c?.text ?? c?.delta?.content ?? c?.message?.content ?? null; };
+// An error body's message: OpenAI's {error: {message}}, Ollama's {error}, Mistral's {message} / {detail}.
+const errorText = (j) => { const e = j?.error?.message ?? j?.error ?? (j?.object === "error" || j?.detail ? j?.message ?? j?.detail : null);
+  return e == null ? null : typeof e === "string" ? e : JSON.stringify(e); };
 // A reply (status, parsed JSON) -> the suggestion texts; throws a message for the status bar.
 function reply(cfg, status, json) {
-  const err = json?.error?.message ?? json?.error;
+  const err = errorText(json);
   if (status >= 400 || err) {
     if (cfg.provider === "ollama" && /not found/i.test(err ?? "")) throw new Error(missingText(cfg));
-    throw new Error(`${cfg.label}: ${err ? String(err).slice(0, 160) : `HTTP ${status}`}`);
+    if (cfg.hosted && (status === 401 || status === 403)) throw new Error(`${cfg.label}: the API key was refused (HTTP ${status}); ${keyHelp(cfg.provider)}`);
+    throw new Error(`${cfg.label}: ${err ? err.slice(0, 160) : `HTTP ${status}`}`);
   }
-  if (cfg.provider === "ollama") return [json?.response ?? ""];
-  return [];
+  return [replyText(json) ?? ""];
 }
 // A failed connection -> the status bar's words.
 function failure(cfg, e) {
@@ -294,25 +326,30 @@ function failure(cfg, e) {
   return e?.message?.startsWith(cfg.label) || e?.message?.startsWith("Ollama") ? e.message : `${cfg.label}: ${e?.message ?? e}`;
 }
 
-// POSTs a request with fetch; `signal` aborts it. Resolves { status, json }.
+// Sends a request with fetch (POST unless req.method); `signal` aborts it. Resolves { status, json }.
 async function post(req, signal) {
   const timeout = AbortSignal.timeout(TIMEOUT);
-  const res = await fetch(req.url, { method: "POST", headers: req.headers, body: JSON.stringify(req.body), signal: signal ? AbortSignal.any([signal, timeout]) : timeout });
+  const res = await fetch(req.url, { method: req.method ?? "POST", headers: req.headers, body: req.body === undefined ? undefined : JSON.stringify(req.body),
+    signal: signal ? AbortSignal.any([signal, timeout]) : timeout });
   const text = await res.text();
   let json = null;
   try { json = JSON.parse(text); } catch {}
   return { status: res.status, json };
 }
-// POSTs a streaming request: reads Ollama's NDJSON lines, calling onText(the text so far) after each chunk; onText
-// returning true stops reading (the block is complete) and closes the connection. Resolves { status, json } like post,
-// json.response holding the text read.
+// POSTs a streaming request: reads Ollama's NDJSON lines or SSE `data:` events, calling onText(the text so far) after
+// each chunk; onText returning true stops reading (the block is complete) and closes the connection. Resolves
+// { status, json } like post, json.response holding the text read (or the error body).
 async function postStream(req, signal, onText) {
   const stop = new AbortController();
   const res = await fetch(req.url, { method: "POST", headers: req.headers, body: JSON.stringify(req.body),
     signal: AbortSignal.any([stop.signal, AbortSignal.timeout(TIMEOUT), ...(signal ? [signal] : [])]) });
   const dec = new TextDecoder();
   let text = "", rest = "", error = null;
-  const take = (line) => { let j = null; try { j = JSON.parse(line); } catch {} if (j?.error) error = j.error; else if (typeof j?.response === "string") text += j.response; };
+  const take = (line) => {
+    let j = null;
+    try { j = JSON.parse(line.replace(/^data:\s*/, "")); } catch {}
+    if (errorText(j)) error = j; else if (typeof replyText(j) === "string") text += replyText(j);
+  };
   try {
     for await (const chunk of res.body) {
       const lines = (rest + dec.decode(chunk, { stream: true })).split("\n");
@@ -322,12 +359,61 @@ async function postStream(req, signal, onText) {
     }
   } catch (e) { if (!stop.signal.aborted) throw e; }
   if (rest.trim()) take(rest);
-  return { status: res.status, json: error ? { error } : { response: text } };
+  return { status: res.status, json: error ?? { response: text } };
+}
+
+// ---------- API keys: the macOS keychain, then <herdr home>/vscode-secrets.json (mode 600), then the environment ----------
+const herdrHome = () => process.env.HERDR_APP_HOME ?? path.join(os.homedir(), ".config", "herdr-app");
+const secretsFile = () => process.env.VSEDIT_SECRETS ?? path.join(herdrHome(), "vscode-secrets.json");
+const securityBin = () => process.env.VSEDIT_SECURITY ?? (process.platform === "darwin" ? "/usr/bin/security" : null);
+const service = (provider) => `herdr-vscode-${provider}`;
+// How to give a provider its key, for the status bar.
+const keyHelp = (provider) => `no API key: security add-generic-password -U -s ${service(provider)} -a herdr -w <key> ` +
+  `(or Settings › Inline Suggestions; elsewhere ${secretsFile()} with {"${provider}": "<key>"}, chmod 600; or ${HOSTED[provider].env})`;
+// The provider's key: { key, from: "keychain" | "file" | "env" } | { key: null, loose: the file is readable by others }.
+// The file is read only when no one else may read it.
+function apiKey(provider) {
+  const sec = securityBin();
+  if (sec) {
+    const r = spawnSync(sec, ["find-generic-password", "-s", service(provider), "-w"], { encoding: "utf8", timeout: 5000 });
+    if (r.status === 0 && r.stdout.trim()) return { key: r.stdout.trim(), from: "keychain" };
+  }
+  let loose = false;
+  try {
+    if (fs.statSync(secretsFile()).mode & 0o077) loose = true;
+    else { const k = JSON.parse(fs.readFileSync(secretsFile(), "utf8"))?.[provider]; if (typeof k === "string" && k.trim()) return { key: k.trim(), from: "file" }; }
+  } catch {}
+  const env = process.env[HOSTED[provider].env];
+  return env?.trim() ? { key: env.trim(), from: "env" } : { key: null, loose };
+}
+// The key with its middle hidden, for the Settings dialog: "sk-a…9xQz".
+const maskKey = (key) => (key.length > 12 ? `${key.slice(0, 4)}…${key.slice(-4)}` : "••••");
+// Stores a key: the keychain (`security -i` reads the command on stdin, so the key is in no process's arguments), else
+// the 600 file. -> where it went.
+function saveKey(provider, key) {
+  if (!/^[\x21-\x7e]+$/.test(key) || /["\\]/.test(key)) throw new Error("the key has characters an API key doesn't (spaces, quotes or backslashes)");
+  const sec = securityBin();
+  if (sec && spawnSync(sec, ["-i"], { input: `add-generic-password -U -s ${service(provider)} -a herdr -w "${key}"\n`, timeout: 5000 }).status === 0) return "keychain";
+  const file = secretsFile();
+  let all = {};
+  try { all = JSON.parse(fs.readFileSync(file, "utf8")) ?? {}; } catch {}
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ ...all, [provider]: key }, null, 2) + "\n", { mode: 0o600 });
+  fs.chmodSync(file, 0o600);
+  return "file";
+}
+// Removes the provider's key from the keychain and the file.
+function removeKey(provider) {
+  const sec = securityBin();
+  if (sec) spawnSync(sec, ["delete-generic-password", "-s", service(provider), "-a", "herdr"], { timeout: 5000 });
+  try {
+    const file = secretsFile(), all = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (all && provider in all) { delete all[provider]; fs.writeFileSync(file, JSON.stringify(all, null, 2) + "\n", { mode: 0o600 }); }
+  } catch {}
 }
 
 // ---------- usage: <herdr home>/.vscode-inline-usage.json, per local date and provider:model ----------
-const usageFile = () => process.env.VSEDIT_INLINE_USAGE
-  ?? path.join(process.env.HERDR_APP_HOME ?? path.join(os.homedir(), ".config", "herdr-app"), ".vscode-inline-usage.json");
+const usageFile = () => process.env.VSEDIT_INLINE_USAGE ?? path.join(herdrHome(), ".vscode-inline-usage.json");
 const today = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 const KEEP_DAYS = 14, KEEP_MS = 200;
 function readUsage(file = usageFile()) { try { const o = JSON.parse(fs.readFileSync(file, "utf8")); return o && typeof o === "object" ? o : {}; } catch { return {}; } }
@@ -345,13 +431,56 @@ function recordUsage(key, { inChars, outChars = 0, ms = null }, file = usageFile
 const percentile = (xs, p) => { if (!xs.length) return null; const s = [...xs].sort((a, b) => a - b); return s[Math.min(s.length - 1, Math.ceil((p / 100) * s.length) - 1)]; };
 const tokens = (chars) => { const t = Math.round(chars / 4); return t >= 1000 ? `${(t / 1000).toFixed(1)}k` : String(t); };
 // "Ollama qwen2.5-coder:7b · today 12 requests (limit 2000) · ~3.1k in / 40 out tokens · p50 140 ms, p95 900 ms"
+// Today's approximate cost in USD (tokens: characters ÷ 4) at cfg.price; null for a free provider.
+const cost = (cfg, u) => cfg.price ? (u.inChars / 4 * cfg.price.input + u.outChars / 4 * cfg.price.output) / 1e6 : null;
 function usageText(cfg, u) {
-  const p50 = percentile(u.ms ?? [], 50), p95 = percentile(u.ms ?? [], 95);
+  const p50 = percentile(u.ms ?? [], 50), p95 = percentile(u.ms ?? [], 95), usd = cost(cfg, u);
   return `${cfg.label} ${cfg.model} · today ${u.requests} request${u.requests === 1 ? "" : "s"}${cfg.limit ? ` (limit ${cfg.limit})` : ""}` +
-    ` · ~${tokens(u.inChars)} in / ${tokens(u.outChars)} out tokens` + (p50 == null ? "" : ` · p50 ${p50} ms, p95 ${p95} ms`);
+    ` · ~${tokens(u.inChars)} in / ${tokens(u.outChars)} out tokens` + (usd == null ? "" : ` · ~$${usd.toFixed(usd < 0.1 ? 4 : 2)}`) +
+    (p50 == null ? "" : ` · p50 ${p50} ms, p95 ${p95} ms`);
 }
 
 module.exports = { PROVIDERS, MODELS, DEFAULTS, EXCLUDE, MAX_FILE_CHARS, normalize, config, globRe, denied, atSuggestable, quietEnd, contextAt,
   typeThrough, nextWordLength, nextLineLength, trimLineSuffix, proseFile, blockCut, clean, Health, template, request, warmup, show, modelInfo,
-  chatModel, missingText, chatHint, reply, failure, post, postStream,
+  chatModel, missingText, chatHint, reply, failure, post, postStream, HOSTED, apiKey, keyHelp, maskKey, saveKey, removeKey, cacheKey, cost,
   usageFile, today, usageOf, recordUsage, percentile, usageText };
+
+// ---------- the Settings dialog's helper: node inline.cjs <command> <provider> … (a key is never an argument) ----------
+// --key P: {from, masked} | {from: null, help}; --save-key P <file>: stores the key the file holds, deletes the file;
+// --remove-key P; --test P [model] [endpoint]: one short FIM request, {ok, ms} | {ok: false, error};
+// --models P [endpoint]: {models, recommended} (Ollama's pulled models from /api/tags, base ones recommended).
+const CATALOG = { codestral: ["codestral-latest", "codestral-2508"], deepseek: ["deepseek-flash"], mercury: ["mercury-edit-2"] };
+async function cli([cmd, provider, ...args]) {
+  if (!PROVIDERS.includes(provider) || provider === "off") throw new Error(`unknown provider: ${provider}`);
+  const cfg = config(normalize({ [P + "provider"]: provider, [P + "model"]: args[0] ?? "", [P + "endpoint"]: (cmd === "--models" ? args[0] : args[1]) ?? "", [P + "multiline"]: false, [P + "maxTokens"]: 16 }));
+  if (cmd === "--models") {
+    if (provider !== "ollama") return { models: CATALOG[provider], recommended: [MODELS[provider]] };
+    const { json } = await post({ url: `${cfg.endpoint}/api/tags`, method: "GET", headers: {} }).catch(() => ({ json: null }));
+    const pulled = (json?.models ?? []).map(m => m.name).filter(Boolean);
+    return { models: [...new Set([MODELS.ollama, ...pulled])], recommended: [...new Set([MODELS.ollama, ...pulled.filter(m => /base/i.test(m) && template(m))])], pulled };
+  }
+  if (!cfg.hosted) throw new Error(`${cfg.label} needs no API key`);
+  if (cmd === "--key") { const k = apiKey(provider); return k.key ? { from: k.from, masked: maskKey(k.key) } : { from: null, help: keyHelp(provider), loose: k.loose }; }
+  if (cmd === "--save-key") {
+    const file = args[0], key = fs.readFileSync(file, "utf8").trim();
+    fs.rmSync(file, { force: true });
+    try { fs.rmdirSync(path.dirname(file)); } catch {}
+    return { from: saveKey(provider, key), masked: maskKey(key) };
+  }
+  if (cmd === "--remove-key") { removeKey(provider); return { removed: true }; }
+  if (cmd === "--test") {
+    const k = apiKey(provider);
+    if (!k.key) return { ok: false, error: keyHelp(provider) };
+    const t0 = Date.now();
+    try {
+      const { status, json } = await post(request(cfg, { prefix: "def add(a, b):\n    return", suffix: "\n", file: "test.py" }, false, k.key));
+      reply(cfg, status, json);
+      return { ok: true, ms: Date.now() - t0 };
+    } catch (e) { return { ok: false, error: failure(cfg, e) }; }
+  }
+  throw new Error(`unknown command: ${cmd}`);
+}
+if (require.main === module) {
+  cli(process.argv.slice(2)).then(o => process.stdout.write(JSON.stringify(o) + "\n"),
+    e => { process.stdout.write(JSON.stringify({ error: e.message }) + "\n"); process.exitCode = 1; });
+}

@@ -26,9 +26,14 @@
   // Absent "enabled": on when the provider can run here (Ollama installed). The status bar item turns them on/off; the
   // pointer on it shows today's requests, approximate tokens (characters ÷ 4) and latency (p50/p95).
   // "editor.inlineSuggest.enabled": true,
-  // "ollama" (local: brew install ollama; ollama pull qwen2.5-coder:1.5b-base) | "off"
+  // "ollama" (local: brew install ollama; ollama pull qwen2.5-coder:1.5b-base) | "codestral" (Mistral) | "deepseek" |
+  // "mercury" (Inception) | "off". The paid ones read their API key from the macOS keychain (Settings › Inline
+  // Suggestions, or: security add-generic-password -U -s herdr-vscode-<provider> -a herdr -w <key>), else
+  // <herdr home>/vscode-secrets.json ({"<provider>": "<key>"}, chmod 600), else MISTRAL_API_KEY / DEEPSEEK_API_KEY /
+  // INCEPTION_API_KEY. Never put a key in this file.
   "editor.inlineSuggest.provider": "ollama",
-  // "" = the provider's default (Ollama: "qwen2.5-coder:1.5b-base" at "http://127.0.0.1:11434"). Use a base (FIM) model:
+  // "" = the provider's default (Ollama: "qwen2.5-coder:1.5b-base" at "http://127.0.0.1:11434"; Codestral:
+  // "codestral-latest"; DeepSeek: "deepseek-flash"; Mercury: "mercury-edit-2" at their FIM URLs). For Ollama use a base (FIM) model:
   // a chat / instruct one answers in prose (the status bar says "chat model"); qwen2.5-coder:7b-base is better and slower.
   "editor.inlineSuggest.model": "",
   "editor.inlineSuggest.endpoint": "",
@@ -45,8 +50,11 @@
   // Errors in a row that pause the provider for the session (4x as many dropped replies: prose, fences, repeats; FIM
   // tokens pause at once; empty replies never).
   "editor.inlineSuggest.stopAfter": 5,
-  // Requests a day before suggestions stop until tomorrow; 0 = unlimited.
-  "editor.inlineSuggest.dailyRequestLimit": 0,
+  // Requests a day before suggestions stop until tomorrow; 0 = unlimited; absent: 2,000 for a paid provider, none for Ollama.
+  // "editor.inlineSuggest.dailyRequestLimit": 2000,
+  // USD per million input / output tokens for the status bar's cost estimate; absent: the provider's list price
+  // (Codestral 0.30 / 0.90, DeepSeek 0.30 / 1.20 at peak without cache hits, Mercury 0.25 / 0.75).
+  // "editor.inlineSuggest.price": { "input": 0.3, "output": 0.9 },
   // Ollama keeps the model loaded this long after each request (and the editor loads it when it starts).
   "editor.inlineSuggest.keepAlive": "30m",
   // File patterns never sent, on top of the built-in list (.env*, *.pem, *.key, id_rsa*, .npmrc, **/.ssh/**, …).

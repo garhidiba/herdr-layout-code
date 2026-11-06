@@ -37,6 +37,8 @@ pub struct InlineState {
     warmed: HashSet<String>,
     /// What Ollama said about each provider:model (absent: not asked yet; None: it didn't say).
     models: HashMap<String, Option<ModelInfo>>,
+    /// Hosted providers' API keys (inline::api_key) and when they were looked up (again every 10 s while missing).
+    keys: HashMap<String, (Result<String, bool>, Instant)>,
     seen: Option<(PathBuf, u64, Pos)>,
     /// The event being handled edited by typing (asks again once typing pauses).
     pub editing: bool,
@@ -84,6 +86,9 @@ impl Editor {
         if self.inline.models.get(&cfg.key).is_some_and(|i| i.is_some_and(|i| i.missing)) {
             return Some(inline::missing_text(cfg));
         }
+        if cfg.hosted && self.inline_api_key(cfg).is_err() {
+            return Some(format!("{}: {}", cfg.label, inline::key_help(&cfg.provider)));
+        }
         if self.popup.is_some() || self.prompt.is_some() || self.ls.peek.is_some() || !self.empty() {
             return Some("ui".into());
         }
@@ -101,6 +106,15 @@ impl Editor {
             return Some(format!("{}: today's limit of {} requests is reached (editor.inlineSuggest.dailyRequestLimit)", cfg.label, cfg.limit));
         }
         None
+    }
+    /// A hosted provider's API key, looked up again at most every 10 s while there is none (Err: the secrets file is
+    /// readable by others).
+    fn inline_api_key(&mut self, cfg: &Config) -> Result<String, bool> {
+        let stale = self.inline.keys.get(&cfg.provider).is_none_or(|(k, at)| k.is_err() && at.elapsed() > Duration::from_secs(10));
+        if stale {
+            self.inline.keys.insert(cfg.provider.clone(), (inline::api_key(&cfg.provider).map(|k| k.0), Instant::now()));
+        }
+        self.inline.keys[&cfg.provider].0.clone()
     }
     pub fn inline_cancel(&mut self) {
         self.inline.due = None;
@@ -168,7 +182,8 @@ impl Editor {
             let items = items.clone();
             return self.inline_show(items, at, version);
         }
-        let ctx = inline::Context { prose: inline::prose_file(&file), ..inline::context_at(&self.buf.lines, at.line, at.col, cfg.prefix_chars, cfg.suffix_chars) };
+        let api_key = if cfg.hosted { self.inline_api_key(&cfg).unwrap_or_default() } else { String::new() };
+        let ctx = inline::Context { prose: inline::prose_file(&file), file: file.to_string_lossy().into_owned(), ..inline::context_at(&self.buf.lines, at.line, at.col, cfg.prefix_chars, cfg.suffix_chars) };
         self.inline_cancel();
         let cancel = Arc::new(Cancel::default());
         self.inline.cancel = Some(cancel.clone());
@@ -177,7 +192,7 @@ impl Editor {
         self.inline.busy = true;
         let t0 = Instant::now();
         let work_cfg = cfg.clone();
-        let req = inline::request(&work_cfg, &ctx, true);
+        let req = inline::request(&work_cfg, &ctx, true, &api_key);
         // the reply streams in: its complete lines show as they come (a job each); reading stops where the block ends
         // (or at prose)
         let (tx, part_ctx) = (self.ls.jobs.0.clone(), ctx.clone());
@@ -361,10 +376,13 @@ impl Editor {
         let paused = self.health(&cfg).paused.is_some();
         let info = self.inline.models.get(&cfg.key).copied();
         let pull = format!(": ollama pull {}", cfg.model);
+        let no_key = cfg.enabled && cfg.hosted && self.inline_api_key(&cfg).is_err();
         let state = if !cfg.enabled {
             ": off"
         } else if info.is_some_and(|i| i.is_some_and(|i| i.missing)) {
             &pull
+        } else if no_key {
+            ": no API key"
         } else if paused {
             ": paused"
         } else if Self::limited(&cfg) {
@@ -393,6 +411,11 @@ impl Editor {
         if inline::chat_model(&cfg, info.as_ref()) {
             notes.push(inline::chat_hint(&cfg));
         }
+        if cfg.enabled && cfg.hosted {
+            if let Err(loose) = self.inline_api_key(&cfg) {
+                notes.push(inline::key_help(&cfg.provider) + if loose { " (vscode-secrets.json is readable by others: chmod 600 it)" } else { "" });
+            }
+        }
         notes.push(inline::usage_text(&cfg, &inline::usage_of(&cfg.key, &inline::usage_file(), &inline::today())));
         notes.join(" · ")
     }
@@ -402,6 +425,7 @@ impl Editor {
         self.inline.health.remove(&cfg.key);
         self.inline.models.remove(&cfg.key);
         self.inline.warmed.remove(&cfg.key);
+        self.inline.keys.clear();
         self.inline.error = None;
         self.inline_hide();
         match crate::settings::update(&crate::settings::settings_file(), "editor.inlineSuggest.enabled", serde_json::json!(!cfg.enabled)) {
