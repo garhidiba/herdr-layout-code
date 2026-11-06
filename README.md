@@ -5,7 +5,7 @@ A VS Code–style layout for [Herdr](https://herdr.dev):
 - **Explorer:** Material Icon Theme icons and VS Code git colors, including repos nested in the folder.
 - **Source Control:** every repo under the folder, changes and commit, and a commit graph whose commits expand to their files.
 - **Diff tab:** VS Code-style inline diff with VS Code's own syntax colors.
-- **Editor:** code files open in a terminal tab in a VS Code-like editor colored by VS Code's own tokenizer (Atom One Dark); images and markdown open in a viewer tab.
+- **Editor:** code files open in a terminal tab in a VS Code-like editor colored by VS Code's own tokenizer (Atom One Dark), with VS Code's right-click menu, command palette, quick open, macOS keys, Go to Definition / References / Rename / Format through tsserver and language servers, a save dialog, hot exit and auto save; images and markdown open in a viewer tab.
 - **Explorer menu:** VS Code's right-click menu (new, open with, reveal, cut/copy/paste, copy path, rename, delete to Trash).
 - **Pane menu:** Open in VS Code / Finder.
 - **Status bar:** Claude and Codex usage meters; Codex limit resets can be redeemed from the card.
@@ -19,7 +19,7 @@ Ask your agent in Herdr: *"add the layout from github.com/garhidiba/herdr-layout
 To install by hand:
 
 1. Copy `layouts/vscode.json` into `~/.config/herdr-app/layouts/` and the `mods/*` folders into `~/.config/herdr-app/mods/`.
-2. Merge `keys.json` into yours.
+2. Merge `keys.json` into yours. Copy `vscode-settings.json` to `~/.config/herdr-app/` only if you don't have one (the editor creates it with the defaults otherwise).
 3. Run `herdr-app check` on each mod.
 4. Switch with `ctrl-shift-l`, or run `herdr-app do layout.switch --name vscode`.
 
@@ -29,7 +29,9 @@ Optional Claude meter: set Claude Code's `statusLine.command` to `sh ~/.config/h
 
 - `sh`, `git`, `find` (Explorer listing and git status; Source Control repos, status, log, a commit's files, and `git add -A` + `git commit` when you commit; the diff tab's `git cat-file blob`)
 - `node` (diff tab colors: `mods/vscode-diff/tokens.cjs` with the engine in `mods/vscode-viewer/vscode/`)
-- `node` (the terminal editor; must be on PATH), `pbcopy`/`pbpaste` (its clipboard)
+- `node` (the terminal editor; must be on PATH), `pbcopy`/`pbpaste` (its clipboard), `herdr-app do terminal.right_click` (so right-clicks reach it), `git ls-files` (quick open)
+- Language servers, started on first use and stopped when the editor closes: `tsserver` (TypeScript/JavaScript; the project's `node_modules/typescript` first, else the one on PATH), `rust-analyzer`, `clangd`, `sourcekit-lsp`, and VS Code's JSON/CSS/HTML servers bundled in Devin.app (`node …/json-language-features/server/dist/node/jsonServerMain.js --stdio`, likewise css and html)
+- Without a server: `git grep` / `grep -r` (Go to Definition and references by word), `gofmt`, `rustfmt`, `prettier` (Format Document)
 - `cp`, `mv`, `mkdir`, `test`, `pbcopy`, `trash` or `osascript` (Explorer menu)
 - `code` (Open in VS Code), `open` (Finder, Reveal in Finder, System Default)
 - `stat`, `cp`, `sips` (image preview: copies the image into `mods/vscode-viewer/.cache/`)
