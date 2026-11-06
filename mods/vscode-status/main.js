@@ -1,6 +1,6 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, v_flex, HoverCard } from "gpui-base";
-import { spaces, agents, theme, run, window, keys, exec, readTextFile, appHome } from "herdr";
+import { spaces, agents, theme, run, window, keys, exec, readTextFile, appHome, nextCommand, openOverlay, notify } from "herdr";
 
 // Newest Codex rollout log that has a rate_limits event (local file, no network or token).
 const CODEX_SCRIPT = 'for f in $(ls -t "$HOME"/.codex/sessions/*/*/*/rollout-*.jsonl 2>/dev/null | head -8); do l=$(grep \'"rate_limits"\' "$f" | tail -1); [ -n "$l" ] && { echo "$l"; break; }; done';
@@ -26,12 +26,30 @@ const credits = (b) => `${Math.round(Number(b)).toString().replace(/\B(?=(\d{3})
 
 const RESET_PAGES = { Claude: "https://claude.ai/settings/usage", Codex: "https://chatgpt.com/codex/settings/usage" };
 
+// Codex limits and limit resets through `codex app-server` (see codex-limits.mjs).
+const limitsHelper = () => `${appHome()}/mods/vscode-status/codex-limits.mjs`;
+const uuid = () => globalThis.crypto?.randomUUID?.() ?? "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (ch) => {
+  const r = Math.floor(Math.random() * 16); return (ch === "x" ? r : (r & 3) | 8).toString(16);
+});
+// The available credit that expires first (no expiry last); null when Codex lists none.
+const nextCredit = (resets) => (resets?.credits ?? []).filter(c => c.status === "available")
+  .sort((a, b) => (a.expiresAt ?? Infinity) - (b.expiresAt ?? Infinity))[0] ?? null;
+const OUTCOMES = {
+  reset: ["success", "Codex limits reset", "The 5-hour and weekly limits are restored."],
+  nothingToReset: ["info", "Nothing to reset", "No Codex limit window can be reset right now."],
+  noCredit: ["warning", "No limit resets left", "This Codex account has no reset credits available."],
+  alreadyRedeemed: ["success", "Reset already used", "This reset attempt had already gone through."],
+};
+
 export default class WorkspaceStatus extends View {
   init(_props, cx) {
     this.codex = null; this.claude = null;
-    this.poll(cx); this.pollClaude(cx);
+    this.poll(cx); this.pollClaude(cx); this.pollLimits(cx);
     cx.timer.every(60000, cx => this.poll(cx));
     cx.timer.every(10000, cx => this.pollClaude(cx));
+    cx.timer.every(300000, cx => this.pollLimits(cx));
+    // The confirm dialog runs vscode-status.consume-reset.
+    cx.spawn(async cx => { for (;;) { if (await nextCommand() === "consume-reset") this.consumeReset(cx); } });
   }
 
   // claude-usage.json is written by claude-usage-tap.sh (Claude Code's statusLine); until then "–".
@@ -54,15 +72,69 @@ export default class WorkspaceStatus extends View {
     });
   }
 
+  // Bars and credits: the app-server's numbers when its last read worked, else the newest rollout log.
+  showCodex() {
+    const rl = this.appLimits ?? this.logLimits;
+    this.codex = rl ? [windowLabel(rl.primary), windowLabel(rl.secondary)].filter(Boolean) : null;
+    const c = rl?.credits;
+    this.codexCredits = c?.has_credits && !c.unlimited && c.balance != null ? credits(c.balance) : null;
+  }
+
   poll(cx) {
     cx.spawn(async cx => {
       try {
         const r = await exec("sh", ["-c", CODEX_SCRIPT]);
-        const rl = r.code === 0 && r.stdout.trim() ? JSON.parse(r.stdout.trim()).payload?.rate_limits : null;
-        this.codex = rl ? [windowLabel(rl.primary), windowLabel(rl.secondary)].filter(Boolean) : null;
-        const c = rl?.credits;
-        this.codexCredits = c?.has_credits && !c.unlimited && c.balance != null ? credits(c.balance) : null;
-      } catch { this.codex = null; this.codexCredits = null; }
+        this.logLimits = r.code === 0 && r.stdout.trim() ? JSON.parse(r.stdout.trim()).payload?.rate_limits ?? null : null;
+      } catch { this.logLimits = null; }
+      this.showCodex();
+      cx.notify();
+    });
+  }
+
+  pollLimits(cx) {
+    cx.spawn(async cx => {
+      let out = null, missing = false;
+      try {
+        const r = await exec("node", [limitsHelper(), "read"]);
+        missing = r.code === 3;
+        if (r.code === 0) out = JSON.parse(r.stdout.trim());
+      } catch {}
+      this.appLimits = out?.rate_limits ?? null; this.resets = out?.resets ?? null; this.codexMissing = missing;
+      this.showCodex();
+      cx.notify();
+    });
+  }
+
+  askReset() {
+    const n = this.resets?.availableCount ?? 0;
+    if (this.redeeming || n < 1) return;
+    openOverlay({ mod: "confirm", kind: "dialog", width: 420, height: 180, props: {
+      title: "Use a Codex limit reset?",
+      detail: `Restores the 5-hour and weekly limits now. ${n - 1} left after this; it cannot be undone.`,
+      command: { name: "vscode-status.consume-reset", args: {} },
+    } });
+  }
+
+  // One redemption at a time. A failed attempt keeps its idempotency key, so retrying it can't spend twice.
+  consumeReset(cx) {
+    if (this.redeeming || !(this.resets?.availableCount > 0)) return;
+    const id = nextCredit(this.resets)?.id ?? "";
+    if (this.attempt?.id !== id) this.attempt = { id, key: uuid() };
+    this.redeeming = true;
+    cx.notify();
+    cx.spawn(async cx => {
+      try {
+        const r = await exec("node", [limitsHelper(), "consume", id, this.attempt.key]);
+        if (r.code !== 0) throw new Error(r.stderr.trim().replace(/^codex-limits: /, "") || `exit ${r.code}`);
+        const outcome = JSON.parse(r.stdout.trim()).outcome;
+        this.attempt = null;
+        const [level, title, body] = OUTCOMES[outcome] ?? ["info", "Codex limit reset", `Outcome: ${outcome}`];
+        notify({ title, body, level });
+      } catch (e) {
+        notify({ title: "Codex limit reset failed", body: `${e.message}. Trying again retries the same attempt.`, level: "error" });
+      }
+      this.redeeming = false;
+      this.pollLimits(cx);
       cx.notify();
     });
   }
@@ -78,8 +150,33 @@ export default class WorkspaceStatus extends View {
     return key ? `${key}  commands` : "commands";
   }
 
-  // The hover card for one provider: every window with its bar, usage and reset time, and a link to redeem limit resets.
-  card(t, title, wins, extra, note) {
+  // A full-width card button; `onClick` null draws it disabled.
+  button(t, id, label, onClick) {
+    return div().id(id).h(26).flex().items_center().justify_center().rounded(6).bg(t.chrome).border_1().border_color(t.border).text_size(11.5)
+      .when(Boolean(onClick), el => el.cursor_pointer().hover(s => s.bg(t.hover)).on_click(onClick))
+      .when(!onClick, el => el.text_color(t.dim)).child(label);
+  }
+
+  // Claude (and Codex without the codex CLI): the provider's usage page, where resets are redeemed on the web.
+  resetLink(t, title) {
+    return this.button(t, `reset-${title}`, "Reset limits ↗", () => exec("open", [RESET_PAGES[title]]).catch(() => {}));
+  }
+
+  // Codex: saved limit resets, redeemed through the app-server after the confirm dialog.
+  codexResets(t) {
+    if (this.codexMissing) return this.resetLink(t, "Codex");
+    const r = this.resets;
+    if (!r) return null;
+    const n = r.availableCount ?? 0;
+    return v_flex().gap(4)
+      .child(h_flex().justify_between().child(div().text_color(t.muted).child("Limit resets")).child(div().child(`${n} available`)))
+      .children((r.credits ?? []).filter(c => c.status === "available").map(c =>
+        div().text_size(11).text_color(t.dim).child(c.expiresAt ? `expires ${clock(c.expiresAt * 1000)}` : "no expiry")))
+      .child(this.button(t, "reset-Codex", this.redeeming ? "Redeeming…" : "Use a reset", n > 0 && !this.redeeming ? () => this.askReset() : null));
+  }
+
+  // The hover card for one provider: every window with its bar, usage and reset time, then `footer` (limit resets).
+  card(t, title, wins, extra, note, footer) {
     const bar = (used, color) => div().w_full().h(6).rounded(3).bg(t.border).overflow_hidden().child(div().w(Math.max(2, Math.round(220 * used / 100))).h(6).rounded(3).bg(color));
     return v_flex().w(250).p(12).gap(10).rounded(8).bg(t.popover).border_1().border_color(t.border).text_size(12).text_color(t.foreground)
       .child(div().font_semibold().child(title))
@@ -93,10 +190,7 @@ export default class WorkspaceStatus extends View {
       .when(wins.every(w => w.used === null), el => el.child(div().text_color(t.dim).child("No data yet. It appears once a session refreshes its status line.")))
       .when(Boolean(extra), el => el.child(h_flex().justify_between().child(div().text_color(t.muted).child("Credits")).child(div().child(extra))))
       .when(Boolean(note), el => el.child(div().text_size(11).text_color(t.dim).child(note)))
-      // Limit resets are redeemed on the provider's usage page (no CLI or local API for them).
-      .when(Boolean(RESET_PAGES[title]), el => el.child(div().id(`reset-${title}`).h(26).flex().items_center().justify_center().rounded(6)
-        .bg(t.chrome).border_1().border_color(t.border).cursor_pointer().hover(s => s.bg(t.hover)).text_size(11.5)
-        .on_click(() => exec("open", [RESET_PAGES[title]]).catch(() => {})).child("Reset limits ↗")));
+      .when(Boolean(footer), el => el.child(footer));
   }
 
   render() {
@@ -111,7 +205,7 @@ export default class WorkspaceStatus extends View {
       .child(h_flex().gap(6).items_center().child(div().size(6).rounded(3).bg(t.dim)).child(`${list.length} agents`)
         .when(needs > 0, el => el.child(div().text_color(t.blocked).child(`· ${needs} needs you`))))
       .child(div().flex_1())
-      .children([["claude", "Claude", this.claude, this.claudeCredits, this.claudeAt ? `Updated ${clock(this.claudeAt)}` : null], ["codex", "Codex", this.codex, this.codexCredits, null]].filter(([, , w]) => w?.length).map(([name, title, wins, extra, note]) =>
+      .children([["claude", "Claude", this.claude, this.claudeCredits, this.claudeAt ? `Updated ${clock(this.claudeAt)}` : null, this.resetLink(t, "Claude")], ["codex", "Codex", this.codex, this.codexCredits, null, this.codexResets(t)]].filter(([, , w]) => w?.length).map(([name, title, wins, extra, note, footer]) =>
         HoverCard.new(`usage-${name}`).anchor("bottom_center").open_delay(200).trigger(
         h_flex().gap(6).items_center().child(image(`mods/vscode-status/${name}.svg`).w(13).h(13).flex_none())
           .children(wins.map(w => {
@@ -123,7 +217,7 @@ export default class WorkspaceStatus extends View {
               .child(div().text_color(w.used >= 90 ? t.ansi1 : t.muted).child(`${w.used}%`));
           }))
           .when(Boolean(extra), el => el.child(div().text_color(t.dim).child(extra))))
-        .content(this.card(t, title, wins, extra, note))))
+        .content(this.card(t, title, wins, extra, note, footer))))
       .child(div().id("palette").text_color(t.dim).on_click(() => run("app.palette")).child(this.hint(t)));
   }
 }
