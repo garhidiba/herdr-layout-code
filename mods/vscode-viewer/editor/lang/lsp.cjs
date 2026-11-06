@@ -39,18 +39,18 @@ function diagnosticsOf(params) {
 const OPS = { definition: "definitionProvider", typeDefinition: "typeDefinitionProvider", implementation: "implementationProvider",
   references: "referencesProvider", rename: "renameProvider", format: "documentFormattingProvider", refactor: "codeActionProvider",
   source: "codeActionProvider", callHierarchy: "callHierarchyProvider", symbols: "documentSymbolProvider",
-  selectionRange: "selectionRangeProvider" };
+  selectionRange: "selectionRangeProvider", formatRange: "documentRangeFormattingProvider" };
 const METHOD_OP = { "textDocument/definition": "definition", "textDocument/typeDefinition": "typeDefinition", "textDocument/implementation": "implementation",
   "textDocument/references": "references", "textDocument/rename": "rename", "textDocument/formatting": "format", "textDocument/codeAction": "refactor",
   "textDocument/prepareCallHierarchy": "callHierarchy", "textDocument/documentSymbol": "symbols",
-  "textDocument/selectionRange": "selectionRange" };
+  "textDocument/selectionRange": "selectionRange", "textDocument/rangeFormatting": "formatRange" };
 
 const CLIENT_CAPS = {
   general: { positionEncodings: ["utf-16"] },
   workspace: { applyEdit: true, workspaceEdit: { documentChanges: true }, configuration: true, workspaceFolders: true },
   textDocument: {
     synchronization: { didSave: true }, definition: { linkSupport: true }, typeDefinition: { linkSupport: true },
-    implementation: { linkSupport: true }, references: {}, rename: { prepareSupport: false }, formatting: {}, callHierarchy: {},
+    implementation: { linkSupport: true }, references: {}, rename: { prepareSupport: false }, formatting: {}, rangeFormatting: {}, callHierarchy: {},
     selectionRange: {},
     documentSymbol: { hierarchicalDocumentSymbolSupport: true },
     codeAction: { codeActionLiteralSupport: { codeActionKind: { valueSet: ["", "quickfix", "refactor", "refactor.extract", "refactor.inline", "refactor.rewrite", "source", "source.organizeImports", "source.fixAll"] } },
@@ -130,6 +130,11 @@ class Lsp {
   }
   // Operations a server may lack: null once it says (initialize) it doesn't have `op`, so the editor can fall back.
   async optional(op, method, params) { await this.ready; return this.can(op) ? this.call(method, params) : null; }
+  async formatRange(ctx) {
+    const r = await this.optional("formatRange", "textDocument/rangeFormatting", { textDocument: { uri: uri(ctx.file) },
+      range: { start: lspPos(ctx.sel.start), end: lspPos(ctx.sel.end) }, options: { tabSize: ctx.tabSize, insertSpaces: ctx.insertSpaces } });
+    return r && edits(r);
+  }
   async actions(ctx, kind) {
     const list = await this.call("textDocument/codeAction", {
       textDocument: { uri: uri(ctx.file) }, range: { start: lspPos(ctx.sel.start), end: lspPos(ctx.sel.end) }, context: { diagnostics: [], only: [kind] },

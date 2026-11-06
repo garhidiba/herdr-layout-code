@@ -12,9 +12,13 @@ const MAX_EDITS = 1000;    // Myers steps before the changed middle counts as on
 const GIT = ["--no-optional-locks", "-c", "core.fsmonitor=false"];
 
 // Hunks [{ kind: "added" | "modified" | "deleted", start, end }] of `lines` against `base`, in buffer lines (end
-// exclusive). A deletion is empty (start === end): lines were removed before line `start`. Common lines at both ends are
-// trimmed first; past `limit` edits the rest of the middle is one modified hunk.
+// exclusive). A deletion is empty (start === end): lines were removed before line `start`.
 function diffHunks(base, lines, limit = MAX_EDITS) {
+  return lineHunks(base, lines, limit).map(h => ({ kind: h.a0 === h.a1 ? "added" : h.b0 === h.b1 ? "deleted" : "modified", start: h.b0, end: h.b1 }));
+}
+// The changed runs [{ a0, a1, b0, b1 }]: base lines [a0, a1) became lines [b0, b1). Common lines at both ends are
+// trimmed first; past `limit` edits the rest of the middle is one run.
+function lineHunks(base, lines, limit = MAX_EDITS) {
   let s = 0, ea = base.length, eb = lines.length;
   while (s < ea && s < eb && base[s] === lines[s]) s++;
   while (ea > s && eb > s && base[ea - 1] === lines[eb - 1]) { ea--; eb--; }
@@ -23,12 +27,12 @@ function diffHunks(base, lines, limit = MAX_EDITS) {
   const a = base.slice(s, ea).map(id), b = lines.slice(s, eb).map(id);
   const ops = (a.length && b.length && myers(a, b, limit)) || [...a.map(() => "-"), ...b.map(() => "+")];
   const out = [];
-  for (let i = 0, j = s; i < ops.length;) {
-    if (ops[i] === " ") { i++; j++; continue; }
+  for (let i = 0, ia = s, j = s; i < ops.length;) {
+    if (ops[i] === " ") { i++; ia++; j++; continue; }
     let removed = 0, added = 0;
     for (; i < ops.length && ops[i] !== " "; i++) ops[i] === "-" ? removed++ : added++;
-    out.push({ kind: !removed ? "added" : !added ? "deleted" : "modified", start: j, end: j + added });
-    j += added;
+    out.push({ a0: ia, a1: ia + removed, b0: j, b1: j + added });
+    ia += removed; j += added;
   }
   return out;
 }
@@ -147,4 +151,4 @@ class GitGutter {
   saved() { if (this.started) this.refresh(); }
 }
 
-module.exports = { diffHunks, marksFor, nextChange, lineOf, splitText, GitGutter, DELAY };
+module.exports = { diffHunks, lineHunks, marksFor, nextChange, lineOf, splitText, GitGutter, DELAY };

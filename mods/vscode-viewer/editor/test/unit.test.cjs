@@ -1242,3 +1242,34 @@ test("Expand Selection takes the language server's ranges with its own; a failin
   await ed.runCommand("editor.action.smartSelect.expand"); await ed.runCommand("editor.action.smartSelect.expand");
   assert.deepEqual(sel(ed), [0, 0, 0, 5]);
 });
+
+// ---------- medium batch: Format Selection ----------
+
+test("a document formatter's changes are kept to the selected lines, or refused when a change crosses their edges", () => {
+  const lines = ["a", "  b", "c", "  d"], whole = (text) => [{ start: { line: 0, col: 0 }, end: { line: 3, col: 3 }, text }];
+  assert.deepEqual(E.editsWithin(lines, whole("a\nb\nc\nd"), 1, 2), [{ start: { line: 1, col: 0 }, end: { line: 2, col: 1 }, text: "b\nc" }]);
+  assert.deepEqual(E.applyToLines(lines, E.editsWithin(lines, whole("a\nb\nc\nd"), 1, 2)), ["a", "b", "c", "  d"]);
+  assert.deepEqual(E.editsWithin(lines, whole("a\n  b\nc\nd"), 0, 2), [], "the change is outside");
+  assert.equal(E.editsWithin(lines, whole("a\nb c\nd"), 1, 1), null, "lines 2-3 joined across the edge");
+  assert.deepEqual(E.applyToLines(lines, E.editsWithin(lines, whole("x\na\nb\nc\nd"), 1, 3)), ["a", "b", "c", "d"], "an insertion before the selection is left out");
+});
+
+test("Format Selection uses the range formatter, else restricts the document formatter, else says it can't", async () => {
+  const ed = await plainEditor(["a", "  b", "  c"]);
+  ed.session = stubSession({ formatRange: async (ctx) => [{ start: ctx.sel.start, end: ctx.sel.end, text: ctx.lines[ctx.sel.start.line].trim() }] });
+  ed.moveTo({ line: 1, col: 3 });
+  press(ed, "k", { cmd: true }); await press(ed, "f", { cmd: true });
+  assert.deepEqual(ed.lines, ["a", "b", "  c"], "the cursor line when nothing is selected");
+  ed.session = stubSession({ formatRange: async () => null, format: async () => [{ start: { line: 0, col: 0 }, end: { line: 2, col: 3 }, text: "A\nb\nc" }] });
+  ed.sel = { anchor: { line: 1, col: 0 }, head: { line: 2, col: 1 } };
+  await ed.runCommand("editor.action.formatSelection");
+  assert.deepEqual(ed.lines, ["a", "b", "c"], "only the selected lines changed");
+  ed.session = stubSession({ format: async () => [{ start: { line: 0, col: 0 }, end: { line: 2, col: 1 }, text: "a b c" }] });
+  await ed.runCommand("editor.action.formatSelection");
+  assert.deepEqual(ed.lines, ["a", "b", "c"]);
+  assert.match(ed.message.text, /Format Selection isn't supported here/);
+  ed.session = stubSession({});
+  await ed.runCommand("editor.action.formatSelection");
+  assert.match(ed.message.text, /No format selection support for Plain Text/);
+  assert.equal(K.resolve([], "linux").byChord.get("ctrl+k ctrl+f"), "editor.action.formatSelection");
+});

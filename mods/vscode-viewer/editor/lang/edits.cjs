@@ -2,6 +2,7 @@
 // Files open in the editor get the edits through `openBuffer`; the rest are rewritten on disk keeping EOL, BOM and mode.
 const F = require("../file.cjs");
 const { cmp } = require("../buffer.cjs");
+const { lineHunks } = require("../gitgutter.cjs");
 
 // Edits sorted last-first, so applying them in order never shifts a later one.
 const lastFirst = (edits) => [...edits].sort((a, b) => cmp(b.start, a.start) || cmp(b.end, a.end));
@@ -21,6 +22,22 @@ function applyToLines(lines, edits) {
 function clampTo(lines, p) {
   const line = Math.max(0, Math.min(lines.length - 1, p.line));
   return { line, col: Math.max(0, Math.min(lines[line].length, p.col)) };
+}
+
+// Format Selection with a document formatter: its `edits` restricted to lines [a, b], as one edit replacing those lines
+// ([] when it changes none of them); null when a changed run of lines crosses a or b (it can't be split safely).
+function editsWithin(lines, edits, a, b) {
+  const after = applyToLines(lines, edits), block = [];
+  let i = a, changed = false;
+  for (const h of lineHunks(lines, after)) {
+    if (h.a0 === h.a1 ? h.a0 <= a || h.a0 > b : h.a1 <= a || h.a0 > b) continue; // outside (an insertion at an edge too)
+    if (h.a0 < a || h.a1 > b + 1) return null;
+    block.push(...lines.slice(i, h.a0), ...after.slice(h.b0, h.b1));
+    i = h.a1; changed = true;
+  }
+  if (!changed) return [];
+  block.push(...lines.slice(i, b + 1));
+  return [{ start: { line: a, col: 0 }, end: { line: b, col: lines[b].length }, text: block.join("\n") }];
 }
 
 // Merges two workspace edits (same file: concatenated).
@@ -50,4 +67,4 @@ function applyWorkspaceEdit(ws, openBuffer = () => false) {
   return result;
 }
 
-module.exports = { applyToLines, applyWorkspaceEdit, lastFirst, merge, count };
+module.exports = { applyToLines, applyWorkspaceEdit, editsWithin, lastFirst, merge, count };

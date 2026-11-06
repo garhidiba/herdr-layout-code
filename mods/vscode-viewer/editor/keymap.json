@@ -15,6 +15,7 @@
     {"id":"editor.action.rename","title":"Rename Symbol","keys":{"mac":["f2"],"win":["f2"],"linux":["f2"]}},
     {"id":"editor.action.changeAll","title":"Change All Occurrences","keys":{"mac":["cmd+f2"],"win":["ctrl+f2"],"linux":["ctrl+f2"]}},
     {"id":"editor.action.formatDocument","title":"Format Document","keys":{"mac":["alt+shift+f"],"win":["alt+shift+f"],"linux":["ctrl+shift+i"]}},
+    {"id":"editor.action.formatSelection","title":"Format Selection","keys":{"mac":["cmd+k cmd+f"],"win":["ctrl+k ctrl+f"],"linux":["ctrl+k ctrl+f"]}},
     {"id":"editor.action.refactor","title":"Refactor...","keys":{"mac":["ctrl+shift+r"],"win":["ctrl+shift+r"],"linux":["ctrl+shift+r"]}},
     {"id":"editor.action.sourceAction","title":"Source Action...","keys":{"mac":[],"win":[],"linux":[]}},
     {"id":"editor.action.clipboardCutAction","title":"Cut","keys":{"mac":["cmd+x"],"win":["ctrl+x","shift+delete"],"linux":["ctrl+x","shift+delete"]}},

@@ -39,7 +39,7 @@ const EMPTY = /no content|could not find|cannot|not found/i;
 
 class TsServer {
   static CAPS = ["definition", "typeDefinition", "implementation", "references", "rename", "format", "refactor", "source", "callHierarchy", "symbols",
-    "selectionRange"];
+    "selectionRange", "formatRange"];
   label = "TypeScript server";
 
   constructor(file, root) {
@@ -95,12 +95,15 @@ class TsServer {
     for (const group of body.locs) (ws[group.file] ??= []).push(...group.locs.map(l => ({ start: toPos(l.start), end: toPos(l.end), text: (l.prefixText ?? "") + newName + (l.suffixText ?? "") })));
     return ws;
   }
-  async format(ctx) {
+  // The whole file, or `r` ({ start, end }) for Format Selection.
+  async format(ctx, r = null) {
     await this.request("configure", { file: ctx.file, formatOptions: { tabSize: ctx.tabSize, indentSize: ctx.tabSize, convertTabsToSpaces: ctx.insertSpaces } });
-    const last = ctx.lines.length;
-    const body = await this.list("format", { file: ctx.file, line: 1, offset: 1, endLine: last, endOffset: ctx.lines[last - 1].length + 1 });
+    const last = ctx.lines.length, span = r ? { line: r.start.line + 1, offset: r.start.col + 1, endLine: r.end.line + 1, endOffset: r.end.col + 1 }
+      : { line: 1, offset: 1, endLine: last, endOffset: ctx.lines[last - 1].length + 1 };
+    const body = await this.list("format", { file: ctx.file, ...span });
     return body.map(c => ({ start: toPos(c.start), end: toPos(c.end), text: c.newText }));
   }
+  formatRange(ctx) { return this.format(ctx, ctx.sel); }
   async refactors(ctx) {
     const args = range(ctx), out = [];
     for (const r of await this.list("getApplicableRefactors", args)) {

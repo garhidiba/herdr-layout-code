@@ -36,6 +36,7 @@ const SYM = require("./symbols.cjs");
 const G = require("./gitgutter.cjs");
 const FD = require("./folding.cjs");
 const SS = require("./smartselect.cjs");
+const { editsWithin } = require("./lang/edits.cjs");
 
 // VS Code's "Col": characters before the cursor, tabs counted to the next tab stop.
 function visibleColumn(line, index, tab) {
@@ -1099,6 +1100,24 @@ class Editor {
     return r;
   }
   formatDocument() { return this.track(this.lang.run("format", "format", this.langCtx()).then(edits => this.applyLocalEdits(edits))); }
+  // Format Selection (⌘K ⌘F): the language's range formatter on the selection (the cursor line when nothing is selected);
+  // without one, the document formatter's changes to the selected lines, unless one of them crosses their edges.
+  formatSelection() {
+    const h = this.head, [s, e] = this.empty ? [{ line: h.line, col: 0 }, { line: h.line, col: this.lines[h.line].length }] : this.range();
+    const [a, b] = this.empty ? [h.line, h.line] : this.selectedLines(), ctx = { ...this.langCtx(), sel: { start: s, end: e } };
+    const buf = this.buf, version = buf.version, stale = () => this.buf !== buf || buf.version !== version;
+    return this.track((async () => {
+      let edits = this.lang.provider("formatRange") ? await this.lang.run("formatRange", "formatRange", ctx) : null;
+      if (!edits) {
+        if (!this.lang.can("format")) return this.say(`No format selection support for ${this.language}`, this.colors.warn);
+        const all = await this.lang.run("format", "format", ctx);
+        if (stale()) return;
+        edits = editsWithin(this.lines, all, a, b);
+        if (!edits) return this.say("Format Selection isn't supported here: the formatter also changes lines around the selection", this.colors.warn, 5000);
+      }
+      if (!stale()) this.applyLocalEdits(edits);
+    })());
+  }
   codeActions(kind) {
     return this.track(this.lang.run(kind, kind === "refactor" ? "refactors" : "sourceActions", this.langCtx()).then(list => {
       if (!list.length) return this.say(kind === "refactor" ? "No refactorings available" : "No source actions available", this.colors.warn);
