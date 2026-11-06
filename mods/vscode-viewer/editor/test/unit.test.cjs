@@ -570,7 +570,7 @@ test("each OS gets VS Code's own defaults, without the other OSes' keys", () => 
   for (const k of [win, linux]) {
     assert.equal(k("ctrl+a"), "editor.action.selectAll");
     assert.equal(k("ctrl+w"), "workbench.action.closeActiveEditor");
-    assert.equal(k("ctrl+u"), undefined); // VS Code's Cursor Undo, not here yet
+    assert.equal(k("ctrl+u"), "cursorUndo");
     assert.equal(k("ctrl+e"), "workbench.action.quickOpen");
     assert.equal(k("ctrl+h"), "editor.action.startFindReplaceAction");
     assert.equal(k("ctrl+left"), "cursorWordLeft");
@@ -1159,4 +1159,40 @@ test("line comment commands in a language with only block comments put one block
   const html = await jsEditor(["  <p>x</p>"], "text.html.basic", "/tmp/x.html");
   html.runCommand("editor.action.commentLine");
   assert.deepEqual(html.lines, ["  <!-- <p>x</p> -->"]);
+});
+
+// ---------- medium batch: Cursor Undo / Redo ----------
+test("Cursor Undo / Redo walk back and forth through cursor and selection changes; a new move ends redo, an edit clears both", async () => {
+  const ed = await plainEditor(["abc", "def", "ghi"]);
+  const key = (name, m) => { press(ed, name, m); ed.afterEvent(); };
+  ed.afterEvent();
+  key("down"); key("right"); ed.selectAll(); ed.afterEvent();
+  key("u", { cmd: true });
+  assert.deepEqual(sel(ed), [1, 1, 1, 1]);
+  key("u", { cmd: true });
+  assert.deepEqual(sel(ed), [1, 0, 1, 0]);
+  ed.runCommand("cursorRedo"); ed.afterEvent();
+  assert.deepEqual(sel(ed), [1, 1, 1, 1]);
+  ed.runCommand("cursorRedo"); ed.afterEvent();
+  assert.deepEqual(sel(ed), [0, 0, 2, 3]);
+  ed.runCommand("cursorRedo"); ed.afterEvent();
+  assert.deepEqual(sel(ed), [0, 0, 2, 3], "nothing left to redo");
+  key("u", { cmd: true }); key("left");
+  ed.runCommand("cursorRedo"); ed.afterEvent();
+  assert.deepEqual(sel(ed), [1, 0, 1, 0], "a move after Cursor Undo drops the redo states");
+  ed.typed("x"); ed.afterEvent();
+  key("u", { cmd: true });
+  assert.deepEqual(sel(ed), [1, 1, 1, 1], "an edit clears the cursor states");
+});
+
+test("Cursor Undo keeps at most 50 states and brings back the scroll position", async () => {
+  const ed = await plainEditor(Array.from({ length: 100 }, (_, i) => `line ${i}`));
+  ed.rows = 12; ed.afterEvent();
+  for (let i = 0; i < 60; i++) { ed.moveTo({ line: i, col: 0 }); ed.afterEvent(); }
+  const top = ed.top;
+  ed.moveTo({ line: 99, col: 0 }); ed.afterEvent();
+  ed.runCommand("cursorUndo"); ed.afterEvent();
+  assert.deepEqual([ed.head.line, ed.top], [59, top]);
+  for (let i = 0; i < 60; i++) { ed.runCommand("cursorUndo"); ed.afterEvent(); }
+  assert.equal(ed.head.line, 10, "the oldest of the 50 states (lines 10-59)");
 });

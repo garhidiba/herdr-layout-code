@@ -66,6 +66,7 @@ const DOC_FIELDS = ["file", "doc", "buf", "hl", "indent", "scope", "language", "
 const GIT_GLYPHS = { added: "▎", modified: "▎", deletedBelow: "▁", deletedAbove: "▔" };
 const GIT_COLORS = { added: "gitAdded", modified: "gitModified", deletedBelow: "gitDeleted", deletedAbove: "gitDeleted" };
 const WORD_DELAY = 250; // ms the cursor rests on a word before its occurrences highlight, like VS Code
+const CURSOR_STACK = 50; // cursor states Cursor Undo keeps, like VS Code
 const NOT_FOUND = { definition: "definition", typeDefinition: "type definition", implementation: "implementation", references: "references" };
 const PEEK_TITLE = { definition: "Definition", typeDefinition: "Type Definition", implementation: "Implementations", references: "References" };
 // Commands the find widget runs itself while it has the keys (the rest of its keys are its own).
@@ -940,6 +941,28 @@ class Editor {
     this.sel = after; this.buf.seal(); this.reveal();
   }
 
+  // ----- Cursor Undo / Redo (VS Code's CursorUndoRedoController) -----
+  // Called after each event: a selection change without a text change records the selection (and scroll) before it, at
+  // most CURSOR_STACK, and empties the redo stack; a text change or another file empties both.
+  noteCursor() {
+    const h = this.cursorHist, now = { sel: this.sel, top: this.top, left: this.left };
+    if (h?.buf !== this.buf || h.version !== this.buf.version) { this.cursorHist = { buf: this.buf, version: this.buf.version, last: now, undo: [], redo: [] }; return; }
+    if (cmp(h.last.sel.anchor, this.sel.anchor) || cmp(h.last.sel.head, this.sel.head)) {
+      h.undo.push(h.last); h.redo = [];
+      if (h.undo.length > CURSOR_STACK) h.undo.shift();
+    }
+    h.last = now;
+  }
+  // dir -1: Cursor Undo (the selection before the last cursor change), 1: Cursor Redo.
+  cursorHistory(dir) {
+    this.noteCursor();
+    const h = this.cursorHist, st = (dir < 0 ? h.undo : h.redo).pop();
+    if (!st) return;
+    (dir < 0 ? h.redo : h.undo).push(h.last);
+    this.sel = st.sel; this.top = st.top; this.left = st.left; this.goal = null; this.buf.seal();
+    h.last = st;
+  }
+
   // ----- language features -----
   langCtx() {
     const [s, e] = this.range(), { line, col } = this.head;
@@ -1111,8 +1134,9 @@ class Editor {
     try { fs.writeFileSync(path.join(path.dirname(S.settingsFile()), ".vscode-settings-page"), JSON.stringify({ page: page ?? "settings", at: Date.now() })); } catch {}
     require("child_process").spawn(bin, ["do", "mod.open", "--name", "vscode-settings"], { stdio: "ignore", detached: true }).on("error", () => {}).unref();
   }
-  // After each input event: restart the auto-save timer when the text changed.
+  // After each input event: record a cursor change for Cursor Undo; restart the auto-save timer when the text changed.
   afterEvent() {
+    this.noteCursor();
     if (this.buf.version === this.seenVersion) return;
     this.seenVersion = this.buf.version;
     if (this.settings["files.autoSave"] !== "afterDelay" || !this.buf.dirty) return;
@@ -1730,6 +1754,7 @@ async function main() {
   });
   process.stdout.on("resize", schedule);
   ed.offerBackup();
+  ed.noteCursor(); // where Cursor Undo goes back to first
   draw(0); // the text at once, uncolored
   ed.useGrammar(await H.loadGrammar(scope, index, theme));
   draw(1000); // the first colored screen waits for its colors

@@ -34,6 +34,8 @@
     {"id":"workbench.action.closeActiveEditor","title":"View: Close Editor","keys":{"mac":["cmd+w"],"win":["ctrl+f4","ctrl+w"],"linux":["ctrl+w"]}},
     {"id":"undo","title":"Undo","keys":{"mac":["cmd+z"],"win":["ctrl+z"],"linux":["ctrl+z"]}},
     {"id":"redo","title":"Redo","keys":{"mac":["shift+cmd+z"],"win":["ctrl+y","ctrl+shift+z"],"linux":["ctrl+y","ctrl+shift+z"]}},
+    {"id":"cursorUndo","title":"Cursor Undo","keys":{"mac":["cmd+u"],"win":["ctrl+u"],"linux":["ctrl+u"]}},
+    {"id":"cursorRedo","title":"Cursor Redo","keys":{"mac":[],"win":[],"linux":[]}},
     {"id":"editor.action.selectAll","title":"Select All","keys":{"mac":["cmd+a"],"win":["ctrl+a"],"linux":["ctrl+a"]}},
     {"id":"expandLineSelection","title":"Expand Line Selection","keys":{"mac":["cmd+l"],"win":["ctrl+l"],"linux":["ctrl+l"]}},
     {"id":"editor.action.commentLine","title":"Toggle Line Comment","keys":{"mac":["cmd+/"],"win":["ctrl+/"],"linux":["ctrl+/"]}},

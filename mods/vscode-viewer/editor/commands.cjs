@@ -55,6 +55,8 @@ const RUNS = {
   "editor.action.rename": ["renameSymbol", [], "rename"],
   "editor.action.changeAll": ["changeAll"],
   "editor.action.formatDocument": ["formatDocument", [], "format"],
+  "cursorUndo": ["cursorHistory", [-1]],
+  "cursorRedo": ["cursorHistory", [1]],
   "editor.action.refactor": ["codeActions", ["refactor"], "refactor"],
   "editor.action.sourceAction": ["codeActions", ["source"], "source"],
   "editor.action.clipboardCutAction": ["copy", [true]],
