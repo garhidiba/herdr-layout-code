@@ -1,16 +1,28 @@
 // VS Code-style Settings dialog for <herdr home>/vscode-settings.json (the file the terminal editor and the viewer read,
-// re-reading it every 2s). Opened as a dialog with `mod.open vscode-settings`: the status bar's gear, cmd-, in the
-// vscode layout, and the editor's "Preferences: Open Settings". Every change is written at once (read-modify-write,
-// unknown keys kept, writeTextFile with the text it read so a concurrent edit isn't clobbered).
+// re-reading it every 2s), with a Keyboard Shortcuts page for <herdr home>/vscode-keybindings.json (the editor's user
+// keybindings). Opened as a dialog with `mod.open vscode-settings`: the status bar's gear, cmd-, in the vscode layout,
+// and the editor's "Preferences: Open Settings" / "Open Keyboard Shortcuts". Every change is written at once
+// (read-modify-write, unknown keys and entries kept, writeTextFile with the text it read so a concurrent edit isn't
+// clobbered). keys.json is written only by the "Pass this key to the editor in Herdr" button.
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { theme, props, run, exec, appHome, readTextFile, writeTextFile, closeOverlay } from "herdr";
-import { FILE, normalize, parse, withSetting, withDefaults, updateFile, stepDelay, coreStatus, coreCurrent, DEFAULTS } from "./settings.js";
+import { theme, props, run, exec, appHome, readTextFile, writeTextFile, closeOverlay, keys } from "herdr";
+import { FILE, normalize, parse, loose, withSetting, withDefaults, rewrite, updateFile, stepDelay, coreStatus, coreCurrent, DEFAULTS,
+  PAGE_FILE, requestedPage } from "./settings.js";
+import { FILE as KB_FILE, fromHerdr, label, matchesRow, conflicts, parseFile, serializeFile, withKey, withoutKey, withReset,
+  hasUserEntries, herdrRoute, withPassthrough } from "./keybindings.js";
 
 const settingsPath = () => `${appHome()}/${FILE}`;
+const kbPath = () => `${appHome()}/${KB_FILE}`;
+const keysPath = () => `${appHome()}/keys.json`;
 const corePath = () => `${appHome()}/vscode-core/vscode-core`;
 const EDITOR = "mods/vscode-viewer/editor/vsedit.cjs"; // same path the Explorer opens files with
+const KB_TABLE = "mods/vscode-viewer/editor/keybindings.cjs"; // `--table <file>`: the editor's commands and keys in effect
+// Herdr starts with PATH=/usr/bin:/bin, so node (Homebrew, ~/.local) is looked up there too (as the viewer does).
+const userExec = (cmd, args) => exec("sh", ["-c", 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; exec "$0" "$@"', cmd, ...args]);
+const fileIo = (path) => ({ read: () => readTextFile(path), write: (text, expected) => writeTextFile(path, text, expected) });
+const herdrKeys = () => { try { return keys() ?? []; } catch { return []; } };
 
 export default class Settings extends View {
   init(_props, cx) {
@@ -19,9 +31,18 @@ export default class Settings extends View {
     this.inputs = {};
     this.number("files.autoSaveDelay");
     this.number("editor.tabSize");
-    this.load(cx); this.checkCore(cx);
+    this.page = "settings";
+    this.kb = null; this.kbEntries = []; this.kbText = undefined; this.kbError = null; this.query = ""; this.rec = null;
+    this.search = InputState.new({ placeholder: "Type to search in keybindings" });
+    this.search.on("change", (_e, cx) => { this.query = this.search.value(); cx.notify(); });
+    this.recH = cx.focus_handle();
+    cx.spawn(async (cx) => { // the editor's "Open Keyboard Shortcuts" asks for that page
+      const text = await readTextFile(`${appHome()}/${PAGE_FILE}`).catch(() => null);
+      if (requestedPage(text, Date.now()) === "keybindings") { this.page = "keybindings"; cx.notify(); }
+    });
+    this.load(cx); this.checkCore(cx); this.loadKeys(cx);
     // Edits made elsewhere (settings.json in the editor, the palette) show up; a build shows up when it finishes.
-    cx.timer.every(2000, (cx) => { this.load(cx); if (this.building) this.checkCore(cx); });
+    cx.timer.every(2000, (cx) => { this.load(cx); this.loadKeys(cx); if (this.building) this.checkCore(cx); });
   }
 
   // A number field committed on Enter or blur; while focused, the file's value doesn't overwrite what is typed.
@@ -45,10 +66,6 @@ export default class Settings extends View {
       if ((force || !e.focused) && e.state.value() !== String(values[key])) e.state.set_value(String(values[key]));
   }
 
-  io() {
-    return { read: () => readTextFile(settingsPath()), write: (text, expected) => writeTextFile(settingsPath(), text, expected) };
-  }
-
   load(cx) {
     if (this.writing) return;
     cx.spawn(async (cx) => {
@@ -63,10 +80,9 @@ export default class Settings extends View {
     this.writing = true;
     cx.spawn(async (cx) => {
       try {
-        this.show(await updateFile(this.io(), change));
+        this.show(await updateFile(fileIo(settingsPath()), change));
         this.error = null;
-        const token = ++this.saved;
-        cx.timer.after(1500, (cx) => { if (this.saved === token) { this.saved = 0; cx.notify(); } });
+        this.flashSaved(cx);
       } catch (e) {
         this.error = /Invalid value/.test(e?.message) ? e.message : `Cannot write settings: ${e?.message ?? e}`;
         this.show(this.v, true); // put the field back to the last good value
@@ -76,7 +92,72 @@ export default class Settings extends View {
     });
   }
 
+  flashSaved(cx) {
+    const token = ++this.saved;
+    cx.timer.after(1500, (cx) => { if (this.saved === token) { this.saved = 0; cx.notify(); } });
+  }
+
   set(key, value, cx) { this.write((raw) => withSetting(raw, key, value), cx); }
+
+  // ----- keyboard shortcuts -----
+  // The user file's entries, and the editor's table for them (re-run only when the file's text changed).
+  loadKeys(cx, force = false) {
+    if (this.kbWriting) return;
+    cx.spawn(async (cx) => {
+      const text = await readTextFile(kbPath()).catch(() => null);
+      if (!force && this.kb && text === this.kbText) return;
+      this.kbText = text;
+      try { this.kbEntries = parseFile(text, loose); this.kbError = null; }
+      catch { this.kbEntries = []; this.kbError = `${KB_FILE} has a syntax error. Fix it in the JSON file; nothing is written until then.`; }
+      const r = await userExec("node", [`${appHome()}/${KB_TABLE}`, "--table", kbPath()]).catch((e) => ({ code: -1, stderr: e?.message ?? String(e) }));
+      try {
+        if (r.code !== 0) throw new Error((r.stderr || `exit ${r.code}`).trim().split("\n").pop());
+        this.kb = JSON.parse(r.stdout).rows;
+      } catch (e) { this.kbError = `Cannot list the editor's commands (node ${KB_TABLE}): ${e.message}`; }
+      cx.notify();
+    });
+  }
+
+  writeKeys(change, cx) {
+    this.kbWriting = true;
+    cx.spawn(async (cx) => {
+      let ok = false;
+      try { await rewrite(fileIo(kbPath()), change, (text) => parseFile(text, loose), serializeFile); ok = true; this.flashSaved(cx); }
+      catch (e) { this.kbError = `Cannot write ${KB_FILE}: ${e?.message ?? e}`; } // stays until the file changes
+      this.kbWriting = false;
+      if (ok) this.loadKeys(cx, true);
+      cx.notify();
+    });
+  }
+
+  // Adds "<key>": "terminal" to keys.json's terminal section (Herdr reloads it); only from the row's button.
+  passKey(key, cx) {
+    cx.spawn(async (cx) => {
+      try { await rewrite(fileIo(keysPath()), (k) => withPassthrough(k, key), (text) => (text?.trim() ? loose(text) : {})); this.flashSaved(cx); }
+      catch (e) { this.kbError = `Cannot write keys.json: ${e?.message ?? e}`; }
+      cx.notify();
+    });
+  }
+
+  startRecord(row, cx) {
+    this.rec = { row, key: null };
+    this.recH.focus();
+    cx.timer.after(30, () => this.recH.focus()); // again once the recorder is drawn and tracks the handle
+    cx.notify();
+  }
+  // The recorder takes the next chord; Enter saves it, Escape cancels (VS Code's Define Keybinding).
+  recordKey(e, cx) {
+    cx.stop_propagation();
+    if (e.keystroke === "escape") this.rec = null;
+    else if (e.keystroke === "enter") { if (this.rec.key) this.saveRecord(cx); }
+    else this.rec.key = fromHerdr(e.keystroke) ?? this.rec.key;
+    cx.notify();
+  }
+  saveRecord(cx) {
+    const { row, key } = this.rec;
+    this.rec = null;
+    this.writeKeys((entries) => withKey(entries, row, key), cx);
+  }
 
   checkCore(cx) {
     cx.spawn(async (cx) => {
@@ -93,9 +174,15 @@ export default class Settings extends View {
     run("tab.new", { name: "Build Rust core", folder: appHome(), argv: ["sh", `${appHome()}/mods/vscode-settings/build-core.sh`, appHome()] });
   }
 
-  openJson() {
+  openJson(name, path) {
     closeOverlay(props().overlay);
-    run("tab.new", { name: FILE, folder: appHome(), argv: ["exec", "node", `${appHome()}/${EDITOR}`, settingsPath()] }); // exec: the tab closes with the editor
+    run("tab.new", { name, folder: appHome(), argv: ["exec", "node", `${appHome()}/${EDITOR}`, path] }); // exec: the tab closes with the editor
+  }
+  openKeysJson(cx) {
+    cx.spawn(async () => {
+      if (this.kbText == null) await writeTextFile(kbPath(), "[]\n", null).catch(() => {}); // the editor opens a missing file as new, but empty
+      this.openJson(KB_FILE, kbPath());
+    });
   }
 
   // ----- controls -----
@@ -158,35 +245,127 @@ export default class Settings extends View {
       .when(needsBuild, (el) => el.child(this.button(t, "build-core", this.building ? "Building… (see tab)" : "Build Rust core", () => this.buildCore())));
   }
 
+  // ----- keyboard shortcuts page -----
+  small(t, id, text, aria, onClick) {
+    return div().id(id).h(22).px(7).flex().items_center().rounded(4).text_size(11).cursor_pointer().accessibility_label(aria)
+      .border_1().border_color(t.input).bg(t.raised).text_color(t.foreground).hover((s) => s.bg(t.hover)).on_click(onClick).child(text);
+  }
+
+  kbd(t, c, big = false) {
+    return div().flex_none().h(big ? 32 : 20).px(big ? 12 : 6).flex().items_center().rounded(4).border_1().border_color(t.input)
+      .bg(t.background).text_size(big ? 16 : 11.5).text_color(t.foreground).child(label(c));
+  }
+
+  // "⇧⌘D doesn't reach the editor…" with the button that passes it (and what that takes from other terminals).
+  passNote(t, rowId, key, route) {
+    const k = label(key), taken = route.loses.map((l) => `${l.action} (${l.section})`).join(", ");
+    const why = taken ? `Herdr runs ${taken} for it.` : "Herdr keeps ⌘ keys unless keys.json passes them to terminal programs.";
+    const cost = taken ? `Passing it sends ${k} to the program in every terminal, so ${taken} no longer runs while a terminal has focus.`
+      : `Nothing in Herdr uses ${k}, so other terminals lose nothing.`;
+    return h_flex().gap(10).items_center().pb(8)
+      .child(div().flex_1().min_w(0).text_size(11).text_color(t.ansi3).child(`${k} doesn't reach the editor: ${why} ${cost}`))
+      .child(this.button(t, `pass-${rowId}`, "Pass this key to the editor in Herdr", (_e, cx) => this.passKey(key, cx)));
+  }
+
+  keyRow(t, r, bindings) {
+    const rowId = `${r.id}|${r.key}`, name = r.title || r.id;
+    const route = r.source === "User" && r.key ? herdrRoute(bindings, r.key) : null;
+    return v_flex().border_b(1).border_color(t.border)
+      .child(h_flex().min_h(36).py(4).gap(10).items_center()
+        .child(v_flex().flex_1().min_w(0)
+          .child(div().text_size(12.5).truncate().child(name))
+          .child(div().text_size(10.5).text_color(t.dim).truncate().child(r.id)))
+        .child(h_flex().w(120).flex_none().child(r.key ? this.kbd(t, r.key) : div().text_size(11.5).text_color(t.dim).child("—")))
+        .child(div().w(56).flex_none().text_size(11.5).text_color(r.source === "User" ? t.foreground : t.muted).child(r.source))
+        .child(h_flex().w(236).flex_none().gap(4).justify_end()
+          .child(this.small(t, `change-${rowId}`, r.key ? "Change" : "Add", `Change keybinding of ${name}`, (_e, cx) => this.startRecord(r, cx)))
+          .when(Boolean(r.key), (el) => el.child(this.small(t, `remove-${rowId}`, "Remove", `Remove keybinding of ${name}`,
+            (_e, cx) => this.writeKeys((en) => withoutKey(en, r), cx))))
+          .when(hasUserEntries(this.kbEntries, r.id), (el) => el.child(this.small(t, `reset-${rowId}`, "Reset to default", `Reset keybindings of ${name}`,
+            (_e, cx) => this.writeKeys((en) => withReset(en, r.id), cx))))))
+      .when(Boolean(route && !route.passes), (el) => el.child(this.passNote(t, rowId, r.key, route)));
+  }
+
+  // VS Code's Define Keybinding box: the chord pressed so far, conflicts, Enter to save.
+  recorder(t) {
+    const { row, key } = this.rec, n = key ? conflicts(this.kb ?? [], key, row) : 0;
+    const route = key ? herdrRoute(herdrKeys(), key) : null;
+    return v_flex().flex_1().min_h(0).items_center().justify_center()
+      .child(v_flex().id("recorder").track_focus(this.recH).on_key_down((e, cx) => this.recordKey(e, cx)).on_click(() => this.recH.focus())
+        .w(460).p(18).gap(10).items_center().rounded(8).border_1().border_color(t.accent).bg(t.raised)
+        .child(div().text_size(13).font_semibold().child("Press desired key combination and then press Enter"))
+        .child(div().text_size(11.5).text_color(t.muted).child(row.title || row.id))
+        .child(key ? this.kbd(t, key, true) : div().h(32).flex().items_center().text_size(12).text_color(t.dim).child("Waiting for a key…"))
+        .when(n > 0, (el) => el.child(div().text_size(11.5).text_color(t.ansi3)
+          .child(`${n} existing command${n > 1 ? "s have" : " has"} this keybinding`)))
+        .when(Boolean(route && !route.passes), (el) => el.child(div().text_size(11).text_color(t.muted)
+          .child("Herdr doesn't pass this key to terminal programs yet; after saving, its row offers to.")))
+        .child(h_flex().gap(8).pt(4)
+          .child(this.button(t, "rec-cancel", "Cancel", (_e, cx) => { this.rec = null; cx.notify(); }))
+          .when(Boolean(key), (el) => el.child(this.button(t, "rec-save", "Save", (_e, cx) => this.saveRecord(cx), true)))));
+  }
+
+  keysPage(t) {
+    if (this.rec) return this.recorder(t);
+    const all = this.kb ?? [], rows = all.filter((r) => matchesRow(r, this.query)), bindings = herdrKeys();
+    const head = (text, w) => (w ? div().w(w).flex_none() : div().flex_1()).child(text);
+    return v_flex().flex_1().min_h(0)
+      .child(h_flex().px(18).pt(10).pb(6).gap(10).items_center()
+        .child(div().flex_1().h(28).px(8).flex().items_center().rounded(4).border_1().border_color(t.input).bg(t.background).text_size(12)
+          .child(Input.new(this.search).w_full()))
+        .child(div().text_size(11).text_color(t.dim).child(this.kb ? `${rows.length} of ${all.length}` : "Loading…")))
+      .child(h_flex().px(18).h(26).gap(10).items_center().border_b(1).border_color(t.border).text_size(11).font_semibold().text_color(t.dim)
+        .child(head("Command", 0)).child(head("Keybinding", 120)).child(head("Source", 56)).child(head("", 236)))
+      .child(v_flex().id("kb-rows").flex_1().min_h(0).px(18).pb(10).overflow_y_scrollbar()
+        .children(rows.map((r) => this.keyRow(t, r, bindings)))
+        .when(Boolean(this.kb) && !rows.length, (el) => el.child(div().py(16).text_size(12).text_color(t.muted).child("No keybindings match the search."))));
+  }
+
+  settingsPage(t) {
+    return v_flex().id("body").flex_1().min_h(0).px(18).pb(10).overflow_y_scrollbar()
+      .child(this.section(t, "Core engine"))
+      .child(this.row(t, "Core", "Engine", "File and git scanning for the explorer and source control. JavaScript works everywhere; Rust is faster but must be built first.",
+        this.segmented(t, "core.engine", [["js", "JavaScript"], ["rust", "Rust"]]), this.coreLine(t)))
+      .child(this.section(t, "Files"))
+      .child(this.row(t, "Files", "Auto Save", "Save dirty editors automatically.",
+        this.segmented(t, "files.autoSave", [["off", "Off"], ["afterDelay", "After Delay"], ["onFocusChange", "On Focus Change"]])))
+      .child(this.row(t, "Files", "Auto Save Delay", "Seconds after the last edit, when Auto Save is After Delay (0.1–3600).",
+        this.stepper(t, "files.autoSaveDelay", stepDelay)))
+      .child(this.row(t, "Files", "Trim Trailing Whitespace", "Remove trailing whitespace when saving.", this.toggle(t, "files.trimTrailingWhitespace", "Trim Trailing Whitespace")))
+      .child(this.row(t, "Files", "Insert Final Newline", "End the file with a newline when saving.", this.toggle(t, "files.insertFinalNewline", "Insert Final Newline")))
+      .child(this.section(t, "Editor"))
+      .child(this.row(t, "Editor", "Format On Save", "Format the file when saving (needs a formatter for the language).", this.toggle(t, "editor.formatOnSave", "Format On Save")))
+      .child(this.row(t, "Editor", "Tab Size", "Spaces a tab equals, for files with no indentation to detect (1–16).",
+        this.stepper(t, "editor.tabSize", (v, dir) => v + dir)))
+      .child(this.row(t, "Editor", "Insert Spaces", "Insert spaces when pressing Tab, for files with no indentation to detect.", this.toggle(t, "editor.insertSpaces", "Insert Spaces")));
+  }
+
+  pageTab(t, page, text) {
+    const on = this.page === page;
+    return div().id(`page-${page}`).h(44).px(2).flex().items_center().cursor_pointer().role("tab").accessibility_label(text)
+      .text_size(on ? 14 : 13).border_b(2).border_color(on ? t.accent : t.popover).text_color(on ? t.foreground : t.muted)
+      .when(on, (el) => el.font_semibold())
+      .when(!on, (el) => el.hover((s) => s.text_color(t.foreground)).on_click((_e, cx) => { this.page = page; this.rec = null; cx.notify(); }))
+      .child(text);
+  }
+
   render(cx) {
-    const t = theme();
+    const t = theme(), keysOn = this.page === "keybindings", error = keysOn ? this.kbError : this.error;
     return v_flex().id("vscode-settings").size_full().min_h(0).bg(t.popover).text_color(t.foreground)
-      .child(h_flex().h(44).px(18).gap(10).items_center().border_b(1).border_color(t.border)
-        .child(div().text_size(15).font_semibold().child("Settings"))
-        .child(div().text_size(11).text_color(t.dim).child(FILE))
+      .child(h_flex().h(44).px(18).gap(18).items_center().border_b(1).border_color(t.border)
+        .child(this.pageTab(t, "settings", "Settings"))
+        .child(this.pageTab(t, "keybindings", "Keyboard Shortcuts"))
+        .child(div().text_size(11).text_color(t.dim).child(keysOn ? KB_FILE : FILE))
         .child(div().flex_1())
         .when(this.saved > 0, (el) => el.child(div().text_size(11.5).text_color(t.done).child("✓ Saved")))
         .child(div().text_size(11).text_color(t.dim).child("Esc")))
-      .when(Boolean(this.error), (el) => el.child(div().px(18).py(6).text_size(11.5).bg(t.background).text_color(t.ansi1).child(this.error)))
-      .child(v_flex().id("body").flex_1().min_h(0).px(18).pb(10).overflow_y_scrollbar()
-        .child(this.section(t, "Core engine"))
-        .child(this.row(t, "Core", "Engine", "File and git scanning for the explorer and source control. JavaScript works everywhere; Rust is faster but must be built first.",
-          this.segmented(t, "core.engine", [["js", "JavaScript"], ["rust", "Rust"]]), this.coreLine(t)))
-        .child(this.section(t, "Files"))
-        .child(this.row(t, "Files", "Auto Save", "Save dirty editors automatically.",
-          this.segmented(t, "files.autoSave", [["off", "Off"], ["afterDelay", "After Delay"], ["onFocusChange", "On Focus Change"]])))
-        .child(this.row(t, "Files", "Auto Save Delay", "Seconds after the last edit, when Auto Save is After Delay (0.1–3600).",
-          this.stepper(t, "files.autoSaveDelay", stepDelay)))
-        .child(this.row(t, "Files", "Trim Trailing Whitespace", "Remove trailing whitespace when saving.", this.toggle(t, "files.trimTrailingWhitespace", "Trim Trailing Whitespace")))
-        .child(this.row(t, "Files", "Insert Final Newline", "End the file with a newline when saving.", this.toggle(t, "files.insertFinalNewline", "Insert Final Newline")))
-        .child(this.section(t, "Editor"))
-        .child(this.row(t, "Editor", "Format On Save", "Format the file when saving (needs a formatter for the language).", this.toggle(t, "editor.formatOnSave", "Format On Save")))
-        .child(this.row(t, "Editor", "Tab Size", "Spaces a tab equals, for files with no indentation to detect (1–16).",
-          this.stepper(t, "editor.tabSize", (v, dir) => v + dir)))
-        .child(this.row(t, "Editor", "Insert Spaces", "Insert spaces when pressing Tab, for files with no indentation to detect.", this.toggle(t, "editor.insertSpaces", "Insert Spaces"))))
+      .when(Boolean(error), (el) => el.child(div().px(18).py(6).text_size(11.5).bg(t.background).text_color(t.ansi1).child(error)))
+      .child(keysOn ? this.keysPage(t) : this.settingsPage(t))
       .child(h_flex().h(52).px(18).gap(8).items_center().border_t(1).border_color(t.border)
-        .child(this.button(t, "open-json", "Open settings.json", () => this.openJson()))
-        .child(this.button(t, "reset", "Reset to defaults", (_e, cx) => this.write(withDefaults, cx)))
+        .when(!keysOn, (el) => el
+          .child(this.button(t, "open-json", "Open settings.json", () => this.openJson(FILE, settingsPath())))
+          .child(this.button(t, "reset", "Reset to defaults", (_e, cx) => this.write(withDefaults, cx))))
+        .when(keysOn, (el) => el.child(this.button(t, "open-kb-json", `Open ${KB_FILE}`, (_e, cx) => this.openKeysJson(cx))))
         .child(div().flex_1())
         .child(this.button(t, "close", "Close", () => closeOverlay(props().overlay), true)));
   }

@@ -62,14 +62,25 @@ export const withDefaults = (raw) => ({ ...raw, ...DEFAULTS });
 export const serialize = (raw) => JSON.stringify(raw, null, 2) + "\n";
 
 // Read-modify-write: io.read() -> text|null, io.write(text, expected) rejects when the file changed since `expected`.
-// One retry after re-reading when a concurrent edit wins the race. Resolves with the normalized values written.
-export async function updateFile(io, change) {
+// One retry after re-reading when a concurrent edit wins the race. Resolves with what was written. `fromText` throws
+// on a file it can't read, so it is never overwritten.
+export async function rewrite(io, change, fromText = parse, toText = serialize) {
   for (let attempt = 0; ; attempt++) {
     const text = await io.read();
-    const next = change(parse(text));
-    try { await io.write(serialize(next), text ?? null); return normalize(next); }
+    const next = change(fromText(text));
+    try { await io.write(toText(next), text ?? null); return next; }
     catch (e) { if (attempt >= 1) throw e; }
   }
+}
+// rewrite of vscode-settings.json; resolves with the normalized values written.
+export const updateFile = async (io, change) => normalize(await rewrite(io, change));
+
+// The page the dialog opens on: the editor's request in <herdr home>/.vscode-settings-page ({ page, at }) when it is
+// fresh (the editor writes it just before mod.open), else "settings".
+export const PAGE_FILE = ".vscode-settings-page";
+export function requestedPage(text, now) {
+  try { const r = JSON.parse(text); if (r?.page === "keybindings" && now - r.at < 10000) return "keybindings"; } catch {}
+  return "settings";
 }
 
 // − / + on the auto save delay: tenths below one second, whole seconds above.
