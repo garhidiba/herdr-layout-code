@@ -484,3 +484,42 @@ tsserver diagnostics, UTF-16 columns, `editsWithin`, grep parsing, the outline a
 semantic token decoding, deltas and theme mapping with a small theme that turns it on, hover Markdown, menu stepping)
 and editor tests without a server (Cursor Undo / Redo, Change All's preview, the context menu's enabled rows and the
 palette, Go to Definition and Go to Symbol through the fallback, Expand / Shrink Selection in a string).
+
+## Inline suggestions (both editors)
+
+### What exists
+
+- **Rules shared with the JS** (`vsedit/src/inline.rs` = `vscode-viewer/editor/inline.cjs`): the `editor.inlineSuggest.*`
+  settings and their defaults, the deny list (globs on the file name, or on the path for a pattern with `/`), VS Code's
+  position rule (the rest of the line blank or closers), the context (whole lines before the cursor up to
+  `prefixChars`, so the prompt's start doesn't move while typing; `suffixChars` after it), typing through a suggestion,
+  Accept Next Word, reply cleaning (FIM tokens, repeated prefix / suffix, one-line mode with the next-line case), the
+  pause rule (`Health`), the Ollama request and reply, and the usage file. Unit tests on both sides check the same cases.
+- **Never on the input path.** A keystroke only moves a deadline (`inline.due`, part of `Editor::deadline`); the loop's
+  tick sends the request on a thread (`Editor::spawn`, like the language layer) and the reply comes back as a job, dropped
+  when its generation, the text version or the cursor changed. JS: `fetch` with an `AbortController`.
+- **HTTP from Rust is `curl`** (no HTTP/TLS crate in the build): the request goes as a curl config on stdin (`url`,
+  `header`, `data-binary`, `max-time 20`, `write-out` for the status), so headers (a paid provider's key) never appear in
+  `ps`; cancelling kills the curl process (`Cancel`, SIGTERM). curl ships with macOS and common Linux distributions.
+- **Keys** (`keymap.json` `when: "inlineSuggestionVisible"`): `Keymap::when_suggest` holds those commands' keys apart from
+  `by_chord`, and `handle` looks there first while a suggestion shows, so Tab / Esc / ⌘→ / Ctrl+→ keep their other
+  meaning otherwise (VS Code's context key, the one `when` this editor knows).
+- **Drawing** (`view.rs`): the cursor line is painted up to the cursor, the ghost text, then the rest of the line (the
+  same `paint_text` with `left` moved, so its token colors stay); further ghost lines take rows of their own and the rows
+  below move down (`render`'s slot → row mapping; `cell_to_pos` maps clicks past them).
+
+### Measured (this Mac, Ollama 0.40.14 Homebrew, `qwen2.5-coder:7b`, 100% GPU; `inline.cjs`'s request, cursor in the middle of real lines of vsedit.cjs, the rest of the line cut as while typing)
+
+| context (before / after the cursor) | first request at a position | the same request again | one more typed character |
+| --- | ---: | ---: | ---: |
+| 4,000 / 1,000 characters (~1,300–1,550 tokens) | 5.8–7.0 s | 0.05–0.35 s | 1.2–2.1 s |
+| 4,000 / 300 characters | — | 0.05–0.54 s | 0.5–0.8 s |
+
+Prompt evaluation runs at ~250 tokens/s here and generation at ~20 tokens/s, so the time is the prompt tokens Ollama
+can't take from its cache: everything after the first changed token. Qwen's FIM order is `<|fim_prefix|>…<|fim_suffix|>…`,
+so the text after the cursor is evaluated again on every request. A prefix cut at a fixed character count would drop one
+character from its start per typed character, shift every token and cost 5–6 s per pause; cutting at a line start
+keeps it cached. The first request at a new place (opening a
+file, jumping) pays the whole prompt. Lowering `editor.inlineSuggest.suffixChars` is the main lever on this machine.
+The editor adds nothing measurable per keystroke (a timer reset); a reply of 64 tokens adds ~3 s of generation, which
+the one-line stop (`"\n"`) usually avoids.

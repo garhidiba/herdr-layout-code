@@ -20,5 +20,31 @@
   // The top line: folders › file › the symbols around the cursor (false: the file name only).
   "breadcrumbs.enabled": true,
   // The hover (type and docs, problems) after the mouse pointer rests 300 ms on a word; ⌘K ⌘I / Ctrl+K Ctrl+I shows it either way.
-  "editor.hover.enabled": true
+  "editor.hover.enabled": true,
+  // Inline suggestions (gray ghost text at the cursor, Tab accepts, Esc hides, ⌘→ / Ctrl+→ takes a word; Alt+\ asks now).
+  // Absent "enabled": on when the provider can run here (Ollama installed). The status bar item turns them on/off; the
+  // pointer on it shows today's requests, approximate tokens (characters ÷ 4) and latency (p50/p95).
+  // "editor.inlineSuggest.enabled": true,
+  // "ollama" (local: brew install ollama; ollama pull qwen2.5-coder:7b) | "off"
+  "editor.inlineSuggest.provider": "ollama",
+  // "" = the provider's default (Ollama: "qwen2.5-coder:7b" at "http://127.0.0.1:11434").
+  "editor.inlineSuggest.model": "",
+  "editor.inlineSuggest.endpoint": "",
+  // "auto" (after typing pauses debounce ms) | "manual" (Trigger Inline Suggestion, Alt+\ / ⌥\, only).
+  "editor.inlineSuggest.trigger": "auto",
+  "editor.inlineSuggest.debounce": 250,
+  // false: one line at a time ("\n" stops the reply; the next line after a finished statement).
+  "editor.inlineSuggest.multiline": false,
+  // Limits per request: reply tokens, and the characters sent before / after the cursor.
+  "editor.inlineSuggest.maxTokens": 64,
+  "editor.inlineSuggest.prefixChars": 4000,
+  "editor.inlineSuggest.suffixChars": 1000,
+  // Empty or repeated replies (or errors) in a row that pause the provider for the session (FIM tokens pause at once).
+  "editor.inlineSuggest.stopAfter": 5,
+  // Requests a day before suggestions stop until tomorrow; null = 2000 for paid providers, unlimited for local ones.
+  "editor.inlineSuggest.dailyRequestLimit": null,
+  // Ollama keeps the model loaded this long after each request (and the editor loads it when it starts).
+  "editor.inlineSuggest.keepAlive": "30m",
+  // File patterns never sent, on top of the built-in list (.env*, *.pem, *.key, id_rsa*, .npmrc, **/.ssh/**, …).
+  "editor.inlineSuggest.exclude": []
 }
