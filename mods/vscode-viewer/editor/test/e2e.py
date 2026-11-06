@@ -337,11 +337,50 @@ def run_hot_exit(tmp):
     print("hot exit: ok")
 
 
+def plain(t):
+    """The screen text without colors."""
+    return re.sub(r"\x1b\[[\d;]*m", "", screen_of(t))
+
+
+def run_hex(tmp):
+    """A 1 MB binary file: the binary prompt, Enter opens hex rows, Ctrl+G goes to an offset, Ctrl+F finds planted bytes."""
+    file = os.path.join(tmp, "blob.dat")
+    data = bytearray(b"HXV1\x00\x01\x02\x03" + bytes(range(256)) * 4096)[:1 << 20]
+    data[0x80005:0x80009] = b"\xde\xad\xbe\xef"
+    open(file, "wb").write(data)
+    t = Term(file)
+    assert t.read("because it is binary", timeout=3), "no binary prompt:\n" + plain(t)[-400:]
+    assert t.read("Open Anyway", timeout=2) and "Open in Hex Viewer" in plain(t)
+    t.send("\r", wait=0.3)
+    assert t.read("Decoded Text", timeout=3), "no hex view"
+    sc = plain(t)
+    assert "00000000  48 58 56 31 00 01 02 03  00 01 02 03 04 05 06 07  HXV1····" in sc, sc[-800:]
+    assert "1.0 MB (1048576 bytes)" in sc and "Byte 0x48 72 01001000" in sc and "int8 " in sc
+    t.send("\x07"); t.send("0x40000\r", wait=0.3)
+    assert "Offset 0x40000 (262144)" in plain(t), plain(t)[-400:]
+    assert "00040000  " in plain(t)
+    t.send("\x06"); t.send("de ad be ef\r", wait=0.5)
+    assert t.read("Found at 0x80005", timeout=3), "search failed:\n" + plain(t)[-400:]
+    assert "00080000  f8 f9 fa fb fc de ad be  ef " in plain(t), plain(t)[-800:]
+    t.send("\x11")
+    assert t.wait_exit() == 0
+    assert b"\x1b[?1049l" in t.out[-200:] and b"\x1b[<u" in t.out[-300:], "terminal not restored"
+    small = os.path.join(tmp, "nul.txt")
+    open(small, "wb").write(b"ab\x00cd\n")
+    t = Term(small)
+    assert t.read("Open Anyway", timeout=3)
+    t.send("a", wait=0.3)                         # Open Anyway: the text editor with NUL as a control picture
+    assert t.read("Ln 1, Col 1", timeout=5) and "ab\u2400cd" in plain(t), plain(t)[-400:]
+    t.send("\x11")
+    assert t.wait_exit() == 0
+    print("hex viewer: ok")
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="vsedit-e2e-")
     ISOLATED.update(VSEDIT_SETTINGS=os.path.join(tmp, "settings", "vscode-settings.json"), VSEDIT_BACKUPS=os.path.join(tmp, "backups"))
     try:
-        run_tsx(tmp); run_go(tmp); run_crlf(tmp)
+        run_tsx(tmp); run_go(tmp); run_crlf(tmp); run_hex(tmp)
         run_menu_and_cmd_save(tmp); run_save_dialog(tmp); run_auto_save(tmp); run_hot_exit(tmp)
         run_format(tmp); run_typescript(tmp)
     finally:
