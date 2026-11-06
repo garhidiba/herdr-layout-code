@@ -356,6 +356,10 @@ export default class Settings extends View {
       .child(this.row(t, "Editor", "Tab Size", "Spaces a tab equals, for files with no indentation to detect (1–16).",
         this.stepper(t, "editor.tabSize", (v, dir) => v + dir)))
       .child(this.row(t, "Editor", "Insert Spaces", "Insert spaces when pressing Tab, for files with no indentation to detect.", this.toggle(t, "editor.insertSpaces", "Insert Spaces")))
+      .child(this.row(t, "Editor", "Cursor Style", "The editor's cursor shape. Terminals have no thin cursors, so the thin styles look like Line and Underline, and Block Outline like Block.",
+        this.segmented(t, "editor.cursorStyle", [["line", "Line"], ["block", "Block"], ["underline", "Underline"], ["line-thin", "Line Thin"], ["underline-thin", "Underline Thin"], ["block-outline", "Block Outline"]])))
+      .child(this.row(t, "Editor", "Cursor Blinking", "Solid keeps the cursor steady; the other styles all blink.",
+        this.segmented(t, "editor.cursorBlinking", [["blink", "Blink"], ["smooth", "Smooth"], ["phase", "Phase"], ["expand", "Expand"], ["solid", "Solid"]])))
       .child(this.row(t, "Editor", "Inline Suggestions", "Gray ghost text from a code model while you type: Tab accepts, Esc hides, ⌘→ / Ctrl+→ takes a word. The status bar item turns it on and off.",
         this.toggle(t, "editor.inlineSuggest.enabled", "Inline Suggestions")))
       .child(this.row(t, "Editor", "Inline Suggestion Provider", "Ollama runs the model on this machine (ollama pull qwen2.5-coder:7b); model, endpoint and limits are in settings.json.",

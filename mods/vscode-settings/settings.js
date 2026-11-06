@@ -12,10 +12,14 @@ export const DEFAULTS = {
   "editor.formatOnSave": false,
   "editor.tabSize": 4,                // 1-16, for files without indentation to detect
   "editor.insertSpaces": true,
+  "editor.cursorStyle": "line",       // the terminal editor's cursor shape; thin variants draw like the plain ones
+  "editor.cursorBlinking": "blink",   // "solid" is steady, the others blink
   "editor.inlineSuggest.provider": "ollama", // the editor's inline suggestions (mods/vscode-viewer/editor/inline.cjs)
 };
 export const CHOICES = { "core.engine": ["js", "rust"], "editor.engine": ["js", "rust"], "files.autoSave": ["off", "afterDelay", "onFocusChange"],
-  "editor.inlineSuggest.provider": ["ollama", "off"] };
+  "editor.inlineSuggest.provider": ["ollama", "off"],
+  "editor.cursorStyle": ["line", "block", "underline", "line-thin", "underline-thin", "block-outline"],
+  "editor.cursorBlinking": ["blink", "smooth", "phase", "expand", "solid"] };
 // editor.inlineSuggest.enabled: absent, the editor turns suggestions on when the provider can run there (Ollama
 // installed); the dialog shows that as on, and Reset to defaults removes the key again.
 const INLINE_ENABLED = "editor.inlineSuggest.enabled";

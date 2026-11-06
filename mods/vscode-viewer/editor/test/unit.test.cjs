@@ -315,6 +315,13 @@ test("settings: defaults on first run, seconds clamped to 0.1-3600, unknown keys
   assert.equal(S.normalize({ "files.autoSave": "sometimes" })["files.autoSave"], "off");
 });
 
+test("settings: cursor style and blinking map to DECSCUSR", () => {
+  const seq = (style, blinking) => S.cursorSeq(S.normalize({ "editor.cursorStyle": style, "editor.cursorBlinking": blinking }));
+  assert.equal(S.cursorSeq(S.normalize({})), "\x1b[5 q");
+  assert.deepEqual([seq("line", "solid"), seq("block", "blink"), seq("block", "solid")], ["\x1b[6 q", "\x1b[1 q", "\x1b[2 q"]);
+  assert.deepEqual([seq("underline", "phase"), seq("underline-thin", "solid"), seq("line-thin", "smooth"), seq("fat", "bogus")], ["\x1b[3 q", "\x1b[4 q", "\x1b[5 q", "\x1b[5 q"]);
+});
+
 test("hot exit backups: written per path, read back only for that path, stale when the file changed", () => {
   process.env.VSEDIT_BACKUPS = fs.mkdtempSync(path.join(os.tmpdir(), "vsedit-bk-"));
   const file = path.join(process.env.VSEDIT_BACKUPS, "doc.txt");

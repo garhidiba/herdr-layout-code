@@ -2250,15 +2250,16 @@ async function main() {
 
   process.stdin.setRawMode(true);
   process.stdin.setEncoding("utf8");
-  process.stdout.write(ENTER + `\x1b]12;${ed.colors.cursor}\x07`);
+  process.stdout.write(ENTER + S.cursorSeq(ed.settings) + `\x1b]12;${ed.colors.cursor}\x07`);
   rightClicksTo("program", false);
 
-  let scheduled = false, timer = null;
+  let scheduled = false, timer = null, cursorSeq = S.cursorSeq(ed.settings);
   const draw = (budget = 60) => {
     scheduled = false;
     ed.rows = process.stdout.rows || 24; ed.cols = process.stdout.columns || 80;
     const { out, done } = ed.render(budget);
-    process.stdout.write("\x1b[?25l" + out);
+    const seq = S.cursorSeq(ed.settings); // the cursor settings may have changed
+    process.stdout.write("\x1b[?25l" + (seq === cursorSeq ? "" : (cursorSeq = seq)) + out);
     if (!done) schedule(); // keep tokenizing toward the viewport in small slices
     clearTimeout(timer);
     if (ed.message) timer = setTimeout(schedule, Math.max(50, ed.message.until - Date.now() + 10));

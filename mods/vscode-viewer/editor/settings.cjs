@@ -21,7 +21,11 @@ const DEFAULTS = {
   "editor.codeLens": true,           // "N references" above declarations while a language server runs
   "editor.find.seedSearchStringFromSelection": "always", // "never" | "always" (the word at the cursor too) | "selection"
   "editor.find.autoFindInSelection": "never",            // "never" | "always" | "multiline"
+  "editor.cursorStyle": "line",       // VS Code's values; see cursorSeq
+  "editor.cursorBlinking": "blink",   // "blink" | "smooth" | "phase" | "expand" | "solid"
 };
+const CURSOR_STYLE = { line: 5, "line-thin": 5, block: 1, "block-outline": 1, underline: 3, "underline-thin": 3 }; // DECSCUSR: blinking; +1 is steady
+const CURSOR_BLINKING = ["blink", "smooth", "phase", "expand", "solid"];
 const SEED = ["never", "always", "selection"], AUTO_IN_SELECTION = ["never", "always", "multiline"];
 const AUTO_SAVE = ["off", "afterDelay", "onFocusChange"];
 
@@ -42,8 +46,14 @@ function normalize(raw = {}) {
     if (typeof raw[k] === "boolean") v[k] = raw[k];
   if (SEED.includes(raw["editor.find.seedSearchStringFromSelection"])) v["editor.find.seedSearchStringFromSelection"] = raw["editor.find.seedSearchStringFromSelection"];
   if (AUTO_IN_SELECTION.includes(raw["editor.find.autoFindInSelection"])) v["editor.find.autoFindInSelection"] = raw["editor.find.autoFindInSelection"];
+  if (raw["editor.cursorStyle"] in CURSOR_STYLE) v["editor.cursorStyle"] = raw["editor.cursorStyle"];
+  if (CURSOR_BLINKING.includes(raw["editor.cursorBlinking"])) v["editor.cursorBlinking"] = raw["editor.cursorBlinking"];
   return v;
 }
+
+// DECSCUSR for the cursor settings. Terminals have no thin variants, so line-thin is the bar and underline-thin the
+// underline; only "solid" is steady, every other blinking value blinks.
+const cursorSeq = (v) => `\x1b[${CURSOR_STYLE[v["editor.cursorStyle"]] + (v["editor.cursorBlinking"] === "solid" ? 1 : 0)} q`;
 
 function readRaw(file) {
   try { const o = loose(fs.readFileSync(file, "utf8")); return o && typeof o === "object" && !Array.isArray(o) ? o : {}; } catch { return {}; }
@@ -73,4 +83,4 @@ function autoSaveLabel(v) {
   return m === "afterDelay" ? `Auto Save: after ${seconds(v["files.autoSaveDelay"])}` : m === "onFocusChange" ? "Auto Save: on focus change" : "Auto Save: off";
 }
 
-module.exports = { DEFAULTS, settingsFile, normalize, load, update, autoSaveLabel };
+module.exports = { DEFAULTS, settingsFile, normalize, cursorSeq, load, update, autoSaveLabel };

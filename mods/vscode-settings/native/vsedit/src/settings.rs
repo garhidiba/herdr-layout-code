@@ -47,6 +47,10 @@ pub struct Settings {
     pub find_seed: &'static str,
     /// editor.find.autoFindInSelection: "never" | "always" | "multiline"
     pub find_in_selection: &'static str,
+    /// editor.cursorStyle: "line" | "block" | "underline" | "line-thin" | "underline-thin" | "block-outline"
+    pub cursor_style: &'static str,
+    /// editor.cursorBlinking: "blink" | "smooth" | "phase" | "expand" | "solid"
+    pub cursor_blinking: &'static str,
 }
 
 impl Default for Settings {
@@ -66,6 +70,8 @@ impl Default for Settings {
             code_lens: true,
             find_seed: "always",
             find_in_selection: "never",
+            cursor_style: "line",
+            cursor_blinking: "blink",
         }
     }
 }
@@ -76,6 +82,7 @@ fn defaults_json() -> Value {
         "editor.formatOnSave": false, "files.trimTrailingWhitespace": false, "files.insertFinalNewline": false,
         "breadcrumbs.enabled": true, "editor.hover.enabled": true, "extensions.ignoreRecommendations": false, "editor.codeLens": true,
         "editor.find.seedSearchStringFromSelection": "always", "editor.find.autoFindInSelection": "never",
+        "editor.cursorStyle": "line", "editor.cursorBlinking": "blink",
     })
 }
 
@@ -112,7 +119,22 @@ pub fn normalize(raw: &Value) -> Settings {
     let pick = |k: &str, of: &[&'static str], d: &'static str| raw.get(k).and_then(Value::as_str).and_then(|s| of.iter().find(|o| **o == s).copied()).unwrap_or(d);
     v.find_seed = pick("editor.find.seedSearchStringFromSelection", &["never", "always", "selection"], "always");
     v.find_in_selection = pick("editor.find.autoFindInSelection", &["never", "always", "multiline"], "never");
+    v.cursor_style = pick("editor.cursorStyle", &["line", "block", "underline", "line-thin", "underline-thin", "block-outline"], "line");
+    v.cursor_blinking = pick("editor.cursorBlinking", &["blink", "smooth", "phase", "expand", "solid"], "blink");
     v
+}
+
+impl Settings {
+    /// DECSCUSR for the cursor settings. Terminals have no thin variants, so line-thin is the bar and underline-thin
+    /// the underline; only "solid" is steady, every other blinking value blinks.
+    pub fn cursor_seq(&self) -> String {
+        let shape = match self.cursor_style {
+            "block" | "block-outline" => 1,
+            "underline" | "underline-thin" => 3,
+            _ => 5,
+        };
+        format!("\x1b[{} q", shape + (self.cursor_blinking == "solid") as u8)
+    }
 }
 
 pub fn read_raw(file: &Path) -> Map<String, Value> {
@@ -188,6 +210,15 @@ mod tests {
         assert_eq!((d.code_lens, d.find_seed, d.find_in_selection), (true, "always", "never"));
         let v = normalize(&json!({ "editor.codeLens": false, "editor.find.seedSearchStringFromSelection": "selection", "editor.find.autoFindInSelection": "bogus" }));
         assert_eq!((v.code_lens, v.find_seed, v.find_in_selection), (false, "selection", "never"));
+    }
+
+    #[test]
+    fn cursor_settings_map_to_decscusr() {
+        let seq = |s: &str, b: &str| normalize(&json!({ "editor.cursorStyle": s, "editor.cursorBlinking": b })).cursor_seq();
+        assert_eq!(normalize(&json!({})).cursor_seq(), "\x1b[5 q");
+        assert_eq!((seq("line", "solid"), seq("block", "blink"), seq("block", "solid")), ("\x1b[6 q".into(), "\x1b[1 q".into(), "\x1b[2 q".into()));
+        assert_eq!((seq("underline", "phase"), seq("underline-thin", "solid"), seq("line-thin", "smooth")), ("\x1b[3 q".into(), "\x1b[4 q".into(), "\x1b[5 q".into()));
+        assert_eq!(seq("fat", "bogus"), "\x1b[5 q");
     }
 
     #[test]

@@ -52,6 +52,13 @@ test("invalid values fall back to the default, numbers are clamped", () => {
   assert.equal(normalize({ "editor.tabSize": 2.5 })["editor.tabSize"], 4);
 });
 
+test("cursor settings take VS Code's values only", () => {
+  assert.deepEqual([normalize({})["editor.cursorStyle"], normalize({})["editor.cursorBlinking"]], ["line", "blink"]);
+  assert.equal(normalize({ "editor.cursorStyle": "underline-thin" })["editor.cursorStyle"], "underline-thin");
+  assert.equal(normalize({ "editor.cursorStyle": "fat" })["editor.cursorStyle"], "line");
+  assert.equal(normalize({ "editor.cursorBlinking": "solid" })["editor.cursorBlinking"], "solid");
+});
+
 test("writing a setting keeps unknown keys and rejects invalid values", () => {
   const raw = { "workbench.colorTheme": "x", "files.autoSave": "off" };
   assert.deepEqual(withSetting(raw, "files.autoSaveDelay", "2.5"), { ...raw, "files.autoSaveDelay": 2.5 });

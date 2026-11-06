@@ -411,6 +411,23 @@ def run_auto_save(tmp):
     print("auto save: ok")
 
 
+def run_cursor_style(tmp):
+    """editor.cursorStyle / editor.cursorBlinking: the start sequence carries the DECSCUSR code, a live change sends the new one."""
+    settings = os.path.join(tmp, "cursor", "vscode-settings.json")
+    os.makedirs(os.path.dirname(settings))
+    open(settings, "w").write('{"editor.cursorStyle": "block", "editor.cursorBlinking": "solid", "editor.inlineSuggest.provider": "off"}')
+    file = os.path.join(tmp, "cursor.txt")
+    open(file, "w").write("one\n")
+    t = Term(file, env={"VSEDIT_SETTINGS": settings})
+    assert t.read("\x1b[2 q"), "no steady block cursor code at start"
+    open(settings, "w").write('{"editor.cursorStyle": "underline", "editor.cursorBlinking": "blink", "editor.inlineSuggest.provider": "off"}')
+    assert t.read("\x1b[3 q", timeout=4.5) or (t.send("x") or t.read("\x1b[3 q", timeout=4.5)), "settings change did not reach the cursor"
+    t.send(QUIT)
+    t.wait_exit()
+    assert b"\x1b[0 q" in t.out, "cursor not restored on leave"
+    print("cursor style: ok")
+
+
 def run_hot_exit(tmp):
     """SIGHUP with unsaved text writes a backup; reopening offers to restore it."""
     file = os.path.join(tmp, "hot.txt")
@@ -1260,7 +1277,7 @@ def main():
     engines = os.path.join(tmp, "engines.log")
     ISOLATED.update(VSEDIT_ENGINE_LOG=engines, VSEDIT_INLINE_USAGE=os.path.join(tmp, "inline-usage.json"))
     scenarios = [run_tsx, run_go, run_crlf, run_hex, run_error_page, run_drag_scroll, run_minified, run_scrollbars, run_decorations,
-                 run_autoclose, run_git_gutter, run_folding, run_menu_and_cmd_save, run_save_dialog, run_auto_save, run_hot_exit,
+                 run_autoclose, run_git_gutter, run_folding, run_menu_and_cmd_save, run_save_dialog, run_auto_save, run_cursor_style, run_hot_exit,
                  run_keybindings, run_mac_keys, run_format, run_typescript, run_find_and_status, run_symbols_and_problems, run_install_prompt, run_small_batch,
                  run_files_and_navigation, run_medium_language, run_medium_editing, run_inline_suggest, run_references_and_lenses]
     only = set(sys.argv[1:])
