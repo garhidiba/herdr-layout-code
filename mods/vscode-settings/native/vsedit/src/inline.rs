@@ -12,7 +12,6 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 pub const PROVIDERS: &[&str] = &["ollama", "off"];
 /// No suggestions in bigger files (characters).
 pub const MAX_FILE_CHARS: usize = 1_000_000;
-const PAID_DEFAULT_LIMIT: u64 = 2000;
 const TIMEOUT_S: u32 = 20;
 /// Never sent to a provider (file names, or paths when the pattern has a "/"); editor.inlineSuggest.exclude adds to it.
 pub const EXCLUDE: &[&str] = &[
@@ -42,8 +41,8 @@ pub struct InlineSettings {
     pub prefix_chars: usize,
     pub suffix_chars: usize,
     pub stop_after: u32,
-    /// None: 2000 for paid providers, unlimited for local ones; Some(0): unlimited
-    pub daily_limit: Option<u64>,
+    /// requests a day before suggestions stop until tomorrow; 0: unlimited
+    pub daily_limit: u64,
     pub keep_alive: String,
     pub exclude: Vec<String>,
 }
@@ -62,7 +61,7 @@ impl Default for InlineSettings {
             prefix_chars: 4000,
             suffix_chars: 300,
             stop_after: 5,
-            daily_limit: None,
+            daily_limit: 0,
             keep_alive: "30m".into(),
             exclude: vec![],
         }
@@ -100,7 +99,9 @@ pub fn normalize(raw: &Value) -> InlineSettings {
     if let Some(n) = num("stopAfter", 1.0, 100.0) {
         v.stop_after = n as u32;
     }
-    v.daily_limit = num("dailyRequestLimit", 0.0, 1e7).map(|n| n as u64);
+    if let Some(n) = num("dailyRequestLimit", 0.0, 1e7) {
+        v.daily_limit = n as u64;
+    }
     v.exclude = get("exclude").as_array().into_iter().flatten().filter_map(Value::as_str).filter(|s| !s.trim().is_empty()).map(String::from).collect();
     v
 }
@@ -122,19 +123,11 @@ pub struct Config {
     pub stop_after: u32,
     pub keep_alive: String,
     pub exclude: Vec<String>,
-    pub paid: bool,
     /// requests a day, 0: unlimited
     pub limit: u64,
     /// provider:model, the usage file's and the pauses' key
     pub key: String,
     pub enabled: bool,
-}
-
-pub fn is_local(url: &str) -> bool {
-    let rest = url.split_once("://").map_or(url, |(_, r)| r);
-    let host = rest.split(['/', '?']).next().unwrap_or("");
-    let host = if host.starts_with('[') { host.split(']').next().map(|h| format!("{h}]")).unwrap_or_default() } else { host.split(':').next().unwrap_or("").to_string() };
-    matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]")
 }
 
 /// Settings -> the config; `usable` says whether the provider can run here (the default of `enabled`).
@@ -146,7 +139,6 @@ pub fn config(s: &InlineSettings, usable: impl Fn(&Config) -> bool) -> Config {
     };
     let model = if s.model.is_empty() { model.to_string() } else { s.model.clone() };
     let endpoint = if s.endpoint.is_empty() { endpoint } else { &s.endpoint }.trim_end_matches('/').to_string();
-    let paid = p != "off" && p != "ollama" && !is_local(&endpoint);
     let mut cfg = Config {
         provider: p.into(),
         label,
@@ -163,8 +155,7 @@ pub fn config(s: &InlineSettings, usable: impl Fn(&Config) -> bool) -> Config {
         stop_after: s.stop_after,
         keep_alive: s.keep_alive.clone(),
         exclude: EXCLUDE.iter().map(|e| e.to_string()).chain(s.exclude.iter().cloned()).collect(),
-        paid,
-        limit: s.daily_limit.unwrap_or(if paid { PAID_DEFAULT_LIMIT } else { 0 }),
+        limit: s.daily_limit,
         enabled: false,
     };
     cfg.enabled = p != "off" && s.enabled.unwrap_or_else(|| usable(&cfg));
@@ -646,7 +637,6 @@ mod tests {
         assert!(request(&cfg, &Context { prefix: String::new(), suffix: String::new(), next_line: true }).body["options"]["stop"].is_null());
         assert_eq!((r.body["prompt"].clone(), r.body["suffix"].clone(), r.body["keep_alive"].clone(), r.body["options"]["num_predict"].clone(), r.body["options"]["stop"].clone()), (json!("p"), json!("s"), json!("30m"), json!(64), json!(["\n"])));
         assert_eq!(warmup(&cfg).unwrap().body["options"]["num_predict"], json!(1));
-        assert!(is_local("http://localhost:8080/v1") && !is_local("https://openrouter.ai/api/v1"));
     }
 
     #[test]

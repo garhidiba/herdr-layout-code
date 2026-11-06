@@ -499,7 +499,7 @@ palette, Go to Definition and Go to Symbol through the fallback, Expand / Shrink
   tick sends the request on a thread (`Editor::spawn`, like the language layer) and the reply comes back as a job, dropped
   when its generation, the text version or the cursor changed. JS: `fetch` with an `AbortController`.
 - **HTTP from Rust is `curl`** (no HTTP/TLS crate in the build): the request goes as a curl config on stdin (`url`,
-  `header`, `data-binary`, `max-time 20`, `write-out` for the status), so headers (a paid provider's key) never appear in
+  `header`, `data-binary`, `max-time 20`, `write-out` for the status), so request headers never appear in
   `ps`; cancelling kills the curl process (`Cancel`, SIGTERM). curl ships with macOS and common Linux distributions.
 - **Keys** (`keymap.json` `when: "inlineSuggestionVisible"`): `Keymap::when_suggest` holds those commands' keys apart from
   `by_chord`, and `handle` looks there first while a suggestion shows, so Tab / Esc / ⌘→ / Ctrl+→ keep their other

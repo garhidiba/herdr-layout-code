@@ -10,7 +10,6 @@ const PROVIDERS = ["ollama", "off"];
 const LABELS = { ollama: "Ollama", off: "Inline Suggestions" };
 const MODELS = { ollama: "qwen2.5-coder:7b" };
 const ENDPOINTS = { ollama: "http://127.0.0.1:11434" };
-const PAID_DEFAULT_LIMIT = 2000; // requests a day for paid providers when dailyRequestLimit isn't set
 const MAX_FILE_CHARS = 1_000_000; // no suggestions in bigger files
 const TIMEOUT = 20000;
 // Never sent to a provider (file names, or paths when the pattern has a "/"); editor.inlineSuggest.exclude adds to it.
@@ -31,7 +30,7 @@ const DEFAULTS = {
   [P + "prefixChars"]: 4000,       // text sent before the cursor
   [P + "suffixChars"]: 300,        // and after it (re-read on every request: Qwen's FIM puts it after the prefix)
   [P + "stopAfter"]: 5,            // empty / repeated replies or errors in a row that pause the provider for this session
-  [P + "dailyRequestLimit"]: null, // null: 2000 for paid providers, unlimited for local ones; 0: unlimited
+  [P + "dailyRequestLimit"]: 0,    // requests a day before suggestions stop until tomorrow; 0: unlimited
   [P + "keepAlive"]: "30m",        // Ollama: how long the model stays loaded after a request
   [P + "exclude"]: [],             // more file patterns never sent (on top of EXCLUDE)
 };
@@ -54,8 +53,6 @@ function normalize(raw = {}) {
   return v;
 }
 
-const isLocal = (url) => { try { return ["localhost", "127.0.0.1", "[::1]", "::1"].includes(new URL(url).hostname); } catch { return false; } };
-
 // Settings values -> what the editor runs with. usable(cfg): whether the provider can run here (the default of `enabled`).
 function config(values, usable = () => true) {
   const v = (k) => values[P + k];
@@ -66,8 +63,7 @@ function config(values, usable = () => true) {
     prefixChars: v("prefixChars"), suffixChars: v("suffixChars"), stopAfter: v("stopAfter"), keepAlive: v("keepAlive") || "30m",
     exclude: [...EXCLUDE, ...v("exclude")],
   };
-  cfg.paid = provider !== "off" && provider !== "ollama" && !isLocal(cfg.endpoint);
-  cfg.limit = v("dailyRequestLimit") ?? (cfg.paid ? PAID_DEFAULT_LIMIT : 0);
+  cfg.limit = v("dailyRequestLimit");
   cfg.key = `${provider}:${cfg.model}`;
   cfg.enabled = provider !== "off" && (v("enabled") ?? !!usable(cfg));
   return cfg;
@@ -239,6 +235,6 @@ function usageText(cfg, u) {
     ` · ~${tokens(u.inChars)} in / ${tokens(u.outChars)} out tokens` + (p50 == null ? "" : ` · p50 ${p50} ms, p95 ${p95} ms`);
 }
 
-module.exports = { PROVIDERS, DEFAULTS, EXCLUDE, MAX_FILE_CHARS, normalize, config, isLocal, globRe, denied, atSuggestable, contextAt,
+module.exports = { PROVIDERS, DEFAULTS, EXCLUDE, MAX_FILE_CHARS, normalize, config, globRe, denied, atSuggestable, contextAt,
   typeThrough, nextWordLength, trimLineSuffix, clean, Health, request, warmup, reply, failure, post,
   usageFile, today, usageOf, recordUsage, percentile, usageText };

@@ -1,5 +1,5 @@
 // node --test mods/vscode-viewer/editor/test/inline.test.cjs — inline suggestions: the rules (inline.cjs) and the editor
-// against a fake provider (a local HTTP stub speaking Ollama's /api/generate). No real model or paid API is called.
+// against a fake provider (a local HTTP stub speaking Ollama's /api/generate). No real model is called.
 process.env.VSEDIT_OS = "linux";
 const test = require("node:test");
 const assert = require("node:assert/strict");

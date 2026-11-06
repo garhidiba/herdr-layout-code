@@ -42,8 +42,8 @@
   "editor.inlineSuggest.suffixChars": 300,
   // Empty or repeated replies (or errors) in a row that pause the provider for the session (FIM tokens pause at once).
   "editor.inlineSuggest.stopAfter": 5,
-  // Requests a day before suggestions stop until tomorrow; null = 2000 for paid providers, unlimited for local ones.
-  "editor.inlineSuggest.dailyRequestLimit": null,
+  // Requests a day before suggestions stop until tomorrow; 0 = unlimited.
+  "editor.inlineSuggest.dailyRequestLimit": 0,
   // Ollama keeps the model loaded this long after each request (and the editor loads it when it starts).
   "editor.inlineSuggest.keepAlive": "30m",
   // File patterns never sent, on top of the built-in list (.env*, *.pem, *.key, id_rsa*, .npmrc, **/.ssh/**, …).
