@@ -5,12 +5,19 @@ import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list } from "gpui-base";
 import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, run, appHome } from "herdr";
 
+// The project you work in: the focused terminal's folder. Editor and diff tabs have no folder, so focusing
+// them keeps this space's last project instead of reloading; a fresh space starts at its first terminal's folder.
+const lastRoot = {};
 function location() {
   const space = spaces().find((s) => s.active), f = focused();
-  if (space?.folder) return { cwd: space.folder, on: space.machine ?? null };
   const pane = f?.pane ? panes().find(p => p.pane === f.pane) : null;
   const on = f?.pane === null ? (f.terminal?.includes("/") ? f.terminal.split("/")[0] : null) : space?.machine ?? null;
-  return { cwd: pane?.cwd || f?.cwd || space?.folder, on };
+  const cwd = f?.pane === null ? f?.cwd : pane?.terminal ? pane.cwd : null;
+  if (cwd) return (lastRoot[space?.id] = { cwd, on });
+  if (lastRoot[space?.id]) return lastRoot[space?.id];
+  const tabs = new Set((space?.tabs ?? []).map(t => t.id));
+  const first = panes().find(p => tabs.has(p.tab) && p.terminal && p.cwd);
+  return { cwd: first?.cwd || space?.folder, on: space?.machine ?? null };
 }
 const key = () => JSON.stringify(location());
 // Reads write nothing under .git (no index refresh or lock, no fsmonitor cookie):
