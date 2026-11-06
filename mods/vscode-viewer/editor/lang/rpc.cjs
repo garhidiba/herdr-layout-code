@@ -36,6 +36,9 @@ class Child {
     const die = (why) => { if (this.dead) return; this.dead = why; for (const p of this.pending.values()) p.reject(new Error(why)); this.pending.clear(); };
     this.proc.on("error", e => die(`${cmd}: ${e.message}`));
     this.proc.on("exit", code => die(`${cmd} exited (${code})`));
+    // A server never keeps this process alive (the editor lives on its terminal input; a test or script that touched a
+    // language feature exits when it is done, and the server then sees its stdin close and exits too).
+    for (const h of [this.proc, this.proc.stdin, this.proc.stdout, this.proc.stderr]) h?.unref?.();
   }
   write(text) { if (!this.dead) this.proc.stdin.write(text); }
   // Registers a pending reply under `id`; rejects after `timeout` ms.

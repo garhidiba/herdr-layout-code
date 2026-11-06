@@ -1406,3 +1406,15 @@ test("Go to Symbol in Workspace (⌘T) asks the language server for what is type
   assert.equal(K.resolve([], "linux").byChord.get("ctrl+t"), "workbench.action.showAllSymbols");
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test("a language server child never keeps the process alive, so a script that touched one exits and the server goes too", () => {
+  const rpc = path.join(__dirname, "..", "lang", "rpc.cjs");
+  const script = `const { Child } = require(${JSON.stringify(rpc)}); const c = new Child(process.execPath, ["-e", "process.stdin.resume()"], process.cwd(), () => {});
+    console.log(c.proc.pid);`;
+  const r = require("child_process").spawnSync(process.execPath, ["-e", script], { encoding: "utf8", timeout: 10000, stdio: ["ignore", "pipe", "pipe"] });
+  assert.equal(r.status, 0, "the script did not exit by itself");
+  const pid = Number(r.stdout.trim());
+  const alive = () => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  for (let i = 0; i < 50 && alive(); i++) require("child_process").spawnSync("sleep", ["0.1"]);
+  assert.equal(alive(), false, "the server outlived the script");
+});
