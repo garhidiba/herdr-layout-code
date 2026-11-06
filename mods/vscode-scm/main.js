@@ -1,4 +1,4 @@
-// A VS Code–style Source Control panel for the focused pane's folder: its git repos (nested ones too),
+// A VS Code–style Source Control panel for the active space's folder (like a VS Code workspace; the focused pane's folder when the space has none): its git repos (nested ones too),
 // the selected repo's changes and commit (as Herdr's shipped `changes` mod does), and its commit graph.
 // Commits expand to their changed files; a file opens a diff tab (vscode-diff mod).
 import { View, div, svg, image } from "gpui-kit";
@@ -7,6 +7,7 @@ import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, run, ap
 
 function location() {
   const space = spaces().find((s) => s.active), f = focused();
+  if (space?.folder) return { cwd: space.folder, on: space.machine ?? null };
   const pane = f?.pane ? panes().find(p => p.pane === f.pane) : null;
   const on = f?.pane === null ? (f.terminal?.includes("/") ? f.terminal.split("/")[0] : null) : space?.machine ?? null;
   return { cwd: pane?.cwd || f?.cwd || space?.folder, on };
