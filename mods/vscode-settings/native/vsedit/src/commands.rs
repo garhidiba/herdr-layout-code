@@ -266,12 +266,11 @@ pub struct Keymap {
 impl Keymap {
     /// This OS's defaults, then the user's entries in order.
     pub fn resolve(user: &[Value]) -> Keymap {
-        Keymap::resolve_for(COMMANDS, Os::current(), user)
+        Keymap::with_defaults(default_bindings(), user)
     }
 
-    pub fn resolve_for(commands: &'static [Command], os: Os, user: &[Value]) -> Keymap {
-        let mut bindings: Vec<Binding> =
-            commands.iter().flat_map(|c| c.defaults(os).iter().map(|ch| Binding { key: normalize(ch), command: c.id.into(), user: false })).collect();
+    pub fn with_defaults(defaults: Vec<Binding>, user: &[Value]) -> Keymap {
+        let mut bindings = defaults;
         for e in user {
             let Some(command) = e.get("command").and_then(Value::as_str) else { continue };
             if command.trim_start_matches('-').is_empty() {
@@ -304,6 +303,44 @@ impl Keymap {
         let live: Vec<&Binding> = self.bindings.iter().filter(|b| b.command == id && self.by_chord.get(&b.key).map(String::as_str) == Some(id)).collect();
         live.iter().rev().find(|b| b.user).or(live.first()).map(|b| label(&b.key)).unwrap_or_default()
     }
+}
+
+fn builtin_defaults(commands: &[Command], os: Os) -> Vec<Binding> {
+    commands.iter().flat_map(|c| c.defaults(os).iter().map(|ch| Binding { key: normalize(ch), command: c.id.into(), user: false })).collect()
+}
+
+/// The editors' shared default key table (a JSON file beside vsedit.cjs, set by main from --vscode), read once.
+pub static KEYMAP_FILE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// The default keys for this OS: from the shared key table when it exists, else the built-in table (commands.cjs's).
+fn default_bindings() -> Vec<Binding> {
+    static FROM_FILE: std::sync::OnceLock<Option<Vec<Binding>>> = std::sync::OnceLock::new();
+    let file = FROM_FILE.get_or_init(|| {
+        let text = std::fs::read_to_string(KEYMAP_FILE.get()?).ok()?;
+        table_defaults(&vscode_textmate::parse_jsonc(&text).ok()?, Os::current())
+    });
+    file.clone().unwrap_or_else(|| builtin_defaults(COMMANDS, Os::current()))
+}
+
+/// A default key table in VS Code's contribution shape, `[{ "command", "key", "mac"?, "win"?, "linux"? }]` (the OS's
+/// own key wins over `key`); entries whose key can't be read (two-step chords, for now) are skipped. None when the
+/// value isn't such an array.
+pub fn table_defaults(v: &Value, os: Os) -> Option<Vec<Binding>> {
+    let os_key = match os {
+        Os::Mac => "mac",
+        Os::Windows => "win",
+        Os::Linux => "linux",
+    };
+    let list = v.as_array()?;
+    Some(
+        list.iter()
+            .filter_map(|e| {
+                let command = e.get("command")?.as_str()?;
+                let key = e.get(os_key).or_else(|| e.get("key"))?.as_str()?;
+                Some(Binding { key: canon(key)?, command: command.into(), user: false })
+            })
+            .collect(),
+    )
 }
 
 pub fn keybindings_file() -> PathBuf {
@@ -379,10 +416,20 @@ mod tests {
     #[test]
     fn an_os_can_have_its_own_default_keys() {
         static CMDS: &[Command] = &[Command { id: "undo", title: "Undo", chords: &["cmd+z"], os_chords: &[(Os::Windows, &["ctrl+z"])], act: Act::Undo }];
-        assert!(Keymap::resolve_for(CMDS, Os::Mac, &[]).command("cmd+z").is_some());
-        let win = Keymap::resolve_for(CMDS, Os::Windows, &[]);
+        assert!(Keymap::with_defaults(builtin_defaults(CMDS, Os::Mac), &[]).command("cmd+z").is_some());
+        let win = Keymap::with_defaults(builtin_defaults(CMDS, Os::Windows), &[]);
         assert!(win.command("ctrl+z").is_some() && win.command("cmd+z").is_none());
         assert!(COMMANDS.iter().all(|c| c.defaults(Os::Linux) == c.chords), "the defaults match commands.cjs on every OS for now");
+    }
+
+    #[test]
+    fn a_shared_key_table_gives_each_os_its_keys() {
+        let table = json!([{ "command": "undo", "key": "ctrl+z", "mac": "cmd+z" }, { "command": "redo", "key": "ctrl+k ctrl+y" }]);
+        let mac = Keymap::with_defaults(table_defaults(&table, Os::Mac).unwrap(), &[]);
+        assert_eq!(mac.command("cmd+z").map(|c| c.id), Some("undo"));
+        let linux = Keymap::with_defaults(table_defaults(&table, Os::Linux).unwrap(), &[]);
+        assert!(linux.command("ctrl+z").is_some() && linux.bindings.len() == 1);
+        assert!(table_defaults(&json!({}), Os::Mac).is_none());
     }
 
     #[test]
