@@ -1,18 +1,22 @@
 #!/bin/sh
-# Cross-builds the remote editor bundle: the Rust editor (vsedit) and core (vscode-core, with `tokenize`) as static
-# musl binaries for Linux aarch64 and x86_64, with the data the editor reads (vscode/ grammars + theme + index,
-# editor/keymap.json) and the remote launcher (remote-vsedit.sh as vsedit.sh). The Explorer uploads one to a machine
-# the first time a file there opens in the editor (see mods/vscode-explorer/remote.js).
-# Output, per arch (never under mods/, which Herdr watches; never in git):
-#   <out>/<arch>/bundle.tgz      the bundle
-#   <out>/<arch>/manifest.json   {version, arch, sha256, size, files: {<name>: sha256}}; version = <vsedit version>-<first
-#                                12 hex digits of the bundle's sha256>, the folder it gets on the machine
+# Cross-builds the remote bundles: what the Explorer uploads to a remote space's machine (mods/vscode-explorer/remote.js).
+#   platform         Rust target(s)                                   builder              in the bundle
+#   linux-aarch64    aarch64-unknown-linux-musl (static)              cargo zigbuild       editor + core
+#   linux-x86_64     x86_64-unknown-linux-musl (static)               cargo zigbuild       editor + core
+#   macos            aarch64-apple-darwin + x86_64-apple-darwin, lipo cargo (macOS only)   editor + core
+#   windows-x86_64   x86_64-pc-windows-gnu                            cargo zigbuild       core only
+#   windows-aarch64  aarch64-pc-windows-gnullvm                       cargo zigbuild       core only
+# editor = vsedit, the data it reads (vscode/ grammars + theme + index, editor/keymap.json) and the launcher
+# (remote-vsedit.sh as vsedit.sh); core = vscode-core with `tokenize` (vscode-core.exe on Windows, whose terminal
+# layer the editor doesn't have yet). Oniguruma is C: zig is the cross C compiler and linker (mingw-w64 for Windows).
+# Output, per platform (never under mods/, which Herdr watches; never in git):
+#   <out>/<platform>/bundle.tgz      the bundle (ustar + gzip; Windows 10+ unpacks it with its tar.exe)
+#   <out>/<platform>/manifest.json   {version, platform, sha256, size, files: {<name>: sha256}}; version = <vsedit
+#                                    version>-<first 12 hex digits of the bundle's sha256>, its folder on the machine
 # <out> defaults to <herdr home>/vscode-core/remote; cargo's build folder is <out>/target.
-# Needs (macOS or Linux): rustup with the targets aarch64-unknown-linux-musl and x86_64-unknown-linux-musl, zig and
-# cargo-zigbuild (Oniguruma is C: zig is the musl cross C compiler and linker):
-#   rustup target add aarch64-unknown-linux-musl x86_64-unknown-linux-musl
-#   brew install zig            (or a zig from ziglang.org on PATH)
-#   cargo install cargo-zigbuild --locked
+# Needs: rustup targets (rustup target add aarch64-unknown-linux-musl x86_64-unknown-linux-musl aarch64-apple-darwin
+# x86_64-apple-darwin x86_64-pc-windows-gnu aarch64-pc-windows-gnullvm), zig (brew install zig) and cargo-zigbuild
+# (cargo install cargo-zigbuild --locked). On Linux the macos bundle is skipped.
 # usage: sh build-remote.sh [--out <dir>]
 set -eu
 
@@ -20,23 +24,27 @@ here=$(cd "$(dirname "$0")" && pwd)
 mods=$(cd "$here/../.." && pwd)
 home=${HERDR_APP_HOME:-$HOME/.config/herdr-app}
 out=$home/vscode-core/remote
-ARCHES="aarch64 x86_64"
 
 fail() { printf 'build-remote: %s\n' "$1" >&2; exit 1; }
 while [ $# -gt 0 ]; do
   case $1 in
     --out) [ $# -ge 2 ] || fail "--out needs a folder"; out=$2; shift 2 ;;
-    -h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) fail "unknown option $1 (see --help)" ;;
   esac
 done
+
+ZIG_TARGETS="aarch64-unknown-linux-musl x86_64-unknown-linux-musl x86_64-pc-windows-gnu aarch64-pc-windows-gnullvm"
+MAC_TARGETS="aarch64-apple-darwin x86_64-apple-darwin"
+PLATFORMS="linux-aarch64 linux-x86_64 windows-x86_64 windows-aarch64"
+if [ "$(uname -s)" = Darwin ]; then PLATFORMS="$PLATFORMS macos"; else MAC_TARGETS=; printf 'build-remote: not on macOS, skipping the macos bundle\n'; fi
 
 PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; export PATH
 command -v cargo-zigbuild >/dev/null || fail "cargo-zigbuild not found: cargo install cargo-zigbuild --locked"
 command -v zig >/dev/null || fail "zig not found: brew install zig"
 installed=$(rustup target list --installed 2>/dev/null || true)
-for a in $ARCHES; do
-  case $installed in *"$a-unknown-linux-musl"*) ;; *) fail "rustup target $a-unknown-linux-musl missing: rustup target add $a-unknown-linux-musl" ;; esac
+for t in $ZIG_TARGETS $MAC_TARGETS; do
+  case $installed in *"$t"*) ;; *) fail "rustup target $t missing: rustup target add $t" ;; esac
 done
 
 sha() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
@@ -48,33 +56,54 @@ pack() {
     tar -c --format ustar --owner 0 --group 0 --sort name -f - -C "$1" .
   fi | gzip -9n
 }
+targets() { for t in "$@"; do printf ' --target %s' "$t"; done; }
 
 mkdir -p "$out"
-targets=
-for a in $ARCHES; do targets="$targets --target $a-unknown-linux-musl"; done
-# shellcheck disable=SC2086
-cargo zigbuild --release --locked --manifest-path "$here/Cargo.toml" --target-dir "$out/target" $targets \
-  -p vsedit -p vscode-core --features vscode-core/tokenize || fail "the build failed (see above)"
+build="--release --locked --manifest-path $here/Cargo.toml --target-dir $out/target --features vscode-core/tokenize"
+# shellcheck disable=SC2046,SC2086
+cargo zigbuild $build $(targets aarch64-unknown-linux-musl x86_64-unknown-linux-musl) -p vsedit -p vscode-core || fail "the Linux build failed (see above)"
+# shellcheck disable=SC2046,SC2086
+cargo zigbuild $build $(targets x86_64-pc-windows-gnu aarch64-pc-windows-gnullvm) -p vscode-core || fail "the Windows build failed (see above)"
+if [ -n "$MAC_TARGETS" ]; then
+  # shellcheck disable=SC2046,SC2086
+  cargo build $build $(targets $MAC_TARGETS) -p vsedit -p vscode-core || fail "the macOS build failed (see above)"
+fi
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$here/vsedit/Cargo.toml" | head -n 1)
+rel() { printf '%s/target/%s/release/%s' "$out" "$1" "$2"; }
 
-for a in $ARCHES; do
-  stage=$out/.stage-$a.$$
-  rm -rf "$stage"; mkdir -p "$stage/b/vscode" "$stage/b/editor"
-  for bin in vsedit vscode-core; do cp "$out/target/$a-unknown-linux-musl/release/$bin" "$stage/b/$bin"; chmod 755 "$stage/b/$bin"; done
-  cp -R "$mods/vscode-viewer/vscode/grammars" "$mods/vscode-viewer/vscode/index.json" "$mods/vscode-viewer/vscode/theme.json" \
-    "$mods/vscode-viewer/vscode/LICENSE-vscode-textmate.md" "$stage/b/vscode/"
-  cp "$mods/vscode-viewer/editor/keymap.json" "$stage/b/editor/"
-  cp "$here/remote-vsedit.sh" "$stage/b/vsedit.sh"
+for p in $PLATFORMS; do
+  stage=$out/.stage-$p.$$
+  rm -rf "$stage"; mkdir -p "$stage/b"
+  case $p in
+    linux-*) t=${p#linux-}-unknown-linux-musl; for bin in vsedit vscode-core; do cp "$(rel "$t" "$bin")" "$stage/b/$bin"; done ;;
+    macos) for bin in vsedit vscode-core; do lipo -create -output "$stage/b/$bin" "$(rel aarch64-apple-darwin "$bin")" "$(rel x86_64-apple-darwin "$bin")"; done ;;
+    windows-x86_64) cp "$(rel x86_64-pc-windows-gnu vscode-core.exe)" "$stage/b/" ;;
+    windows-aarch64) cp "$(rel aarch64-pc-windows-gnullvm vscode-core.exe)" "$stage/b/" ;;
+  esac
+  case $p in
+    windows-*) files="vscode-core.exe" ;;
+    *)
+      chmod 755 "$stage/b/vsedit" "$stage/b/vscode-core"
+      mkdir -p "$stage/b/vscode" "$stage/b/editor"
+      cp -R "$mods/vscode-viewer/vscode/grammars" "$mods/vscode-viewer/vscode/index.json" "$mods/vscode-viewer/vscode/theme.json" \
+        "$mods/vscode-viewer/vscode/LICENSE-vscode-textmate.md" "$stage/b/vscode/"
+      cp "$mods/vscode-viewer/editor/keymap.json" "$stage/b/editor/"
+      cp "$here/remote-vsedit.sh" "$stage/b/vsedit.sh"
+      files="vsedit vscode-core vsedit.sh" ;;
+  esac
   find "$stage/b" -exec touch -h -t 200001010000 {} + # unchanged files give the same bundle, so the same version
   pack "$stage/b" > "$stage/bundle.tgz"
   sum=$(sha "$stage/bundle.tgz")
   size=$(wc -c < "$stage/bundle.tgz" | tr -d ' ')
   ver=$version-$(printf '%s' "$sum" | cut -c1-12)
-  printf '{\n  "version": "%s",\n  "arch": "%s",\n  "sha256": "%s",\n  "size": %s,\n  "files": {\n    "vsedit": "%s",\n    "vscode-core": "%s",\n    "vsedit.sh": "%s"\n  }\n}\n' \
-    "$ver" "$a" "$sum" "$size" "$(sha "$stage/b/vsedit")" "$(sha "$stage/b/vscode-core")" "$(sha "$stage/b/vsedit.sh")" > "$stage/manifest.json"
-  rm -rf "$stage/b" "$out/$a.old"
+  list=
+  for f in $files; do list="$list${list:+,}
+    \"$f\": \"$(sha "$stage/b/$f")\""; done
+  printf '{\n  "version": "%s",\n  "platform": "%s",\n  "sha256": "%s",\n  "size": %s,\n  "files": {%s\n  }\n}\n' \
+    "$ver" "$p" "$sum" "$size" "$list" > "$stage/manifest.json"
+  rm -rf "$stage/b" "$out/$p.old"
   # swapped in whole: a mod reading the old manifest never sees a half-written bundle
-  if [ -d "$out/$a" ]; then mv "$out/$a" "$out/$a.old"; fi
-  mv "$stage" "$out/$a"; rm -rf "$out/$a.old"
-  printf 'build-remote: %s %s (%s bytes) -> %s\n' "$a" "$ver" "$size" "$out/$a"
+  if [ -d "$out/$p" ]; then mv "$out/$p" "$out/$p.old"; fi
+  mv "$stage" "$out/$p"; rm -rf "$out/$p.old"
+  printf 'build-remote: %s %s (%s bytes) -> %s\n' "$p" "$ver" "$size" "$out/$p"
 done
