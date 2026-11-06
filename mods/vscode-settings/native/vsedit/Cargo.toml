@@ -1,0 +1,12 @@
+[package]
+name = "vsedit"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.92"
+description = "The terminal editor of the herdr-layout-vscode mods (vsedit.cjs) in Rust, colored by the vscode-textmate port"
+publish = false
+
+[dependencies]
+libc = "0.2"
+serde_json = { version = "1", features = ["preserve_order"] }
+vscode-textmate = { path = "../vscode-textmate" }

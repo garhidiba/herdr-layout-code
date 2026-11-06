@@ -1,6 +1,7 @@
 [workspace]
-members = ["vscode-core", "vscode-textmate"]
-# A plain `cargo build` (and install.sh) builds only vscode-core; vscode-textmate compiles Oniguruma's C sources.
+members = ["vscode-core", "vscode-textmate", "vsedit"]
+# A plain `cargo build` (and install.sh) builds only vscode-core; vscode-textmate (and vsedit, the editor on it)
+# compile Oniguruma's C sources.
 default-members = ["vscode-core"]
 resolver = "2"
 

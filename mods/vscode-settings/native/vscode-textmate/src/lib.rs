@@ -11,6 +11,7 @@ mod rule;
 mod theme;
 
 pub use file::{scope_of, split_lines, tokenize_file, viewer, Viewer};
+pub use onig::{Match, OnigString, Scanner};
 pub use grammar::{Grammar, StateStack, TokenizeLineResult2};
 pub use raw::{parse_jsonc, parse_raw_grammar};
 pub use registry::{Loader, Registry};
