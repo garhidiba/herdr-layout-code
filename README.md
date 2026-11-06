@@ -24,6 +24,17 @@ To install by hand:
 3. Run `herdr-app check` on each mod.
 4. Switch with `ctrl-shift-l`, or run `herdr-app do layout.switch --name vscode`.
 
+### Core engine: JavaScript (default) or Rust (optional)
+
+The Explorer and Source Control read folders and git with a **JavaScript core** that works out of the box: nothing to build.
+
+The optional **Rust core** (`native/vscode-core`) does the same reads in one parallel process, about 4× faster on folders with many repos (an 84-repo folder: 6.5 s → 0.9 s). It needs Rust (`cargo`, from [rustup.rs](https://rustup.rs)) to build, and runs on this machine only (remote spaces keep the JavaScript core). To use it, either:
+
+- open the layout's Settings and press **Build Rust core**, then pick **Rust** as the core engine, or
+- run `native/install.sh --engine rust` from this repo (builds the binary into `~/.config/herdr-app/vscode-core/` and sets `"core.engine": "rust"` in `vscode-settings.json`).
+
+`native/install.sh` alone only builds and installs the binary; `--engine js` switches back without building. If the Rust core is chosen but missing, the mods fall back to JavaScript and say so once.
+
 Optional Claude meter: set Claude Code's `statusLine.command` to `sh ~/.config/herdr-app/mods/vscode-status/claude-usage-tap.sh`. If you already had a status line command, save it as `~/.config/herdr-app/claude-statusline-orig.sh`; the tap passes the input on to it.
 
 ## What it runs
