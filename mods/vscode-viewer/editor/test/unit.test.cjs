@@ -435,3 +435,31 @@ test("the error page names fs errors in words and maps Esc/⌘W/Ctrl+Q to Close,
   assert.deepEqual(picked, ["retry", "close", "close", "close", "close"]);
   assert.match(page.render(30, 100), /The editor could not be opened/);
 });
+
+// A minified bundle: `n` characters of real-looking JS on one line.
+function minified(n) {
+  let s = "", i = 0;
+  while (s.length < n) s += `function f${i}(a,b){const c=a+b*${i};if(c>10){return "s${i}"+c}else{for(let k=0;k<c;k++){a.push({x:k,y:/re${i}/g})}}return null}var v${i++}=new Map;`;
+  return s.slice(0, n);
+}
+// Foreground color index of each character in [from, to).
+const colorsIn = (tokens, from, to) => {
+  const out = [];
+  for (let i = from, t = 0; i < to; i++) { while (t + 2 < tokens.length && tokens[t + 2] <= i) t += 2; out.push(H.foregroundOf(tokens[t + 1])); }
+  return out;
+};
+
+test("a 200 KB minified line is colored piece by piece, the visible window first, matching full tokenization", async () => {
+  const { grammar, textmate } = await H.loadGrammar("source.js");
+  const line = minified(200000), hl = new H.Highlighter(grammar, textmate.INITIAL, [line, "const after = 1;"]);
+  hl.ensure(1);
+  assert.equal(hl.ensureLong(0, 1, Date.now() + 5), false, "not done within 5 ms: the rest goes on in later frames");
+  const from = 10000, to = 10100;
+  while (hl.long[0].pos < to) hl.ensureLong(0, 0, Date.now() + 20);
+  const whole = grammar.tokenizeLine2(line.slice(0, 20000), textmate.INITIAL).tokens;
+  assert.deepEqual(colorsIn(hl.tokens[0], from, to), colorsIn(whole, from, to));
+  assert.ok(new Set(colorsIn(hl.tokens[0], from, to)).size > 2, "the window has several colors");
+  const keep = hl.long[0].pieces.length;
+  hl.lines[0] = line.slice(0, 15000) + "x" + line.slice(15000); hl.onEdit(0, 1, 1); hl.ensure(1);
+  assert.ok(hl.long[0].pieces.length > 0 && hl.long[0].pieces.length <= keep && hl.long[0].pos <= 15000, "typing keeps the pieces before the edit");
+});

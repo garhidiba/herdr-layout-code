@@ -860,7 +860,9 @@ class Editor {
   render(budget = 60) {
     const P = new Painter(), c = this.colors, height = this.height, width = this.textWidth, gw = this.gutter;
     this.top = Math.max(0, Math.min(this.top, this.lines.length - 1));
-    const done = this.hl.ensure(this.top + height, Date.now() + budget);
+    const deadline = Date.now() + budget;
+    // long lines get at most 25 ms a frame, so keys are handled between slices
+    const done = this.hl.ensure(this.top + height, deadline) & this.hl.ensureLong(this.top, this.top + height, Math.min(deadline, Date.now() + 25));
     const [ss, se] = this.range(), empty = this.empty;
     const showMatches = this.prompt?.kind === "find" && this.find.query;
     const ms = showMatches ? this.matches() : [];
@@ -925,7 +927,12 @@ class Editor {
     const c = this.colors;
     let col = 0, ti = 0, x = 0, i = 0;
     const right = left + width;
-    for (const ch of text) {
+    // A long line of single-width characters (a minified file): start at the first visible one instead of walking there.
+    if (left > 0 && text.length > 1000 && !/[^\x20-\x7e]/.test(text)) {
+      i = col = Math.min(left, text.length);
+      if (tokens) { let lo = 0, hi = tokens.length / 2 - 1; while (lo < hi) { const m = (lo + hi + 1) >> 1; if (tokens[m * 2] <= i) lo = m; else hi = m - 1; } ti = lo * 2; }
+    }
+    for (const ch of i ? text.slice(i) : text) {
       if (col >= right) break;
       while (tokens && ti + 2 < tokens.length && tokens[ti + 2] <= i) ti += 2;
       const meta = tokens ? tokens[ti + 1] : 0;

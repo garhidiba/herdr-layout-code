@@ -450,11 +450,33 @@ def run_drag_scroll(tmp):
     print("drag auto-scroll + horizontal wheel: ok")
 
 
+def run_minified(tmp):
+    """A 300 KB one-line bundle is colored on screen (keywords #C678DD) and stays responsive to typing."""
+    file = os.path.join(tmp, "bundle.min.js")
+    src, i = "", 0
+    while len(src) < 300000:
+        src += f'function f{i}(a,b){{const c=a+b*{i};if(c>10){{return "s{i}"+c}}return null}}var v{i}=new Map;'
+        i += 1
+    open(file, "w").write(src + "\n")
+    t = Term(file)
+    assert t.read("Ln 1, Col 1", timeout=5)
+    end = time.time() + 3
+    while time.time() < end and not painted(screen_of(t), "function", "#C678DD"):
+        t.read(timeout=0.2)
+    assert painted(screen_of(t), "function", "#C678DD") and painted(screen_of(t), "return", "#C678DD"), "line 1 not colored"
+    t.out = b""
+    t.send("x")
+    assert t.read("Ln 1, Col 2", timeout=1), "typing is stuck"
+    t.send("\x11"); t.send("d")
+    assert t.wait_exit() == 0
+    print("minified line colors: ok")
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="vsedit-e2e-")
     ISOLATED.update(VSEDIT_SETTINGS=os.path.join(tmp, "settings", "vscode-settings.json"), VSEDIT_BACKUPS=os.path.join(tmp, "backups"))
     try:
-        run_tsx(tmp); run_go(tmp); run_crlf(tmp); run_hex(tmp); run_error_page(tmp); run_drag_scroll(tmp)
+        run_tsx(tmp); run_go(tmp); run_crlf(tmp); run_hex(tmp); run_error_page(tmp); run_drag_scroll(tmp); run_minified(tmp)
         run_menu_and_cmd_save(tmp); run_save_dialog(tmp); run_auto_save(tmp); run_hot_exit(tmp)
         run_format(tmp); run_typescript(tmp)
     finally:
