@@ -58,7 +58,7 @@ export default class Diff extends View {
       try {
         const texts = [this.parent ? await this.blob(`${this.parent}:${this.oldPath}`) : "", await this.newText()];
         if (this.texts && texts[0] === this.texts[0] && texts[1] === this.texts[1]) return;
-        this.texts = texts; this.tokens = [null, null]; this.error = null; this.ops = [];
+        this.texts = texts; this.tokens = [null, null]; this.error = null; this.ops = []; this.open = new Set();
         if (texts.some((t) => t.includes("\0"))) this.error = "Binary file · no text diff";
         else {
           const [a, b] = texts.map(splitLines);
