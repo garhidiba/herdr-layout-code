@@ -1,4 +1,31 @@
 {
+  "terminal": {
+    "cmd-a": "terminal",
+    "cmd-x": "terminal",
+    "cmd-z": "terminal",
+    "cmd-shift-z": "terminal",
+    "cmd-g": "terminal",
+    "cmd-shift-g": "terminal",
+    "cmd-alt-f": "terminal",
+    "cmd-shift-k": "terminal",
+    "cmd-enter": "terminal",
+    "cmd-up": "terminal",
+    "cmd-down": "terminal",
+    "cmd-shift-up": "terminal",
+    "cmd-shift-down": "terminal",
+    "cmd-shift-left": "terminal",
+    "cmd-shift-right": "terminal",
+    "cmd-delete": "terminal",
+    "cmd-f2": "terminal",
+    "cmd-f12": "terminal",
+    "f12": "terminal",
+    "shift-f12": "terminal",
+    "alt-f12": "terminal",
+    "alt-shift-f12": "terminal",
+    "shift-f10": "terminal",
+    "ctrl--": "terminal",
+    "ctrl-shift--": "terminal"
+  },
   "layout:vscode": {
     "cmd-e": "layout.toggle:panel",
     "cmd-s": "vscode-viewer.save"
