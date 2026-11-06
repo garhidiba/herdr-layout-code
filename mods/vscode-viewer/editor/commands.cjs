@@ -88,6 +88,8 @@ const COMMANDS = [
   C("editor.action.indentUsingTabs", "Indent Using Tabs", [], "pickTabSize", { args: [true] }),
   C("workbench.action.editor.changeEOL", "Change End of Line Sequence", [], "pickEol"),
   C("workbench.action.editor.changeLanguageMode", "Change Language Mode", [], "pickLanguage"),
+  C("workbench.action.editor.nextChange", "Go to Next Change", ["alt+f5"], "gotoChange", { args: [1] }),
+  C("workbench.action.editor.previousChange", "Go to Previous Change", ["alt+shift+f5"], "gotoChange", { args: [-1] }),
   C("editor.action.showContextMenu", "Show Editor Context Menu", ["shift+f10", "menu"], "openMenuAtCursor"),
 ];
 const BY_ID = new Map(COMMANDS.map(c => [c.id, c]));

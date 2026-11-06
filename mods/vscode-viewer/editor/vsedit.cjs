@@ -33,6 +33,7 @@ const D = require("./decorations.cjs");
 const A = require("./autoclose.cjs");
 const FIND = require("./find.cjs");
 const SYM = require("./symbols.cjs");
+const G = require("./gitgutter.cjs");
 
 // VS Code's "Col": characters before the cursor, tabs counted to the next tab stop.
 function visibleColumn(line, index, tab) {
@@ -60,7 +61,9 @@ function wordLeft(line, col) {
 const shiftClosers = (at, line, col, delta) => at.map(q => (q.line === line && q.col >= col ? { line, col: q.col + delta } : q));
 
 // ---------- the editor ----------
-const DOC_FIELDS = ["file", "doc", "buf", "hl", "indent", "scope", "language", "comment", "crumbs", "root", "session", "sel", "goal", "top", "left", "seenVersion", "outline"];
+const DOC_FIELDS = ["file", "doc", "buf", "hl", "indent", "scope", "language", "comment", "crumbs", "root", "session", "sel", "goal", "top", "left", "seenVersion", "outline", "git"];
+const GIT_GLYPHS = { added: "▎", modified: "▎", deletedBelow: "▁", deletedAbove: "▔" };
+const GIT_COLORS = { added: "gitAdded", modified: "gitModified", deletedBelow: "gitDeleted", deletedAbove: "gitDeleted" };
 const WORD_DELAY = 250; // ms the cursor rests on a word before its occurrences highlight, like VS Code
 const NOT_FOUND = { definition: "definition", typeDefinition: "type definition", implementation: "implementation", references: "references" };
 const PEEK_TITLE = { definition: "Definition", typeDefinition: "Type Definition", implementation: "Implementations", references: "References" };
@@ -93,10 +96,12 @@ class Editor {
   makeState(file, doc, grammar, scope) {
     const buf = new TextBuffer(doc.lines), hl = new H.Highlighter(grammar, this.textmate.INITIAL, buf.lines);
     buf.listeners.push((s, r, n) => hl.onEdit(s, r, n));
+    const git = new G.GitGutter(file, buf, () => this.redraw());
+    buf.listeners.push(() => git.changed());
     const fallback = { useTabs: !this.settings["editor.insertSpaces"], size: this.settings["editor.tabSize"] };
     return { file, doc, buf, hl, indent: F.detectIndent(buf.lines, fallback), scope, language: L.languageName(grammar ? scope : null),
       comment: L.commentOf(scope), crumbs: breadcrumbs(file), root: gitRoot(file), session: null, sel: caret({ line: 0, col: 0 }),
-      goal: null, top: 0, left: 0, seenVersion: 0, outline: null };
+      goal: null, top: 0, left: 0, seenVersion: 0, outline: null, git };
   }
   colorsOf(colorMap) { return colorMap.map(c => (c ? c.slice(0, 7).toLowerCase() : this.colors.fg)); }
   // The grammar arrives after the first, uncolored frame (main paints before loading it).
@@ -401,7 +406,7 @@ class Editor {
     if (this.settings["files.insertFinalNewline"] && this.lines.join("")) this.doc.finalNewline = true;
     try {
       this.doc.stamp = F.save(this.file, F.encode(this.lines, this.doc));
-      this.buf.markSaved(); this.buf.seal(); B.remove(this.file);
+      this.buf.markSaved(); this.buf.seal(); B.remove(this.file); this.git.saved();
       this.session?.saved(this.file);
       if (!auto) this.say("Saved", this.colors.ok);
       return true;
@@ -410,7 +415,7 @@ class Editor {
   }
   // Writes another open file as it is (rename across files, auto save).
   writeState(st) {
-    try { st.doc.stamp = F.save(st.file, F.encode(st.buf.lines, st.doc)); st.buf.markSaved(); B.remove(st.file); return true; }
+    try { st.doc.stamp = F.save(st.file, F.encode(st.buf.lines, st.doc)); st.buf.markSaved(); B.remove(st.file); st.git.saved(); return true; }
     catch (e) { this.say(`Failed to save ${path.basename(st.file)}: ${e.message}`, this.colors.error, 8000); return false; }
   }
   trimTrailing() {
@@ -501,6 +506,11 @@ class Editor {
     if (!e) return;
     to.push({ file: this.file, pos: { ...this.head }, top: this.top });
     return this.track(this.open(e.file, null, false).then(() => { this.moveTo(e.pos); this.top = e.top; }));
+  }
+  // Go to Next / Previous Change: the git change below / above the cursor line, wrapping (nothing without changes).
+  gotoChange(dir) {
+    const h = G.nextChange(this.git.hunks, this.head.line, dir);
+    if (h) this.moveTo({ line: Math.min(G.lineOf(h), this.lines.length - 1), col: 0 });
   }
 
   // ----- prompts and overlays -----
@@ -1013,6 +1023,10 @@ class Editor {
   // other end, the cursor line.
   rulerMarks(ms, hits, problems = []) {
     const n = this.lines.length, len = this.vbar.length, marks = new Array(len).fill(null), c = this.colors;
+    for (const h of this.git.hunks) { // git changes first: everything else draws over them
+      const color = c[`ruler${h.kind[0].toUpperCase()}${h.kind.slice(1)}`];
+      for (let k = SB.markCell(G.lineOf(h), n, len); k <= SB.markCell(Math.max(G.lineOf(h), h.end - 1), n, len); k++) marks[k] = color;
+    }
     for (const m of ms) marks[SB.markCell(m.line, n, len)] = c.rulerFind;
     for (const h of hits?.list ?? []) marks[SB.markCell(h.line, n, len)] = hits.ruler;
     for (const d of [...problems].sort((a, b) => b.severity - a.severity)) marks[SB.markCell(d.start.line, n, len)] = c.rulerDiag[d.severity]; // errors win
@@ -1109,6 +1123,8 @@ class Editor {
     const hits = showMatches ? null : this.highlights(height), occ = hits?.list ?? []; // Find shows its own matches
     if (this.outline?.version !== this.buf.version) this.queueOutline();
     const problems = this.problems();
+    this.git.start();
+    const changes = G.marksFor(this.git.hunks, this.top, this.top + height - 1);
     let mi = 0, hi = 0;
 
     // breadcrumbs
@@ -1125,9 +1141,7 @@ class Editor {
       const spans = []; // this line's squiggles, the most severe first
       for (const d of problems) { if (d.start.line > l) break; const s = Editor.problemSpan(d, l, this.lines[l]); if (s) spans.push({ ...s, color: c.diag[d.severity], severity: d.severity }); }
       spans.sort((a, b) => a.severity - b.severity);
-      // a problem's mark in the glyph margin (the gutter's first column), then the number
-      P.text(spans.length ? "●" : " ", spans.length ? spans[0].color : c.lineNumber, c.bg);
-      P.text(String(l + 1).padStart(gw - 3) + "  ", active ? c.lineNumberActive : c.lineNumber, c.bg);
+      this.paintGutter(P, l, active, changes.get(l), spans[0]?.color);
       const lineBg = active && empty ? c.currentLine : c.bg;
       while (mi < ms.length && ms[mi].line < l) mi++;
       const lineMatches = [];
@@ -1205,6 +1219,15 @@ class Editor {
         bg: text ? c.selectionHighlight : c.wordHighlight, ruler: text ? c.rulerSelection : c.rulerWord };
     }
     return this._hits;
+  }
+  // The gutter, `gutter` cells: a problem's mark `●` in the glyph margin (the first column, `mark` its color), the line
+  // number, the git change bar (or a deletion marker), a blank cell.
+  paintGutter(P, l, active, change, mark = null) {
+    const c = this.colors;
+    P.text(mark ? "●" : " ", mark ?? c.lineNumber, c.bg);
+    P.text(String(l + 1).padStart(this.gutter - 3), active ? c.lineNumberActive : c.lineNumber, c.bg);
+    P.text(GIT_GLYPHS[change] ?? " ", change ? c[GIT_COLORS[change]] : c.fg, c.bg);
+    P.text(" ", c.fg, c.bg);
   }
   // deco: { guide: { count, active }, brackets: [{ col }], hits: [{ col, len }], hitBg, problems: [{ from, to, color }] } for this line.
   paintLine(P, l, lineBg, ss, se, lineMatches, width, deco = {}) {

@@ -695,12 +695,45 @@ def run_symbols_and_problems(tmp):
     print("symbols + diagnostics (tsserver): ok")
 
 
+def run_git_gutter(tmp):
+    """A file in a temp git repo: a typed line gets the modified bar, a new line the added bar (editorGutter colors), ⌥F5 /
+    ⇧⌥F5 go to the next / previous change; after a commit the bars go."""
+    repo = os.path.join(tmp, "repo")
+    os.makedirs(repo)
+    git = lambda *a: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=repo, check=True, capture_output=True)
+    git("init", "-q")
+    file = os.path.join(repo, "g.txt")
+    open(file, "w").write("".join(f"line {i}\n" for i in range(10)))
+    git("add", "g.txt"); git("commit", "-q", "-m", "first")
+    t = Term(file)
+    assert colored_frame(t), "no colored frame"
+    t.send("X", wait=0.6)                               # line 1 modified, diffed 300 ms later
+    assert sgr("#948b60") + "▎" in screen_of(t), "no modified bar in editorGutter.modifiedBackground"
+    t.send("\x07"); t.send("8\r"); t.send("\x1b[F"); t.send("\r"); t.send("new", wait=0.6)
+    assert sgr("#109868") + "▎" in screen_of(t), "no added bar in editorGutter.addedBackground"
+    assert "Ln 9, Col 4" in plain(t)
+    t.send("\x1b[15;3~")                                 # ⌥F5: past the last change, back to the first
+    assert t.read("Ln 1, Col 1", timeout=2), "Go to Next Change did not wrap to line 1"
+    t.send("\x1b[15;4~")                                 # ⇧⌥F5: from the first, the last
+    assert t.read("Ln 9, Col 1", timeout=2), "Go to Previous Change did not go to the added line"
+    t.send("\x13")
+    assert t.read("Saved", timeout=2)
+    git("commit", "-q", "-am", "second")
+    t.out = b""
+    time.sleep(3.5); t.read()                            # the 3 s poll sees the new HEAD and repaints
+    last = plain(t).split("\x1b[1;1H")[-1]               # the last frame
+    assert "Ln 9" in last and "▎" not in last, "bars still there after the commit"
+    t.send("\x11")
+    assert t.wait_exit() == 0
+    print("git gutter: ok")
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="vsedit-e2e-")
     ISOLATED.update(VSEDIT_SETTINGS=os.path.join(tmp, "settings", "vscode-settings.json"), VSEDIT_BACKUPS=os.path.join(tmp, "backups"),
                     VSEDIT_KEYBINDINGS=os.path.join(tmp, "settings", "vscode-keybindings.json"))
     try:
-        run_tsx(tmp); run_go(tmp); run_crlf(tmp); run_hex(tmp); run_error_page(tmp); run_drag_scroll(tmp); run_minified(tmp); run_scrollbars(tmp); run_decorations(tmp); run_autoclose(tmp)
+        run_tsx(tmp); run_go(tmp); run_crlf(tmp); run_hex(tmp); run_error_page(tmp); run_drag_scroll(tmp); run_minified(tmp); run_scrollbars(tmp); run_decorations(tmp); run_autoclose(tmp); run_git_gutter(tmp)
         run_menu_and_cmd_save(tmp); run_save_dialog(tmp); run_auto_save(tmp); run_hot_exit(tmp); run_keybindings(tmp)
         run_format(tmp); run_typescript(tmp); run_find_and_status(tmp); run_symbols_and_problems(tmp)
     finally:

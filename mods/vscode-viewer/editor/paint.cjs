@@ -50,7 +50,19 @@ function paletteOf(colors = {}) {
       opaque(colors["editorInfo.foreground"]) ?? "#3794ff"],
     rulerDiag: [null, blend(colors["editorOverviewRuler.errorForeground"] ?? "#ff1212b3", bg),
       blend(colors["editorOverviewRuler.warningForeground"] ?? "#cca700", bg), blend(colors["editorOverviewRuler.infoForeground"] ?? "#3794ff", bg)],
+    // git change bars (One Dark Pro's; the akamud theme has none) and their ruler marks (VS Code: the bar color at 60%)
+    ...gitColors(colors, bg),
   };
+}
+const GIT_DEFAULTS = { added: "#109868", modified: "#948b60", deleted: "#9a353d" };
+function gitColors(colors, bg) {
+  const out = {};
+  for (const [kind, fallback] of Object.entries(GIT_DEFAULTS)) {
+    const Kind = kind[0].toUpperCase() + kind.slice(1), bar = blend(colors[`editorGutter.${kind}Background`] ?? fallback, bg);
+    out[`git${Kind}`] = bar;
+    out[`ruler${Kind}`] = blend(colors[`editorOverviewRuler.${kind}Foreground`] ?? bar + "99", bg);
+  }
+  return out;
 }
 // The palette of the installed theme.json (the defaults when it can't be read).
 function themePalette() { try { return paletteOf(require("./highlight.cjs").loadTheme().colors); } catch { return paletteOf(); } }
