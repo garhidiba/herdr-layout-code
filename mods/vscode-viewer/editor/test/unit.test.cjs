@@ -171,3 +171,35 @@ test("editor: Enter keeps indentation, Tab/Shift+Tab indent, Ctrl+/ toggles comm
   assert.equal(ed.lines[1], "\t한글x := 1");
   assert.equal(ed.head.col, 3);
 });
+
+// ---------- keys ----------
+const { parse } = require("../keys.cjs");
+const chord = (e) => `${e.ctrl ? "ctrl+" : ""}${e.alt ? "alt+" : ""}${e.shift ? "shift+" : ""}${e.cmd ? "cmd+" : ""}${e.name}`;
+const keyOf = (s) => { const e = parse(s).events[0]; return e && (e.type === "key" ? chord(e) : e); };
+
+test("Kitty CSI-u reports ⌘ (super) as cmd, with shift/alt/ctrl, and drops key releases", () => {
+  assert.equal(keyOf("\x1b[115;9u"), "cmd+s");
+  assert.equal(keyOf("\x1b[112;10u"), "shift+cmd+p");
+  assert.equal(keyOf("\x1b[102;11u"), "alt+cmd+f");
+  assert.equal(keyOf("\x1b[47;9u"), "cmd+/");
+  assert.equal(keyOf("\x1b[13;9u"), "cmd+enter");
+  assert.equal(keyOf("\x1b[1;9D"), "cmd+left");
+  assert.equal(keyOf("\x1b[1;3A"), "alt+up");
+  assert.equal(keyOf("\x1b[97;5u"), "ctrl+a");
+  assert.equal(keyOf("\x1b[27u"), "escape");
+  assert.deepEqual(parse("\x1b[115;65u").events, [{ type: "text", text: "s" }]); // caps lock alone still types
+  assert.deepEqual(parse("\x1b[115;9:3u").events, []); // release
+  assert.deepEqual(parse("\x1b[57441;2u").events, []); // a lone modifier key
+});
+
+test("function keys, Shift+F10, the menu key and focus reports", () => {
+  assert.equal(keyOf("\x1b[24~"), "f12");
+  assert.equal(keyOf("\x1b[24;9~"), "cmd+f12");
+  assert.equal(keyOf("\x1b[24;4~"), "alt+shift+f12");
+  assert.equal(keyOf("\x1b[21;2~"), "shift+f10");
+  assert.equal(keyOf("\x1b[57363u"), "menu");
+  assert.equal(keyOf("\x1bOQ"), "f2");
+  assert.deepEqual(parse("\x1b[I\x1b[O").events, [{ type: "focus", focused: true }, { type: "focus", focused: false }]);
+  assert.deepEqual(parse("\x1b[<2;10;5M").events[0], { type: "mouse", button: 2, x: 10, y: 5, release: false, motion: false, shift: false, alt: false, ctrl: false });
+  assert.equal(parse("\x1b[115;9").rest, "\x1b[115;9"); // split sequence waits for the rest
+});
