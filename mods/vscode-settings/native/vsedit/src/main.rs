@@ -1,19 +1,21 @@
 //! vsedit: the terminal editor of the herdr-layout-vscode mods (mods/vscode-viewer/editor/vsedit.cjs) in Rust.
 //! usage: vsedit <file> [--close-on-exit] [--vscode <dir>] [--fallback <vsedit.cjs>]
-//! When it can't take the file (no grammars, or a part still JS-only: binary files, the error page) it execs
-//! `node <vsedit.cjs>` with the same arguments before touching the terminal (the launcher, vsedit.sh, passes the
-//! path); without --fallback it exits 86 then.
+//! When it can't start (no grammars, no raw mode) it execs `node <vsedit.cjs>` with the same arguments before
+//! touching the terminal (the launcher, vsedit.sh, passes the path); without --fallback it exits 86 then.
 
+mod app;
 mod autoclose;
 mod backup;
 mod buffer;
 mod commands;
 mod decorations;
 mod editor;
+mod errorpage;
 mod file;
 mod find;
 mod folding;
 mod gitgutter;
+mod hexview;
 mod highlight;
 mod keys;
 mod language;
@@ -109,14 +111,82 @@ fn main() {
         .and_then(|t| t.get("colors").cloned())
         .unwrap_or(serde_json::Value::Null);
 
-    // Binary files and files that can't be opened stay with the JS editor (its hex viewer and error page).
-    let doc = match file::load(&file, false) {
-        Ok(Ok(doc)) => doc,
-        Ok(Err(_)) => fallback("binary or too large"),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound && !term::close_on_exit() => file::Doc::empty(),
-        Err(_) => fallback("cannot open the file"),
-    };
-    run(file, doc, vscode, index, &colors);
+    let Ok(mut term) = Term::new() else { fallback("no raw mode") };
+    let doc = open(&mut term, &file, &paint::Palette::of(&colors));
+    let hl = Highlight::start(vscode, term::wake);
+    let mut ed = Editor::new(file.clone(), doc, hl, index, &colors);
+    let message = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let m = message.clone();
+    std::panic::set_hook(Box::new(move |info| {
+        let text = info.payload().downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| info.payload().downcast_ref::<String>().cloned()).unwrap_or_default();
+        *m.lock().unwrap() = format!("{text}{}", info.location().map(|l| format!(" ({}:{})", l.file(), l.line())).unwrap_or_default());
+    }));
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&mut term, &mut ed))).is_err() {
+        // a crash: unsaved text to a backup, then the error page; Try Again starts the editor again in this terminal
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ed.hot_exit()));
+        leave(&mut term);
+        let reason = format!("vsedit crashed: {}", message.lock().map(|m| m.clone()).unwrap_or_default());
+        let mut page = errorpage::ErrorPage::new(&file, &reason, editor::breadcrumbs(&file), ed.c.clone());
+        if app::run(&mut term, &mut page) == errorpage::Choice::Retry {
+            term.restore();
+            use std::os::unix::process::CommandExt;
+            let e = std::process::Command::new(std::env::current_exe().unwrap_or_default()).args(std::env::args().skip(1)).exec();
+            eprintln!("vsedit: {e}");
+        }
+        close(&mut term, &file, &reason);
+    }
+}
+
+/// The document to edit: binary files go to the hex viewer (after asking, unless the name says binary; Open Anyway
+/// decodes them as text), files that can't be opened to the error page (Try Again comes back here).
+fn open(term: &mut Term, file: &Path, c: &paint::Palette) -> file::Doc {
+    loop {
+        let crumbs = editor::breadcrumbs(file);
+        let named = hexview::binary_name(file);
+        let reason = match if named { Ok(Err(file::Refusal::Binary)) } else { file::load(file, false) } {
+            Ok(Ok(doc)) => return doc,
+            Ok(Err(file::Refusal::Binary)) => match hex(term, file, !named, crumbs.clone(), c) {
+                Ok(()) => match file::load(file, true) {
+                    Ok(Ok(doc)) => return doc,
+                    Ok(Err(r)) => r.message(),
+                    Err(e) => errorpage::reason_of(&e),
+                },
+                Err(e) => errorpage::reason_of(&e),
+            },
+            Ok(Err(r)) => r.message(),
+            // started by hand, a missing file is a new one; the Explorer only opens files that exist
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && !term::close_on_exit() => return file::Doc::empty(),
+            Err(e) => errorpage::reason_of(&e),
+        };
+        let mut page = errorpage::ErrorPage::new(file, &reason, crumbs, c.clone());
+        if app::run(term, &mut page) == errorpage::Choice::Close {
+            close(term, file, &reason);
+        }
+    }
+}
+
+/// The hex viewer (after the binary prompt when `ask`): Ok when the user picked Open Anyway; quitting exits.
+fn hex(term: &mut Term, file: &Path, ask: bool, crumbs: Vec<String>, c: &paint::Palette) -> std::io::Result<()> {
+    let reader = hexview::Reader::open(file)?;
+    if ask {
+        match app::run(term, &mut hexview::BinaryPrompt::new(crumbs.clone(), c.clone())) {
+            None => exit(0),
+            Some(hexview::Choice::Text) => return Ok(()),
+            Some(hexview::Choice::Hex) => {}
+        }
+    }
+    app::run(term, &mut hexview::HexView::new(reader, crumbs, c.clone()))?;
+    term.restore();
+    exit(0)
+}
+
+/// Close on the error page: the tab closes when the Explorer opened it; otherwise one line on stderr.
+fn close(term: &mut Term, file: &Path, reason: &str) -> ! {
+    term.restore();
+    if !term::close_on_exit() {
+        eprintln!("vsedit: {}: {reason}", file.file_name().map(|n| n.to_string_lossy()).unwrap_or_default());
+    }
+    exit(1)
 }
 
 /// The path with `.` and `..` resolved lexically (as path.resolve does).
@@ -134,10 +204,7 @@ fn normalize(p: &Path) -> PathBuf {
     out
 }
 
-fn run(file: PathBuf, doc: file::Doc, vscode: PathBuf, index: serde_json::Value, colors: &serde_json::Value) {
-    let hl = Highlight::start(vscode, term::wake);
-    let mut ed = Editor::new(file, doc, hl, index, colors);
-    let Ok(mut term) = Term::new() else { fallback("no raw mode") };
+fn run(term: &mut Term, ed: &mut Editor) {
     term.write(&format!("{}\x1b]12;{}\x07", term::ENTER, ed.c.cursor));
     term::right_clicks_to("program", false);
     if let Some(e) = ed.keys.error.clone() {
@@ -153,12 +220,12 @@ fn run(file: PathBuf, doc: file::Doc, vscode: PathBuf, index: serde_json::Value,
     ed.offer_backup();
     let scope = ed.scope.clone();
     ed.hl.reset(scope.as_deref(), &ed.buf.lines);
-    draw(&mut ed, &mut term); // the text at once, uncolored
+    draw(ed, term); // the text at once, uncolored
     let (top, rows) = (ed.top, ed.height());
     let lines = std::mem::take(&mut ed.buf.lines);
     ed.hl.wait(&lines, Instant::now() + Duration::from_millis(1000), |h| h.has_lines(top, top + rows));
     ed.buf.lines = lines;
-    draw(&mut ed, &mut term); // the first colored screen waits for its colors
+    draw(ed, term); // the first colored screen waits for its colors
 
     let mut pending = String::new();
     let mut raw: Vec<u8> = vec![];
@@ -167,11 +234,11 @@ fn run(file: PathBuf, doc: file::Doc, vscode: PathBuf, index: serde_json::Value,
     loop {
         let sig = term::SIGNAL.load(std::sync::atomic::Ordering::Relaxed);
         if sig != 0 {
-            quit(&ed, &mut term, 128 + sig);
+            quit(ed, term, 128 + sig);
         }
         let deadline = [ed.deadline(), Some(next_poll), escape_at].into_iter().flatten().min();
         let timeout = deadline.map(|d| d.saturating_duration_since(Instant::now()));
-        let Some(chunk) = term.read(timeout) else { quit(&ed, &mut term, 129) };
+        let Some(chunk) = term.read(timeout) else { quit(ed, term, 129) };
         let mut changed = false;
         if !chunk.is_empty() {
             term::log_input(&chunk);
@@ -195,7 +262,7 @@ fn run(file: PathBuf, doc: file::Doc, vscode: PathBuf, index: serde_json::Value,
                         }
                     }
                     None => {
-                        ed.handle(&ev, &mut term);
+                        ed.handle(&ev, term);
                         ed.after_event();
                         changed = true;
                     }
@@ -206,7 +273,7 @@ fn run(file: PathBuf, doc: file::Doc, vscode: PathBuf, index: serde_json::Value,
             // a split escape sequence that never completed was a plain Esc
             escape_at = None;
             pending.clear();
-            ed.handle(&keys::key("escape"), &mut term);
+            ed.handle(&keys::key("escape"), term);
             changed = true;
         }
         if term::take_resized() {
@@ -221,11 +288,11 @@ fn run(file: PathBuf, doc: file::Doc, vscode: PathBuf, index: serde_json::Value,
             changed |= ed.poll_files();
         }
         if let Some(code) = ed.exit {
-            leave(&mut term);
+            leave(term);
             exit(code);
         }
         if changed {
-            draw(&mut ed, &mut term);
+            draw(ed, term);
         }
     }
 }

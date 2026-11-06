@@ -37,6 +37,7 @@ pub fn blend(c: Option<&str>, under: &str) -> Color {
     out
 }
 
+#[derive(Clone)]
 pub struct Palette {
     pub bg: Color,
     pub fg: Color,
