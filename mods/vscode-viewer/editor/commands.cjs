@@ -56,6 +56,7 @@ const RUNS = {
   "editor.action.changeAll": ["changeAll"],
   "editor.action.formatDocument": ["formatDocument", [], "format"],
   "editor.action.formatSelection": ["formatSelection"],
+  "editor.action.quickFix": ["quickFix"],
   "editor.action.smartSelect.expand": ["smartSelect", [1]],
   "editor.action.smartSelect.shrink": ["smartSelect", [-1]],
   "cursorUndo": ["cursorHistory", [-1]],

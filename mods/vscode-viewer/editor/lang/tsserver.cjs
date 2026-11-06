@@ -34,12 +34,12 @@ function wsEdit(fileEdits) {
 // syntaxDiag / semanticDiag event bodies -> the LSP shape (see lsp.cjs diagnosticsOf); suggestions count as hints.
 const SEVERITY = { error: 1, warning: 2, message: 3, suggestion: 4 };
 const tsDiagnostics = (list) => (list ?? []).filter(d => d?.start && d.text).map(d => ({ start: toPos(d.start), end: toPos(d.end ?? d.start),
-  severity: SEVERITY[d.category] ?? 1, message: d.text, source: d.code != null ? `ts(${d.code})` : "ts" }));
+  severity: SEVERITY[d.category] ?? 1, message: d.text, source: d.code != null ? `ts(${d.code})` : "ts", code: d.code }));
 const EMPTY = /no content|could not find|cannot|not found/i;
 
 class TsServer {
   static CAPS = ["definition", "typeDefinition", "implementation", "references", "rename", "format", "refactor", "source", "callHierarchy", "symbols",
-    "selectionRange", "formatRange"];
+    "quickFix", "selectionRange", "formatRange"];
   label = "TypeScript server";
 
   constructor(file, root) {
@@ -111,6 +111,15 @@ class TsServer {
         if (a.notApplicableReason) continue;
         out.push({ title: a.description, resolve: async () => wsEdit((await this.request("getEditsForRefactor", { ...args, refactor: r.name, action: a.name }))?.edits) });
       }
+    }
+    return out;
+  }
+  // Quick fixes for ctx.diagnostics (the ones with a TypeScript error code): [{ title, kind, resolve }].
+  async quickFixes(ctx) {
+    const out = [], seen = new Set();
+    for (const d of (ctx.diagnostics ?? []).filter(d => d.code != null).slice(0, 20)) {
+      const fixes = await this.list("getCodeFixes", { file: ctx.file, startLine: d.start.line + 1, startOffset: d.start.col + 1, endLine: d.end.line + 1, endOffset: d.end.col + 1, errorCodes: [d.code] });
+      for (const f of fixes) if (!seen.has(f.description)) { seen.add(f.description); out.push({ title: f.description, kind: "quickfix", resolve: async () => wsEdit(f.changes) }); }
     }
     return out;
   }

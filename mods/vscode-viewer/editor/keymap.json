@@ -18,6 +18,7 @@
     {"id":"editor.action.formatSelection","title":"Format Selection","keys":{"mac":["cmd+k cmd+f"],"win":["ctrl+k ctrl+f"],"linux":["ctrl+k ctrl+f"]}},
     {"id":"editor.action.refactor","title":"Refactor...","keys":{"mac":["ctrl+shift+r"],"win":["ctrl+shift+r"],"linux":["ctrl+shift+r"]}},
     {"id":"editor.action.sourceAction","title":"Source Action...","keys":{"mac":[],"win":[],"linux":[]}},
+    {"id":"editor.action.quickFix","title":"Quick Fix...","keys":{"mac":["cmd+."],"win":["ctrl+."],"linux":["ctrl+."]}},
     {"id":"editor.action.clipboardCutAction","title":"Cut","keys":{"mac":["cmd+x"],"win":["ctrl+x","shift+delete"],"linux":["ctrl+x","shift+delete"]}},
     {"id":"editor.action.clipboardCopyAction","title":"Copy","keys":{"mac":["cmd+c"],"win":["ctrl+c","ctrl+insert"],"linux":["ctrl+c","ctrl+insert"]}},
     {"id":"editor.action.clipboardPasteAction","title":"Paste","keys":{"mac":["cmd+v"],"win":["ctrl+v","shift+insert"],"linux":["ctrl+v","shift+insert"]}},

@@ -847,13 +847,14 @@ const { tsDiagnostics } = require("../lang/tsserver.cjs");
 
 test("diagnostics: LSP publishDiagnostics and tsserver's diag events become the same shape", () => {
   const r = { start: { line: 1, character: 2 }, end: { line: 1, character: 5 } };
-  assert.deepEqual(diagnosticsOf({ diagnostics: [{ range: r, severity: 2, message: "unused", source: "rustc", code: "E1" }, { range: r, message: "no severity" }, { message: "no range" }] }), [
-    { start: { line: 1, col: 2 }, end: { line: 1, col: 5 }, severity: 2, message: "unused", source: "rustc(E1)" },
-    { start: { line: 1, col: 2 }, end: { line: 1, col: 5 }, severity: 1, message: "no severity", source: "" }]);
+  const lsp = [{ range: r, severity: 2, message: "unused", source: "rustc", code: "E1" }, { range: r, message: "no severity" }, { message: "no range" }];
+  assert.deepEqual(diagnosticsOf({ diagnostics: lsp }), [ // raw: the server's own, for its code action requests
+    { start: { line: 1, col: 2 }, end: { line: 1, col: 5 }, severity: 2, message: "unused", source: "rustc(E1)", raw: lsp[0] },
+    { start: { line: 1, col: 2 }, end: { line: 1, col: 5 }, severity: 1, message: "no severity", source: "", raw: lsp[1] }]);
   assert.deepEqual(tsDiagnostics([{ start: { line: 1, offset: 19 }, end: { line: 1, offset: 26 }, text: "Cannot find module", code: 2307, category: "error" },
     { start: { line: 3, offset: 1 }, end: { line: 3, offset: 2 }, text: "unused", code: 6133, category: "suggestion" }]), [
-    { start: { line: 0, col: 18 }, end: { line: 0, col: 25 }, severity: 1, message: "Cannot find module", source: "ts(2307)" },
-    { start: { line: 2, col: 0 }, end: { line: 2, col: 1 }, severity: 4, message: "unused", source: "ts(6133)" }]);
+    { start: { line: 0, col: 18 }, end: { line: 0, col: 25 }, severity: 1, message: "Cannot find module", source: "ts(2307)", code: 2307 },
+    { start: { line: 2, col: 0 }, end: { line: 2, col: 1 }, severity: 4, message: "unused", source: "ts(6133)", code: 6133 }]);
 });
 
 const withProblems = async (lines, list) => {
@@ -1272,4 +1273,48 @@ test("Format Selection uses the range formatter, else restricts the document for
   await ed.runCommand("editor.action.formatSelection");
   assert.match(ed.message.text, /No format selection support for Plain Text/);
   assert.equal(K.resolve([], "linux").byChord.get("ctrl+k ctrl+f"), "editor.action.formatSelection");
+});
+
+// ---------- medium batch: Quick Fix ----------
+const tick = () => new Promise(r => setTimeout(r, 5));
+
+test("Quick Fix (⌘.) lists the fixes for the problem at the cursor, preferred first, then the refactorings, and applies one", async () => {
+  const p = problem(0, 8, 0, 9, 1, "Cannot find name 'b'.");
+  const ed = await withProblems(["let a = b;"], [p]);
+  const asked = [];
+  const fix = (title, preferred) => ({ title, kind: "quickfix", preferred, resolve: async () => ({ [ed.file]: [{ start: { line: 0, col: 8 }, end: { line: 0, col: 9 }, text: "c" }] }) });
+  ed.session = stubSession({ quickFixes: async (ctx) => { asked.push(ctx); return [fix("Change spelling"), fix("Declare 'b'", true)]; },
+    refactors: async () => [{ title: "Extract to constant", resolve: async () => ({}) }] }, ["quickFix", "refactor"], [p]);
+  ed.moveTo({ line: 0, col: 8 });
+  await press(ed, ".", { cmd: true });
+  assert.deepEqual(asked[0].diagnostics, [p]);
+  assert.deepEqual(ed.popup.rows.map(r => r.sep ? "-" : r.title), ["Declare 'b'", "Change spelling", "-", "Extract to constant"]);
+  assert.equal(ed.popup.index, 0);
+  press(ed, "down"); press(ed, "enter");
+  await tick();
+  assert.deepEqual(ed.lines, ["let a = c;"]);
+});
+
+test("Quick Fix away from a problem on the line takes the nearest one and its range; nothing at all says so", async () => {
+  const p = problem(0, 8, 0, 9, 1, "Cannot find name 'b'.");
+  const ed = await withProblems(["let a = b;"], [p]);
+  let asked;
+  ed.session = stubSession({ quickFixes: async (ctx) => { asked = ctx; return []; }, refactors: async () => [] }, ["quickFix", "refactor"], [p]);
+  ed.moveTo({ line: 0, col: 1 });
+  await ed.runCommand("editor.action.quickFix");
+  assert.deepEqual(asked.diagnostics, [p]);
+  assert.deepEqual(asked.sel, { start: p.start, end: p.end });
+  assert.equal(ed.message.text, "No code actions available");
+  assert.equal(K.resolve([], "win").byChord.get("ctrl+."), "editor.action.quickFix");
+});
+
+test("the light bulb shows in the gutter of the cursor line once its problems have quick fixes", async () => {
+  const p = problem(0, 8, 0, 9, 1, "Cannot find name 'b'.");
+  const ed = await withProblems(["let a = b;", "ok"], [p]);
+  ed.session = stubSession({ quickFixes: async () => [{ title: "Declare 'b'" }] }, ["quickFix"], [p]);
+  assert.doesNotMatch(ed.render(0).out, /◆/);
+  await new Promise(r => setTimeout(r, 300));
+  assert.match(ed.render(0).out, /\x1b\[2;1H(?:\x1b\[[\d;]*m)*◆/, "no light bulb on line 1");
+  ed.moveTo({ line: 1, col: 0 });
+  assert.doesNotMatch(ed.render(0).out, /◆/, "a line without problems has none");
 });

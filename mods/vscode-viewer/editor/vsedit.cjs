@@ -796,12 +796,12 @@ class Editor {
     if (from >= to && d.start.line === d.end.line) { if (from < text.length) to = from + 1; else { from = Math.max(0, text.length - 1); to = text.length; } }
     return from < to ? { from, to } : null;
   }
-  // The most severe problem at the cursor (its range, ends included).
-  problemAtCursor() {
-    const { line, col } = this.head;
+  // The problems at p (their ranges, ends included), the most severe first.
+  problemsAt({ line, col }) {
     return this.problems().filter(d => { const s = Editor.problemSpan(d, line, this.lines[line]); return s && col >= s.from && col <= s.to; })
-      .sort((a, b) => a.severity - b.severity)[0] ?? null;
+      .sort((a, b) => a.severity - b.severity);
   }
+  problemAtCursor() { return this.problemsAt(this.head)[0] ?? null; }
   // F8 / ⇧F8: the next / previous problem's start (wrapping); its message shows in the status bar.
   nextProblem(dir) {
     const ps = this.problems();
@@ -1118,13 +1118,54 @@ class Editor {
       if (!stale()) this.applyLocalEdits(edits);
     })());
   }
+  // A code action's edit applied (its resolve() gives the workspace edit), files it couldn't change reported.
+  applyAction(a) { return this.track(a.resolve().then(ws => { const r = this.applyEdit(ws); if (r.failed.length) this.reportEdit(r, "Applied"); })); }
   codeActions(kind) {
     return this.track(this.lang.run(kind, kind === "refactor" ? "refactors" : "sourceActions", this.langCtx()).then(list => {
       if (!list.length) return this.say(kind === "refactor" ? "No refactorings available" : "No source actions available", this.colors.warn);
-      this.popup = new O.Picker("", (t) => C.filter(list, t, a => a.title).map(({ item, hits }) => ({ label: item.title, hits,
-        run: () => this.track(item.resolve().then(ws => { const r = this.applyEdit(ws); if (r.failed.length) this.reportEdit(r, "Applied"); })) })),
-      kind === "refactor" ? "Select a refactoring" : "Select a source action");
+      this.popup = new O.Picker("", (t) => C.filter(list, t, a => a.title).map(({ item, hits }) => ({ label: item.title, hits, run: () => this.applyAction(item) })),
+        kind === "refactor" ? "Select a refactoring" : "Select a source action");
     }));
+  }
+  // The problems a quick fix is for: those at the cursor, else the nearest one on its line (VS Code's
+  // editor.codeActionWidget.includeNearbyQuickFixes); the request covers that problem when nothing is selected.
+  quickFixCtx() {
+    const ctx = this.langCtx(), { line, col } = this.head, at = this.problemsAt(this.head);
+    const dist = (d) => Math.abs((d.start.line === line ? d.start.col : 0) - col);
+    const near = at.length ? at : this.problems().filter(d => d.start.line <= line && d.end.line >= line).sort((x, y) => dist(x) - dist(y)).slice(0, 1);
+    if (!at.length && near.length && this.empty) ctx.sel = { start: near[0].start, end: near[0].end };
+    return { ...ctx, diagnostics: near };
+  }
+  // Quick Fix (⌘.): a menu at the cursor of the fixes for its problems (preferred first), then the refactorings.
+  quickFix() {
+    const ctx = this.quickFixCtx(), buf = this.buf, version = buf.version;
+    return this.track((async () => {
+      const fixes = ctx.diagnostics.length && this.lang.can("quickFix") ? await this.lang.run("quickFix", "quickFixes", ctx) : [];
+      const refactors = this.lang.can("refactor") ? await this.lang.run("refactor", "refactors", ctx).catch(() => []) : [];
+      if (this.buf !== buf || buf.version !== version) return;
+      const row = (a) => ({ id: null, title: a.title, key: "", enabled: true, run: () => this.applyAction(a) });
+      const rows = [...[...fixes].sort((x, y) => !!y.preferred - !!x.preferred).map(row), ...(fixes.length && refactors.length ? [{ sep: true }] : []), ...refactors.map(row)];
+      if (!rows.length) return this.say("No code actions available", this.colors.warn);
+      const s = this.screenOf(this.head);
+      this.popup = new O.Menu(rows, Math.max(1, s.col), Math.min(this.rows, s.row + 1));
+      this.popup.index = C.stepMenu(rows, -1, 1);
+    })());
+  }
+  // The light bulb's line (-1: none): the cursor line once its problems' quick fixes came back non-empty. They are asked
+  // WORD_DELAY ms after the cursor line, its problems or the text last changed, and only from a running language server.
+  lightBulbLine() {
+    const line = this.head.line, diags = this.problems().filter(d => d.start.line <= line && d.end.line >= line);
+    const key = `${this.buf.version}:${line}:${diags.length}`, lb = this.bulb;
+    if (lb?.buf === this.buf && lb.key === key) return lb.fixes ? line : -1;
+    const bulb = this.bulb = { buf: this.buf, key, fixes: false };
+    clearTimeout(this.bulbTimer);
+    if (!diags.length || !this.session || !this.lang.can("quickFix")) return -1;
+    (this.bulbTimer = setTimeout(() => {
+      if (this.bulb !== bulb || this.done) return;
+      const ctx = { ...this.langCtx(), diagnostics: diags, sel: { start: { line, col: 0 }, end: { line, col: this.lines[line].length } } };
+      this.lang.run("quickFix", "quickFixes", ctx).then(f => { if (this.bulb === bulb && f.length) { bulb.fixes = true; this.redraw(); } }, () => {});
+    }, WORD_DELAY)).unref?.();
+    return -1;
   }
 
   // ----- folding -----
@@ -1399,7 +1440,7 @@ class Editor {
     if (this.outline?.version !== this.buf.version) this.queueOutline();
     const problems = this.problems();
     this.git.start();
-    const changes = G.marksFor(this.git.hunks, this.top, end - 1), ranges = this.gutterHover ? this.foldRanges() : null;
+    const changes = G.marksFor(this.git.hunks, this.top, end - 1), ranges = this.gutterHover ? this.foldRanges() : null, bulb = this.lightBulbLine();
     let mi = 0, hi = 0;
 
     // breadcrumbs
@@ -1416,7 +1457,7 @@ class Editor {
       const spans = []; // this line's squiggles, the most severe first
       for (const d of problems) { if (d.start.line > l) break; const s = Editor.problemSpan(d, l, this.lines[l]); if (s) spans.push({ ...s, color: c.diag[d.severity], severity: d.severity }); }
       spans.sort((a, b) => a.severity - b.severity);
-      this.paintGutter(P, l, active, changes.get(l), spans[0]?.color, folded ? "›" : ranges && FD.rangeAt(ranges, l) ? "⌄" : " ");
+      this.paintGutter(P, l, active, changes.get(l), l === bulb ? c.lightBulb : spans[0]?.color, folded ? "›" : ranges && FD.rangeAt(ranges, l) ? "⌄" : " ", l === bulb ? "◆" : "●");
       const lineBg = active && empty ? c.currentLine : folded ? c.foldBackground : c.bg;
       while (mi < ms.length && ms[mi].line < l) mi++;
       const lineMatches = [];
@@ -1519,11 +1560,11 @@ class Editor {
     }
     return this._hits;
   }
-  // The gutter, `gutter` cells: a problem's mark `●` in the glyph margin (the first column, `mark` its color), the line
-  // number, the git change bar (or a deletion marker), the fold chevron.
-  paintGutter(P, l, active, change, mark = null, fold = " ") {
+  // The gutter, `gutter` cells: a problem's mark `●` or the light bulb `◆` in the glyph margin (the first column, `mark`
+  // its color), the line number, the git change bar (or a deletion marker), the fold chevron.
+  paintGutter(P, l, active, change, mark = null, fold = " ", glyph = "●") {
     const c = this.colors;
-    P.text(mark ? "●" : " ", mark ?? c.lineNumber, c.bg);
+    P.text(mark ? glyph : " ", mark ?? c.lineNumber, c.bg);
     P.text(String(l + 1).padStart(this.gutter - 3), active ? c.lineNumberActive : c.lineNumber, c.bg);
     P.text(GIT_GLYPHS[change] ?? " ", change ? c[GIT_COLORS[change]] : c.fg, c.bg);
     P.text(fold, c.foldControl, c.bg);

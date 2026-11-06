@@ -30,15 +30,16 @@ function workspaceEdit(we) {
   return ws;
 }
 
-// publishDiagnostics params -> [{ start, end, severity (1 error, 2 warning, 3 information, 4 hint), message, source }]
+// publishDiagnostics params -> [{ start, end, severity (1 error, 2 warning, 3 information, 4 hint), message, source, raw }]
+// (raw: the server's own diagnostic, given back with code action requests)
 function diagnosticsOf(params) {
   return (params?.diagnostics ?? []).filter(d => d?.range && d.message).map(d => ({ start: pos(d.range.start), end: pos(d.range.end),
-    severity: d.severity >= 1 && d.severity <= 4 ? d.severity : 1, message: String(d.message), source: d.source ? `${d.source}${d.code != null ? `(${d.code})` : ""}` : "" }));
+    severity: d.severity >= 1 && d.severity <= 4 ? d.severity : 1, message: String(d.message), source: d.source ? `${d.source}${d.code != null ? `(${d.code})` : ""}` : "", raw: d }));
 }
 
 const OPS = { definition: "definitionProvider", typeDefinition: "typeDefinitionProvider", implementation: "implementationProvider",
   references: "referencesProvider", rename: "renameProvider", format: "documentFormattingProvider", refactor: "codeActionProvider",
-  source: "codeActionProvider", callHierarchy: "callHierarchyProvider", symbols: "documentSymbolProvider",
+  source: "codeActionProvider", callHierarchy: "callHierarchyProvider", symbols: "documentSymbolProvider", quickFix: "codeActionProvider",
   selectionRange: "selectionRangeProvider", formatRange: "documentRangeFormattingProvider" };
 const METHOD_OP = { "textDocument/definition": "definition", "textDocument/typeDefinition": "typeDefinition", "textDocument/implementation": "implementation",
   "textDocument/references": "references", "textDocument/rename": "rename", "textDocument/formatting": "format", "textDocument/codeAction": "refactor",
@@ -135,11 +136,14 @@ class Lsp {
       range: { start: lspPos(ctx.sel.start), end: lspPos(ctx.sel.end) }, options: { tabSize: ctx.tabSize, insertSpaces: ctx.insertSpaces } });
     return r && edits(r);
   }
+  // Code actions of `kind` for the selection, ctx.diagnostics (the server's own) as their context: [{ title, kind, preferred, resolve }].
   async actions(ctx, kind) {
     const list = await this.call("textDocument/codeAction", {
-      textDocument: { uri: uri(ctx.file) }, range: { start: lspPos(ctx.sel.start), end: lspPos(ctx.sel.end) }, context: { diagnostics: [], only: [kind] },
+      textDocument: { uri: uri(ctx.file) }, range: { start: lspPos(ctx.sel.start), end: lspPos(ctx.sel.end) },
+      context: { diagnostics: (ctx.diagnostics ?? []).map(d => d.raw).filter(Boolean), only: [kind], triggerKind: 1 },
     }) ?? [];
-    return list.filter(a => !a.disabled && (!a.kind || a.kind.startsWith(kind) || a.command)).map(a => ({ title: a.title, resolve: () => this.resolveAction(a) }));
+    return list.filter(a => !a.disabled && (!a.kind || a.kind.startsWith(kind) || a.command))
+      .map(a => ({ title: a.title, kind: a.kind ?? kind, preferred: !!a.isPreferred, resolve: () => this.resolveAction(a) }));
   }
   // An action's edit, resolving it or running its command (the server then sends workspace/applyEdit).
   async resolveAction(a) {
@@ -152,6 +156,7 @@ class Lsp {
   }
   refactors(ctx) { return this.actions(ctx, "refactor"); }
   sourceActions(ctx) { return this.actions(ctx, "source"); }
+  quickFixes(ctx) { return this.actions(ctx, "quickfix"); }
   // Innermost first.
   async selectionRanges(ctx) {
     const out = [];

@@ -1,5 +1,5 @@
-// Editor overlays drawn over the text: context menu, quick pick (files / commands), input box, modal dialog,
-// results panel (references, implementations, calls) and the peek box. Each has render(P, ed), key(ev, ed) and
+// Editor overlays drawn over the text: context menu (also the quick fix menu), quick pick (files / commands), input box,
+// modal dialog, results panel (references, implementations, calls) and the peek box. Each has render(P, ed), key(ev, ed) and
 // mouse(ev, ed); key/mouse return true when they consumed the event. They act on the editor only through its methods.
 const path = require("path");
 const W = require("./width.cjs");
@@ -57,7 +57,7 @@ class Menu {
     if (!r || r.sep || !r.enabled) return;
     if (r.submenu) return this.openSub(ed);
     ed.closePopup();
-    ed.runCommand(r.id);
+    if (r.run) r.run(); else ed.runCommand(r.id);
   }
   key(ev, ed) {
     if (this.sub) {
