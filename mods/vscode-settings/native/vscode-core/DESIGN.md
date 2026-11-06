@@ -195,3 +195,133 @@ Cargo workspace, `Cargo.lock` and `install.sh`. No clone, no network for the sou
 
 Prebuilt binaries can come later as `install.sh --prebuilt` (download the release asset for
 `uname -sm`, verify its SHA-256, same install path), with the `--version` handshake guarding skew.
+
+## Editor on Rust: phase 1 (tokenizer)
+
+Goal: a Rust tokenizer that gives exactly the tokens and colors of the viewer/editor's JS path
+(vscode-textmate 9.3.2 + vscode-oniguruma 1.7.0 + the bundled grammars + One Dark), and a number
+for whether moving the editor to Rust pays off.
+
+### What exists
+
+- Crate `vscode-textmate` (library, beside `vscode-core`): `Registry::new(theme, loader)`,
+  `load_grammar(scope)`, `Grammar::tokenize_line2(line, prev, time_limit)` → UTF-16 token offsets
+  with the same encoded metadata, `StateStack::equals`, `color_map()`. Modules follow the JS files:
+  `onig.rs` (vscode-oniguruma's scanner), `raw.rs` (JSON/plist grammars, JSONC theme), `rule.rs`,
+  `grammar.rs` (rule factory, scope/state stacks, `_tokenizeString`), `registry.rs` (dependency
+  closure), `theme.rs`, `matcher.rs`, `file.rs` (tokenize.cjs).
+- `vscode-core tokenize <file> [maxLines] [--vscode <dir>] [--stack]` prints tokenize.cjs's JSON
+  (`{scope, total, eol, indent, colors, lines, theme}`); `--stack` adds the final rule stack.
+  `--vscode` defaults to `<herdr home>/mods/vscode-viewer/vscode` next to the installed binary.
+- `tests/parity.mjs` (vs the unchanged tokenize.cjs; a preload hook records the JS rule stack),
+  `tests/bench.mjs` and `examples/bench.rs`.
+
+### How it stays identical
+
+- **Same regex engine and options.** `onig_sys = "=69.8.1"` bundles Oniguruma 6.9.8, the release
+  vscode-oniguruma 1.7.0 pins (`deps/oniguruma` at "setup 6.9.8"); 69.9.x bundles 6.9.10, hence the
+  pin. Patterns are compiled with `ONIG_OPTION_CAPTURE_GROUP`, UTF-8, `ONIG_SYNTAX_DEFAULT`. The
+  scanner is `onig.cc` line for line: a RegSet (position lead) for strings under 1,000 bytes, else
+  regex by regex with the per-regex result cache keyed by string id, skipped for patterns with `\G`.
+- **Offsets.** The engine works in UTF-8 bytes; vscode-textmate in UTF-16 units. Every match lands
+  on a character boundary, so the tokenizer runs on byte offsets and converts token starts to UTF-16
+  once per line (`tokenize_line2` returns what the JS returns). Unmatched groups stay -1 (the JS
+  maps them to 0 on non-ASCII lines; both have length 0 and are skipped the same way).
+- **Same rule ids.** vscode-textmate stores compiled ids on the raw rule objects and deep-clones a
+  grammar per use (`initGrammar`); the port keeps both (`Rc` rules with an id cell, a fresh tree per
+  grammar, `$base` shared by identity) and walks capture/injection keys in JavaScript `for…in` order,
+  so the rule stacks match id for id, not just token for token.
+- **Same grammar closure.** `ScopeDependencyProcessor` is ported as is (captures' patterns are not
+  walked, as in the JS), so the same includes resolve or stay unresolved.
+- **Theme.** Same sort (stable, UTF-16 comparison), trie, parent-scope matching and color-id order,
+  so the metadata's color indexes match `getColorMap()`.
+- Left out because the viewer does not use them: injection grammars contributed through
+  `getInjections` (the viewer passes none; a grammar's own `injections` work), embedded-language
+  ids, token-type overrides, balanced brackets, fonts (`LineFonts`). `Registry::load_grammar`
+  returns a new `Grammar` per call where the JS caches one; tokens are the same.
+
+### Parity (`tests/parity.mjs`)
+
+Every language with an extension in index.json: real files from /Volumes/exusb/project (plus
+/opt/homebrew, /usr/share, /usr/local for languages the projects lack), up to 20 per language (the
+first found, the 3 largest, 3 minified bundles for JS; skipping node_modules/.git/build/dist/target),
+and 10 synthetic cases per language: empty, newlines only, CRLF and lone CR, tabs + Hangul/emoji/
+astral/ZWJ, RTL (token merging off), unterminated strings/comments/heredocs across lines, lines of
+1,000+ bytes (the per-regex path), 3,999- and 5,000-unit lines (the 4,000 cut), BOM + invalid UTF-8.
+Compared: every line's runs (text, color, font style), scope/total/eol/indent/colors/theme, and the
+end rule stack (rule ids, end patterns, content scopes and their attributes — what `equals` uses).
+
+Result: **1,655/1,655 files identical (965 real, 690 synthetic) in 69 languages, 100% in each.**
+Languages with no real file on this machine, so covered by the synthetic set only: Clojure,
+CoffeeScript (only under node_modules), HLSL, Julia, Raku, R, RELAX NG, ShaderLab, BibTeX, Razor,
+Handlebars, Pug, code-search, WebAssembly text, code-snippets. A sabotaged binary (one font style
+changed) is reported as a mismatch with the line and both rows.
+
+### Measured (this Mac, USB disk; `tests/bench.mjs`, median of 5 for a–c)
+
+cold = a whole process (start, grammar load, regex compile, tokenize, JSON out): `node tokenize.cjs`
+vs `vscode-core tokenize`; for (c), which both CLIs skip (lines over 4,000 units), the bench programs
+in the editor's 1,000-unit `LongLine` chunks. warm = tokenizing the same lines again in process, with
+the grammar loaded and its regexes compiled.
+
+| Input | cold JS | cold Rust | × | warm JS | warm Rust | × |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| (a) TS, 2,000 lines | 420 ms | 247 ms | 1.7 | 72 ms | 54 ms | 1.3 |
+| (b) TS, 20,000 lines | 2.70 s | 2.18 s | 1.2 | 2.27 s | 1.80 s | 1.3 |
+| (c) 500 KB one-line minified JS, chunked | 7.4 s | 5.7 s | 1.3 | 7.0 s | 5.3 s | 1.3 |
+| (d) all 965 real parity files (≤ 8,000 lines each), one process each | 207 s | 92 s | 2.2 | 80 s | 56 s | 1.4 |
+
+- First pass (includes compiling the regexes on first use): (a) JS 343 ms / Rust 235 ms,
+  (b) 2.9 s / 2.0 s, (d) 110 s / 75 s. Grammar load itself is 3–8 ms on both sides.
+- (c) in one `tokenizeLine2` call (no chunking) Rust takes 9.5 s — slower than chunked, so the
+  editor's chunking stays useful on either side.
+- (d)'s cold gap (~120 ms per file) is Node start-up + WASM instantiation, not tokenizing.
+
+Where the time goes (macOS `sample` on the 20,000-line run): ~95% inside Oniguruma
+(`forward_search`, `match_at`, `mbc_enc_len`, `onig_regset_search`, region clearing); the Rust side
+(scope stacks, theme lookups, token output) is ~5%. Both paths run the same engine on the same
+patterns, so the Rust tokenizer is native Oniguruma vs Oniguruma in WASM under V8's JIT, which is
+only a little slower.
+
+| Tried | Result | Kept? |
+| --- | --- | --- |
+| Per-regex search with the cache for every string (no RegSet) | warm 20k lines 1.87 s → 2.4 s | no |
+| RegSet threshold 300 / 4,000 bytes instead of 1,000 | within noise (±3%) | no (kept the JS's 1,000) |
+
+Also found: one Node process that loads ~1,000 grammars without `registry.dispose()` crashes inside
+vscode-oniguruma ("memory access out of bounds") once the WASM heap passes 2 GB, because its
+scanner and string pointers are 32-bit `int`s. tokenize.cjs is one grammar per process; the bench
+disposes each registry.
+
+### Build
+
+Five more crates (`onig_sys`, `cc`, `find-msvc-tools`, `pkg-config`, `shlex`; first-build download
+~0.8 MB) and a C compiler (Xcode Command Line Tools' `cc` on macOS). `install.sh` with the crates
+cached and `PATH=/usr/bin:/bin`, `HERDR_APP_HOME=<temp>`: offline fetch succeeds, release build
+27 s (was ~9 s; Oniguruma's C sources), binary 1.6 MB (was 0.8 MB). `onig_sys` builds its bundled
+copy unless `RUSTONIG_SYSTEM_LIBONIG`/`RUSTONIG_DYNAMIC_LIBONIG` is set, so a Homebrew oniguruma
+does not leak in.
+
+### Recommendation for phase 2 (editor core in Rust)
+
+The tokenizer alone does not justify the move: it is bound by Oniguruma, which both sides run, and
+Rust is only **1.3× faster warm** and 1.2–2.2× per file cold (the larger figure is mostly Node start-up). A 20,000-line file still takes ~2 s
+to color in Rust; a 500 KB minified line ~5 s. What a Rust editor core would actually gain:
+
+1. **Start-up.** ~120 ms per process (Node + WASM + JIT warm-up) disappears — visible when a file
+   opens, not while typing.
+2. **Off the input thread.** In Node the tokenizer shares the event loop with keystrokes; the editor
+   copes with deadlines, chunks and `ensure(last, deadline)`. A Rust core can tokenize on a worker
+   thread (each `Grammar` is single-threaded `Rc`, so one grammar per thread) and never block input —
+   a bigger felt win than the 1.3×.
+3. **No WASM heap ceiling.** vscode-oniguruma fails past a 2 GB heap; the editor keeps one grammar
+   per open file (`vsedit.cjs` `loadState` → `H.loadGrammar`, never disposed), so a long session that
+   opens very many files can reach it. Native Oniguruma frees with the grammar.
+
+Recommendation: do **not** start phase 2 for speed. If it is done, do it for (2) and (1): first ship
+`vscode-core tokenize` as an optional engine behind `core.engine` for the viewer (drop-in: same JSON,
+1.2–2.2× per file), then move the editor's `Highlighter` (per-line stacks, incremental retokenize,
+`LongLine` chunks) to a Rust worker that streams tokens, and only then the buffer/paint core if
+profiling of the editor itself (not the tokenizer) shows it is the bottleneck. Real tokenizer speed-ups
+would need changes the JS does not make (e.g. caching scanner results across lines), which would
+have to be re-proven against this parity harness.
