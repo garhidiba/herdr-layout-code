@@ -422,6 +422,10 @@ def run_cursor_style(tmp):
     assert t.read("\x1b[2 q"), "no steady block cursor code at start"
     open(settings, "w").write('{"editor.cursorStyle": "underline", "editor.cursorBlinking": "blink", "editor.inlineSuggest.provider": "off"}')
     assert t.read("\x1b[3 q", timeout=4.5) or (t.send("x") or t.read("\x1b[3 q", timeout=4.5)), "settings change did not reach the cursor"
+    # Herdr resets the shape on focus changes: the next frame after focus-out / focus-in sends it again.
+    t.out = b""
+    t.send("\x1b[O"); t.send("\x1b[I")
+    assert t.read("\x1b[3 q", timeout=2), "cursor shape not resent after focus-in"
     t.send(QUIT)
     t.wait_exit()
     assert b"\x1b[0 q" in t.out, "cursor not restored on leave"

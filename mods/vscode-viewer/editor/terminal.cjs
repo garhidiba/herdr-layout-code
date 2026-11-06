@@ -5,6 +5,7 @@ const os = require("os");
 const { spawn, spawnSync } = require("child_process");
 const { parse } = require("./keys.cjs");
 const { which } = require("./lang/proc.cjs");
+const S = require("./settings.cjs");
 
 // Alternate screen, bracketed paste, SGR mouse, alternate scroll off (1007: the terminal would turn the wheel into ↑/↓ on
 // the alternate screen; saved first with XTSAVE), focus reports (1004), Kitty keyboard "disambiguate" (CSI > 1 u: ⌘ keys
@@ -72,7 +73,8 @@ function rightClicksTo(to, wait, { every = 150, until = 10000 } = {}) {
 function session(app) {
   let scheduled = false, pending = "", ended = false;
   const log = inputLog();
-  const frame = () => { scheduled = false; if (!ended) process.stdout.write("\x1b[?25l" + app.render(process.stdout.rows || 24, process.stdout.columns || 80)); };
+  const cursor = S.cursorSeq(S.load().values); // resent with every frame: Herdr resets the shape on focus, tab switches and resizes
+  const frame = () => { scheduled = false; if (!ended) process.stdout.write("\x1b[?25l" + cursor + app.render(process.stdout.rows || 24, process.stdout.columns || 80)); };
   const draw = () => { if (!scheduled) { scheduled = true; setImmediate(frame); } };
   const onData = (chunk) => {
     log(chunk);
@@ -102,7 +104,7 @@ function session(app) {
   process.stdin.setRawMode(true);
   process.stdin.setEncoding("utf8");
   for (const [target, name, fn] of handlers) target.on(name, fn);
-  process.stdout.write(ENTER);
+  process.stdout.write(ENTER + cursor);
   rightClicksTo("program", false);
   draw();
   return { draw, end };

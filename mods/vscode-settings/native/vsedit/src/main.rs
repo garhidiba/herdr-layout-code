@@ -218,14 +218,11 @@ fn run(term: &mut Term, ed: &mut Editor) {
         ed.say(e, Some(&w), 6000);
     }
 
-    let mut cursor_seq = ed.settings.cursor_seq();
-    let mut draw = |ed: &mut Editor, term: &mut Term| {
+    let draw = |ed: &mut Editor, term: &mut Term| {
         (ed.rows, ed.cols) = term.size();
         let out = ed.render();
-        let seq = ed.settings.cursor_seq(); // the cursor settings may have changed
-        let new = if seq == cursor_seq { "" } else { &seq };
-        term.write(&format!("\x1b[?25l{new}{out}"));
-        cursor_seq.clone_from(&seq);
+        // The cursor shape goes out with every frame: Herdr resets it on focus, tab switches and resizes, and a setting may have changed.
+        term.write(&format!("\x1b[?25l{}{out}", ed.settings.cursor_seq()));
     };
     ed.offer_backup();
     ed.note_cursor(); // where Cursor Undo goes back to first

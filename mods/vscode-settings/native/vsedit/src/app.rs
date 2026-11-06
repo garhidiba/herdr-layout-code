@@ -37,7 +37,9 @@ pub trait App {
 
 /// Runs `app` until it is done; signals and a closed terminal end the process (after restoring the terminal).
 pub fn run<A: App>(term: &mut Term, app: &mut A) -> A::Out {
-    term.write(term::ENTER);
+    // The shape goes out with every frame: Herdr resets it on focus, tab switches and resizes.
+    let cursor = crate::settings::load(&crate::settings::settings_file()).0.cursor_seq();
+    term.write(&format!("{}{cursor}", term::ENTER));
     term::right_clicks_to("program", false);
     let end = |term: &mut Term| {
         term.write(term::LEAVE);
@@ -49,7 +51,7 @@ pub fn run<A: App>(term: &mut Term, app: &mut A) -> A::Out {
         if draw {
             let (rows, cols) = term.size();
             match app.render(rows, cols) {
-                Flow::Frame(s) => term.write(&format!("\x1b[?25l{s}")),
+                Flow::Frame(s) => term.write(&format!("\x1b[?25l{cursor}{s}")),
                 Flow::Done(v) => {
                     end(term);
                     return v;
