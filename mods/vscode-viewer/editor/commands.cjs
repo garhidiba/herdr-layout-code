@@ -28,6 +28,7 @@ const COMMANDS = [
   C("workbench.action.files.save", "File: Save", "⌘S", ["cmd+s", "ctrl+s"], "saveFile"),
   C("workbench.action.files.toggleAutoSave", "File: Toggle Auto Save", "", [], "toggleAutoSave"),
   C("workbench.action.files.setAutoSaveDelay", "File: Set Auto Save Delay…", "", [], "askAutoSaveDelay"),
+  C("workbench.action.openSettings", "Preferences: Open Settings", "⌘,", [], "openSettingsUi"),
   C("workbench.action.openSettingsJson", "Preferences: Open Settings (JSON)", "", [], "openSettings"),
   C("workbench.action.closeActiveEditor", "View: Close Editor", "⌘W", ["cmd+w", "ctrl+q"], "quit"),
   C("undo", "Undo", "⌘Z", ["cmd+z", "ctrl+z"], "undo"),

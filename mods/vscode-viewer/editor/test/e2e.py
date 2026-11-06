@@ -175,7 +175,8 @@ def screen_of(t):
 
 
 def run_menu_and_cmd_save(tmp):
-    """Right-click (SGR button 2) opens VS Code's context menu; Herdr is told to route right-clicks; Kitty ⌘S saves."""
+    """Right-click (SGR button 2) opens VS Code's context menu; Herdr is told to route right-clicks; Preferences: Open Settings
+    asks Herdr for the Settings dialog; Kitty ⌘S saves."""
     stub = os.path.join(tmp, "stub")
     os.makedirs(stub, exist_ok=True)
     log = os.path.join(tmp, "herdr.log")
@@ -193,6 +194,10 @@ def run_menu_and_cmd_save(tmp):
     for item in ["Go to Definition", "Peek", "Find All References", "Rename Symbol", "Change All Occurrences", "Format Document", "Cut", "Copy", "Paste"]:
         assert item in sc, item
     t.send("\x1b[27u")              # Kitty Esc closes it
+    t.send("\x1bOP")                # F1: command palette
+    t.send("open settings")
+    assert t.read(">open settings", timeout=2), "F1 did not open the command palette"
+    t.send("\r")                    # the dialog entry ranks before "Open Settings (JSON)"
     t.send("\x1b[F"); t.send("!")
     t.send("\x1b[115;9u")           # ⌘S as Kitty CSI-u
     assert t.read("Saved", timeout=2), "⌘S did not save"
@@ -205,6 +210,7 @@ def run_menu_and_cmd_save(tmp):
     calls = open(log).read()
     assert "do terminal.right_click --to program --terminal term-7" in calls, calls
     assert "do terminal.right_click --to menu --terminal term-7" in calls, calls
+    assert "do mod.open --name vscode-settings" in calls, calls
     print("menu + ⌘S: ok")
 
 

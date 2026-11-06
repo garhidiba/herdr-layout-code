@@ -708,6 +708,12 @@ class Editor {
     } });
   }
   openSettings() { S.load(); return this.track(this.open(S.settingsFile())); }
+  // The Settings dialog (the vscode-settings mod) through herdr-app; outside Herdr, the JSON file.
+  openSettingsUi() {
+    const bin = process.env.HC_TERMINAL_ID && which("herdr-app");
+    if (!bin) return this.openSettings();
+    require("child_process").spawn(bin, ["do", "mod.open", "--name", "vscode-settings"], { stdio: "ignore", detached: true }).on("error", () => {}).unref();
+  }
   // After each input event: restart the auto-save timer when the text changed.
   afterEvent() {
     if (this.buf.version === this.seenVersion) return;
