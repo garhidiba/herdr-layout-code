@@ -8,8 +8,9 @@
 
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { spaces, machines, panes, agents, run, openOverlay, exec, hc, theme, shared, setShared, watchFolder, window, layout } from "herdr";
+import { spaces, machines, panes, agents, run, openOverlay, exec, hc, theme, shared, setShared, watchFolder, window, layout, notify } from "herdr";
 import { spaceAgents, fit, describe } from "./agents.js";
+import { sync, interleave, forget, adopt, liveIndex, reopenArgs, load } from "./kept.js";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -76,6 +77,10 @@ export default class Spaces extends View {
     this.reconnecting = JSON.parse(localStorage.getItem("machines.reconnecting") ?? "{}");
     for (const state of Object.values(this.reconnecting)) state.busy = false;
     this.folded = new Set(JSON.parse(localStorage.getItem("machines.folded") ?? "[]"));
+    // Spaces seen, in list order; the ones Herdr closed stay as "no tabs" rows (kept.js).
+    this.kept = load(localStorage.getItem("vscode-spaces.kept"));
+    this.reopening = null; // { id, machine, before, at } while space.new runs for a kept row
+    this.askAt = shared("vscode-spaces.ask")?.at ?? 0; // the menu's last request, already seen
     this.refreshMachines(cx);
     cx.timer.every(15000, cx => this.refreshMachines(cx));
     // `git status` walks the whole tree, on another machine a process there:
@@ -89,11 +94,82 @@ export default class Spaces extends View {
     for (const s of sp) if (!this.shown.has(s.id)) this.born[s.id] ??= now;
     const due = this.due(now, sp, panes());
     if (due.size) this.refreshGit(due, cx);
+    const keptMoved = this.keep(now, sp, cx);
     // An agent starting, stopping or changing state redraws its space's icons.
     const sig = agents().map((a) => `${a.space}:${a.address}:${a.status}:${a.program?.key}`).join("|");
     const moved = sig !== this.agentSig;
     this.agentSig = sig;
-    if (moved || sp.some((s) => !this.shown.has(s.id)) || this.orderingDue(now)) cx.notify();
+    if (keptMoved || moved || sp.some((s) => !this.shown.has(s.id)) || this.orderingDue(now)) cx.notify();
+  }
+
+  // Brings the kept list up to date with spaces(); true when it changed.
+  keep(now, sp, cx) {
+    const ask = shared("vscode-spaces.ask");
+    if (ask?.at > this.askAt) {
+      this.askAt = ask.at;
+      const k = this.kept.find((r) => r.id === ask.id && r.live === false);
+      if (k && ask.action === "open") this.reopen(k, cx);
+      if (k && ask.action === "forget") this.kept = forget(this.kept, k.id);
+    }
+    let list = this.kept;
+    let colors = shared("space.colors") ?? {};
+    const r = this.reopening;
+    const fresh = r && sp.find((s) => !r.before.has(s.id) && (s.machine ?? null) === r.machine);
+    if (fresh) {
+      // The new space takes the kept row's place, color and position.
+      list = adopt(list, r.id, fresh.id);
+      const old = list.find((k) => k.id === fresh.id);
+      if (old?.color) setShared("space.colors", colors = { ...colors, [fresh.id]: old.color });
+      const index = liveIndex(list, fresh.id, new Set(sp.map((s) => s.id)));
+      if (index && index !== sp.findIndex((s) => s.id === fresh.id) + 1) run("space.move", { id: fresh.id, index });
+      this.reopening = null;
+    } else if (r && now - r.at > 15000) this.reopening = null;
+    const ps = panes();
+    const live = sp.map((s) => ({ id: s.id, name: s.name, named: s.named, folder: place(s, ps), machine: s.machine ?? null, color: colors[s.id] }));
+    const ms = machines();
+    const ready = new Set(ms.filter((m) => m.layout === "ready").map((m) => m.name ?? null));
+    // Without an entry for this computer, its spaces showing means its layout reads.
+    if (!ms.some((m) => (m.name ?? null) === null) && sp.some((s) => !s.machine)) ready.add(null);
+    const next = sync(list, live, ready, shared("vscode-spaces.closing") ?? {}, now);
+    // A worktree's space closes before its folder goes: forget it once the folder is gone.
+    const was = new Map(this.kept.map((k) => [k.id, k.live]));
+    for (const k of next) if (k.live === false && was.get(k.id) === true) this.forgetIfGone(k, 5000, cx);
+    const text = JSON.stringify(next);
+    this.kept = next;
+    if (text === this.keptText) return false;
+    this.keptText = text;
+    localStorage.setItem("vscode-spaces.kept", text);
+    return true;
+  }
+
+  // Forgets a kept space whose folder is gone (true then); unsure (machine away): kept.
+  async gone(k) {
+    if (!k.folder) return false;
+    const r = await exec("test", ["-d", k.folder], { on: k.machine ?? null }).catch(() => null);
+    if (r?.code !== 1) return false;
+    this.kept = forget(this.kept, k.id);
+    return true;
+  }
+
+  forgetIfGone(k, wait, cx) {
+    cx.spawn(async (cx) => {
+      await cx.sleep(wait);
+      if (await this.gone(k)) cx.notify();
+    });
+  }
+
+  // Opens a kept space again: space.new where it was; keep() gives the new one its row.
+  reopen(k, cx) {
+    if (this.reopening) return;
+    this.reopening = { id: k.id, machine: k.machine ?? null, before: new Set(spaces().map((s) => s.id)), at: Date.now() };
+    cx.notify();
+    cx.spawn(async (cx) => {
+      if (await this.gone(k)) {
+        this.reopening = null;
+        notify({ title: `${k.name} was removed from the list`, body: `${k.folder} no longer exists.`, level: "warning" });
+      } else run("space.new", reopenArgs(k));
+      cx.notify();
+    });
   }
 
   // Places whose git could have changed: new ones (a new space, a cd), where a
@@ -260,9 +336,11 @@ export default class Spaces extends View {
     });
   }
 
-  menu(w) {
+  // vscode-menu: Herdr's space menu (its Close tells keep() the space goes on purpose),
+  // or "kept" for a closed space's row (Open, Remove from list).
+  menu(w, tab = "space") {
     // A popup is as tall as its items; height is only the most.
-    openOverlay({ mod: "menu", kind: "popup", width: 200, height: 260, props: { tab: "space", target: { id: w.id } } });
+    openOverlay({ mod: "vscode-menu", kind: "popup", width: 200, height: 260, props: { tab, target: { id: w.id } } });
   }
 
   orderingDue(now) {
@@ -307,13 +385,14 @@ export default class Spaces extends View {
       }
       this.ordering.machines = [...moved];
     }
-    return out.filter(r => this.shown.has(r.w.id));
+    const kept = (k) => ({ w: { id: k.id, name: k.name, machine: k.machine ?? null }, kept: k });
+    return interleave(out.filter(r => this.shown.has(r.w.id)), this.kept, (r) => r.w.id).map((r) => (r.w ? r : kept(r)));
   }
 
   // The rows, under a header per machine once one isn't this computer.
   grouped(t, collapsed) {
     const rows = this.ordered();
-    const draw = (r) => (collapsed ? this.compact(r, t) : this.row(r, t));
+    const draw = (r) => (r.kept ? this.keptRow(r.kept, t, collapsed) : collapsed ? this.compact(r, t) : this.row(r, t));
     const remote = [...new Set([...rows.map(r => r.w.machine).filter(Boolean), ...this.machines.map(m => m.name), ...Object.keys(this.reconnecting)])].sort();
     const loading = m => {
       const layout = machines().find(k => k.name === m)?.layout;
@@ -460,6 +539,31 @@ export default class Spaces extends View {
           .child(g ? this.gitTail(g, tree, w.name, t, this.agentIcons(w, t))
             : h_flex().flex_1().min_w(0).justify_end().items_center().child(this.agentIcons(w, t) ?? div())),
       );
+  }
+
+  // A space Herdr closed (its last tab went): dimmed, "no tabs"; a click opens it again.
+  keptRow(k, t, collapsed) {
+    const color = k.color ?? "ansi6";
+    const fill = color.startsWith("#") ? color : (MARK[color] ?? t[color]);
+    const avatar = h_flex().size(18).flex_none().rounded(5).bg(fill).items_center().justify_center().text_size(10.5).font_bold().text_color("#ffffff").child([...k.name][0]?.toUpperCase() ?? "?");
+    return h_flex()
+      .id(`kept-${k.id}`)
+      .h(collapsed ? 26 : 30)
+      .flex_none()
+      .px(collapsed ? 0 : 8)
+      .gap(9)
+      .items_center()
+      .when(collapsed, (el) => el.justify_center())
+      .when(!collapsed, (el) => el.rounded(8))
+      .cursor_pointer()
+      .hover((s) => s.bg(t.hover))
+      .tooltip(`No tabs. Click to open it again${k.folder ? ` in ${k.folder}` : ""}.`)
+      .on_click((_e, cx) => this.reopen(k, cx))
+      .on_mouse_down("right", () => this.menu(k, "kept"))
+      .child(div().flex_none().opacity(0.45).child(avatar))
+      .when(!collapsed, (el) => el
+        .child(div().flex_shrink(0).max_w(150).truncate().text_color(t.dim).child(k.name))
+        .child(h_flex().flex_1().min_w(0).justify_end().text_size(11.5).text_color(t.dim).child(this.reopening?.id === k.id ? "Opening…" : "no tabs")));
   }
 
   compact({ w, i }, t) {

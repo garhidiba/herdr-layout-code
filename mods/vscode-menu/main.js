@@ -5,7 +5,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { run, props, closeOverlay, openOverlay, theme, keys, terminals, spaces, panes, exec } from "herdr";
+import { run, props, closeOverlay, openOverlay, theme, keys, terminals, spaces, panes, exec, shared, setShared } from "herdr";
 // Herdr starts with PATH=/usr/bin:/bin, so Homebrew/user tools (node, code, codex, trash) are looked up here too.
 const userExec = (cmd, args, opts) => exec("sh", ["-c", 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; exec "$0" "$@"', cmd, ...args], opts);
 
@@ -64,6 +64,12 @@ function items(p, git) {
         ...(git === "linked" ? [["Remove worktree", "worktree", { space: tg.id, action: "remove" }]] : []),
         ["Close", "space.close", { id: tg.id }],
       ];
+    // A space vscode-spaces keeps after its last tab closed.
+    case "kept":
+      return [
+        ["Open", "vscode-spaces.open", { id: tg.id }],
+        ["Remove from list", "vscode-spaces.forget", { id: tg.id }],
+      ];
     default:
       return [
         ["New space", "space.new", {}],
@@ -77,7 +83,7 @@ function items(p, git) {
 }
 
 function menuIcon(command) {
-  const name = command.endsWith(".close") ? "x" : command.endsWith(".rename") ? "square-pen" : command.endsWith(".new") ? "plus" : command === "worktree" ? "git-branch" : command === "app.help" ? "terminal" : command === "app.theme" ? "settings" : command === "pane.split" ? "panel-right" : command === "pane.zoom" ? "square" : "terminal";
+  const name = command.endsWith(".close") || command.endsWith(".forget") ? "x" : command.endsWith(".rename") ? "square-pen" : command.endsWith(".new") ? "plus" : command === "worktree" ? "git-branch" : command === "app.help" ? "terminal" : command === "app.theme" ? "settings" : command === "pane.split" ? "panel-right" : command === "pane.zoom" ? "square" : "terminal";
   return `mods/workspace-chrome/${name}.svg`;
 }
 
@@ -112,7 +118,17 @@ export default class Menu extends View {
     if (it[1] === "worktree") openOverlay({ mod: "worktree", kind: "dialog", ...(it[2].action === "open" ? { width: 560, height: 480 } : { width: 440, height: 260 }), props: it[2] });
     else if (it[1] === "vscode.open") userExec("code", [it[2].folder]).catch(() => {});
     else if (it[1] === "finder.open") exec("open", [it[2].folder]).catch(() => {});
-    else run(it[1], it[2]);
+    // vscode-spaces reads these (its rows' state is its own).
+    else if (it[1].startsWith("vscode-spaces.")) setShared("vscode-spaces.ask", { action: it[1].slice(14), id: it[2].id, at: Date.now() });
+    else {
+      // Closed on purpose: vscode-spaces forgets it instead of keeping a "no tabs" row.
+      if (it[1] === "space.close") {
+        const now = Date.now();
+        const closing = Object.fromEntries(Object.entries(shared("vscode-spaces.closing") ?? {}).filter(([, at]) => now - at < 60000));
+        setShared("vscode-spaces.closing", { ...closing, [it[2].id]: now });
+      }
+      run(it[1], it[2]);
+    }
   }
 
   render(cx) {
