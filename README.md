@@ -3,7 +3,7 @@
 A VS Code–style layout for [Herdr](https://herdr.dev):
 
 - **Explorer:** Material Icon Theme icons and VS Code git colors, including repos nested in the folder.
-- **Editor:** files open in their own tab as an Atom One Dark editor.
+- **Editor:** files open in their own tab as an Atom One Dark editor; images open as a preview, markdown opens rendered with an Edit toggle.
 - **Pane menu:** Open in VS Code / Finder.
 - **Status bar:** Claude and Codex usage meters.
 
@@ -26,6 +26,7 @@ Optional Claude meter: set Claude Code's `statusLine.command` to `sh ~/.config/h
 
 - `sh`, `git`, `find` (Explorer listing and git status)
 - `code` (Open in VS Code), `open` (Finder)
+- `stat`, `cp`, `sips` (image preview: copies the image into `mods/vscode-viewer/.cache/`)
 - `grep` over `~/.codex/sessions` (Codex usage)
 
 Nothing reaches the network.

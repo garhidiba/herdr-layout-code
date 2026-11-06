@@ -23,6 +23,8 @@ Herdr's main layout turned into a VS Code–style workbench: a file explorer wit
   - Header (30px): breadcrumbs of the last 3 folders `›` the file with its Material icon, then ghost buttons **Wrap**, **Revert** (only when edited), **Open in VS Code**, **Save ⌘S** / **Saved**.
   - Herdr's built-in editor on `#282c34` with text `#abb2bf`, 13px, line numbers.
   - Status strip (22px): language name (VS Code's name for the file type), line count, `Spaces: N`/`Tabs`, `UTF-8`, `LF`/`CRLF`.
+  - **Images** (`png jpg jpeg gif webp bmp ico svg tif tiff`): the image centered on `#282c34` with a `#323842` 8px checkerboard, 16px padding, shrunk to fit and never enlarged. Header keeps breadcrumbs and **Open in VS Code** (no Wrap/Save). Status strip: format (`PNG`, `JPEG`, `SVG`, …), `W × H` pixels (from `sips`), size (`B`/`KB`/`MB`, one decimal).
+  - **Markdown** (`md markdown mdx mkd`): opens rendered (`TextView.markdown`, 14px, padding 28/16, scrollable, selectable) with an **Edit** button; in the editor the button reads **Preview**. Wrap shows only in the editor.
 
 ## How it behaves
 
@@ -33,6 +35,8 @@ Herdr's main layout turned into a VS Code–style workbench: a file explorer wit
   - Typing marks the file dirty (8px `#e5c07b` dot). `cmd-s` (or Save) writes only if the file on disk is still what was loaded.
   - If the disk changed while editing, a banner offers **Reload (discard my edits)** or **Overwrite**. Untouched buffers follow the disk every 3s.
   - **Wrap** toggles soft wrap. Remote (SSH) files open read-only.
+  - **Markdown:** Preview renders the editor's current text, unsaved edits included; Save and the dirty dot work in both modes.
+  - **Images:** checked every 3s (`stat` mtime + size); when either changes the file is copied again and the strip updates. Remote images show "Image preview is local only".
 - **Pane right-click** (`vscode-menu`): Herdr's pane menu plus **Open in VS Code** and **Open in Finder** for the pane's folder (local panes only).
 - **Status bar:** Codex usage re-read every 60s, Claude every 10s.
 
@@ -51,6 +55,7 @@ Herdr's main layout turned into a VS Code–style workbench: a file explorer wit
   - `langs.json`: file type → the closest grammar the built-in editor has, from the language contributions of VS Code's built-in extensions.
   - `vscode/index.json`: file type → VS Code TextMate scope, used for the language name.
   - `palettes.json`: per-extension role colors (see Watch out). It reads `../vscode-explorer/icons.json` for the breadcrumb icon.
+  - Markdown: `TextView.markdown(id, text)` from `gpui-base`. Images: `image()`, `Background.checkerboard` painted with `window.paint_path`; runs `sh` (`stat`, `mkdir`/`rm`/`cp` into `<herdr home>/mods/vscode-viewer/.cache/<path hash>-<mtime>-<size>.<ext>`, older copies of the same file removed) and `sips` for pixel size.
 - **`vscode-status`:**
   - Codex usage comes from the newest `~/.codex/sessions/**/rollout-*.jsonl` that has a `rate_limits` event (`sh` + `grep`, no network). Claude usage comes from `<herdr home>/claude-usage.json`, written by `claude-usage-tap.sh`.
   - Wire the tap in as Claude Code's `statusLine.command` (`sh <herdr home>/mods/vscode-status/claude-usage-tap.sh`). It saves `rate_limits` from the statusLine input and then runs `<herdr home>/claude-statusline-orig.sh` with the same input, if present.
@@ -64,6 +69,8 @@ Herdr's main layout turned into a VS Code–style workbench: a file explorer wit
   - A role changes only when that color has ≥ 45% share and leads the base color by 20 points. Comments always stay `#5c6370`.
   - Character match vs VS Code went from 59.0% to 68.1% overall (Python 56→85%, Shell 60→85%, C 67→88%, CSS 38→75%). TSX stays ~62%: function calls, JSX tags and globals share one role.
   - For exact colors use Open in VS Code.
+- **Image preview.** `image()` only loads paths inside the Herdr app folder, so each image is copied into the hidden `.cache/` folder (hidden files don't trigger a mod reload; `.cache/` is git-ignored). The last copy per file stays after its tab closes. Pixel size needs macOS `sips`; elsewhere it is left out.
+- **No HTML preview.** Herdr has no webview; `TextView` renders markdown (and simple HTML) without CSS or scripts, so `.html` files open in the editor only.
 - **Editor limits.** It opens files up to 1 MiB. With `line_numbers: false` the editor scrolls 4 columns left; keep line numbers on.
 - **Assumptions.** The VS Code `code` CLI (Shell Command: Install 'code' in PATH) and macOS `open` are assumed. The Claude meter needs the statusLine tap and shows `–` until Claude Code has refreshed its status line once. Codex needs local session logs.
 - **Changing the mods.** Herdr replaces shipped mods and layouts on every start (edits move to `<name>-edited`). That is why everything here is a separately named mod; don't edit the shipped ones.
@@ -73,5 +80,6 @@ Herdr's main layout turned into a VS Code–style workbench: a file explorer wit
 - `herdr-app check` passes for each of the five mods, and `layout.switch {name: "vscode"}` shows no errors in `herdr-app status`.
 - The tab bar shows Explorer and Changes. Explorer lists the focused folder with Material icons, and a modified file in a git repo is `#e2c08d` with `M`.
 - Clicking a `.ts` file opens a tab whose status strip says `TypeScript`. Editing shows the dot. `cmd-s` writes the file and the button returns to Saved.
+- Clicking a `.png` shows it centered on the checkerboard with `PNG`, `W × H` and its size in the strip. Clicking `README.md` shows it rendered; Edit opens the editor, and an unsaved edit appears after Preview.
 - With a Codex session log present, the status bar shows the Codex glyph with two bars and a credit number; hovering shows the card with reset times.
 - Right-clicking a pane shows Open in VS Code and Open in Finder; Finder opens the pane's folder.
