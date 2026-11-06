@@ -50,6 +50,19 @@ struct Deco<'a> {
     problems: Vec<(usize, usize, String)>,
 }
 
+/// Where a Shift+click at `p` puts the head, VS Code's way: on the gutter by whole lines (through the clicked line, or
+/// to its start above the anchor), elsewhere (a Shift+double-click) by words.
+fn shift_click_head(lines: &[String], anchor: Pos, p: Pos, gutter: bool) -> Pos {
+    let (t, last) = (&lines[p.line], lines.len() - 1);
+    let s = word_left(t, next_index(t, p.col).min(t.len()));
+    match (gutter, p >= anchor) {
+        (false, down) => pos(p.line, if down { word_right(t, s) } else { s }),
+        (true, false) => pos(p.line, 0),
+        (true, true) if p.line < last => pos(p.line + 1, 0),
+        (true, true) => pos(last, t.len()),
+    }
+}
+
 fn tw(s: &str) -> i32 {
     text_width(s, 8) as i32
 }
@@ -1060,7 +1073,8 @@ impl Editor {
         if m.motion {
             return;
         }
-        if m.x == self.gutter() as i32 && self.click_fold(p.line) {
+        let gutter = m.x <= self.gutter() as i32;
+        if m.x == self.gutter() as i32 && !m.shift && self.click_fold(p.line) {
             return;
         }
         if m.ctrl && !m.shift && m.x > self.gutter() as i32 {
@@ -1073,6 +1087,11 @@ impl Editor {
         let double = now.duration_since(self.last_click.0) < Duration::from_millis(400) && self.last_click.1 == p;
         self.last_click = (now, p);
         self.dragging = true;
+        if m.shift && (double || gutter) {
+            self.sel.head = shift_click_head(&self.buf.lines, self.sel.anchor, p, gutter);
+            self.buf.seal();
+            return;
+        }
         if double && !m.shift {
             let t = &self.buf.lines[p.line];
             let s = word_left(t, next_index(t, p.col).min(t.len()));
@@ -1167,5 +1186,21 @@ impl Editor {
         if let Some((_, _, it)) = self.lens_text(line).1.into_iter().find(|(a, b, _)| col >= *a && col < *b) {
             self.run_lens(&it);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shift_click_extends_by_lines_on_the_gutter_and_by_words_on_a_double_click() {
+        let lines: Vec<String> = ["foo bar", "baz qux", "end"].iter().map(|s| s.to_string()).collect();
+        let a = pos(1, 2);
+        assert_eq!(shift_click_head(&lines, a, pos(1, 5), true), pos(2, 0), "gutter below: through the clicked line");
+        assert_eq!(shift_click_head(&lines, a, pos(0, 0), true), pos(0, 0), "gutter above: the clicked line's start");
+        assert_eq!(shift_click_head(&lines, a, pos(2, 0), true), pos(2, 3), "the last line: to its end");
+        assert_eq!(shift_click_head(&lines, a, pos(1, 5), false), pos(1, 7), "word after the anchor: its end");
+        assert_eq!(shift_click_head(&lines, a, pos(0, 1), false), pos(0, 0), "word before the anchor: its start");
     }
 }

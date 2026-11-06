@@ -749,6 +749,28 @@ test("Find widget: ⌥⌘C/⌥⌘W/⌥⌘R toggle through the keymap, the count 
 
 const click = (ed, x, y) => ed.handle({ type: "mouse", button: 0, x, y, release: false, motion: false });
 
+test("Shift+click extends from the anchor, keeps extending on a drag, by lines on the gutter and by words on a double-click", async () => {
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "vsedit-shift-")), "a.txt");
+  fs.writeFileSync(file, "foo bar\nbaz qux\nend");
+  const ed = new Editor(file, F.load(file), await H.loadGrammar(null), H.loadTheme(), null);
+  ed.rows = 10; ed.cols = 100;
+  ed.render(0);
+  const at = (line, col) => [ed.gutter + 1 + col, line + 2], mouse = (x, y, more) => ed.handle({ type: "mouse", button: 0, x, y, release: false, motion: false, ...more });
+  const sel = () => [ed.sel.anchor.line, ed.sel.anchor.col, ed.sel.head.line, ed.sel.head.col];
+  click(ed, ...at(1, 2)); ed.handle({ type: "mouse", button: 0, x: 1, y: 1, release: true });
+  mouse(...at(0, 1), { shift: true });
+  assert.deepEqual(sel(), [1, 2, 0, 1], "Shift+click: anchor to the click");
+  mouse(...at(2, 1), { shift: true, motion: true });
+  assert.deepEqual(sel(), [1, 2, 2, 1], "Shift+drag keeps the anchor");
+  ed.handle({ type: "mouse", button: 0, x: 1, y: 1, release: true });
+  mouse(1, 4, { shift: true });
+  assert.deepEqual(sel(), [1, 2, 2, 3], "Shift+click on the gutter: through that line (the last: to its end)");
+  mouse(1, 2, { shift: true });
+  assert.deepEqual(sel(), [1, 2, 0, 0], "above the anchor: the line's start");
+  mouse(...at(1, 5), { shift: true }); mouse(...at(1, 5), { shift: true });
+  assert.deepEqual(sel(), [1, 2, 1, 7], "Shift+double-click: to the word's end");
+});
+
 test("status bar: Ln/Col opens Go to Line, Spaces picks tabs and a size for this file, LF switches to CRLF on save", async () => {
   const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "vsedit-status-")), "a.txt");
   fs.writeFileSync(file, "a\nb\n");
@@ -1766,4 +1788,16 @@ test("CodeLens rows and a multi-line ghost text share the screen: rows, clicks a
   ed.afterEvent?.();
   ed.inline.ghost = null;
   assert.ok(ed.rowsTo(4) < ed.height, `cursor row ${ed.rowsTo(4)}`);
+});
+
+test("Shift+click on the gutter skips a CodeLens row and counts it for the lines below", async () => {
+  const ed = await plainEditor(["a", "function b() {}", "c"]);
+  ed.rows = 9; ed.cols = 60;
+  ed.lenses.items = [{ line: 1, col: 9, title: "0 references", kind: "references" }];
+  ed.render(0);
+  const shift = (y) => ed.handle({ type: "mouse", button: 0, x: 1, y, release: false, motion: false, shift: true });
+  shift(3); // the lens row above line 1
+  assert.deepEqual(ed.sel, { anchor: { line: 0, col: 0 }, head: { line: 0, col: 0 } }, "a lens row does nothing");
+  shift(4);
+  assert.deepEqual(ed.sel.head, { line: 2, col: 0 }, "the row below the lens is line 1: through it");
 });
