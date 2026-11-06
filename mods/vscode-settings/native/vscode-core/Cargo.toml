@@ -10,3 +10,4 @@ publish = false
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 unicode-normalization = "0.1"
+vscode-textmate = { path = "../vscode-textmate" }

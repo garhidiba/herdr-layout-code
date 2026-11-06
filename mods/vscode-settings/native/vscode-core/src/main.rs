@@ -12,6 +12,7 @@ mod tree;
 use git::Status;
 use serde::Serialize;
 use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
 use std::thread;
 
 const COMMITS: usize = 300;
@@ -25,6 +26,7 @@ const USAGE: &str = "usage: vscode-core <command>
   commit-files <repo> <hash>
   tree <dir> [--expanded p1,p2,...]
   all <root> [--expanded p1,p2,...] [--repo <current>]
+  tokenize <file> [maxLines] [--vscode <dir>] [--stack]
   --version";
 
 struct Args {
@@ -34,10 +36,12 @@ struct Args {
     graph: bool,
     expanded: Vec<String>,
     repo: Option<String>,
+    vscode: Option<String>,
+    stack: bool,
 }
 
 fn parse_args(raw: impl Iterator<Item = String>) -> Result<Args, String> {
-    let mut a = Args { positional: vec![], upstream: None, n: COMMITS, graph: false, expanded: vec![], repo: None };
+    let mut a = Args { positional: vec![], upstream: None, n: COMMITS, graph: false, expanded: vec![], repo: None, vscode: None, stack: false };
     let mut raw = raw.peekable();
     while let Some(arg) = raw.next() {
         let mut value = || raw.next().ok_or(format!("{arg} needs a value"));
@@ -47,6 +51,8 @@ fn parse_args(raw: impl Iterator<Item = String>) -> Result<Args, String> {
             "--graph" => a.graph = true,
             "--expanded" => a.expanded.extend(value()?.split(',').filter(|p| !p.is_empty()).map(str::to_string)),
             "--repo" => a.repo = Some(value()?),
+            "--vscode" => a.vscode = Some(value()?),
+            "--stack" => a.stack = true,
             _ if arg.starts_with('-') && arg != "--version" => return Err(format!("unknown option {arg}\n{USAGE}")),
             _ => a.positional.push(arg),
         }
@@ -176,6 +182,16 @@ fn version() -> Value {
     json!({ "version": env!("CARGO_PKG_VERSION"), "backend": "git", "git": git })
 }
 
+/// The viewer's grammars and theme: `--vscode`, else `mods/vscode-viewer/vscode` in the herdr home the binary
+/// is installed in (`<home>/vscode-core/vscode-core`).
+fn vscode_dir(flag: Option<&str>) -> PathBuf {
+    if let Some(dir) = flag {
+        return dir.into();
+    }
+    let exe = std::env::current_exe().unwrap_or_default();
+    exe.parent().and_then(Path::parent).unwrap_or(Path::new(".")).join("mods/vscode-viewer/vscode")
+}
+
 fn run(a: Args) -> Result<Value, String> {
     let p = |i: usize| a.positional.get(i).map(String::as_str).ok_or_else(|| USAGE.to_string());
     match p(0)? {
@@ -192,6 +208,7 @@ fn run(a: Args) -> Result<Value, String> {
         "commit-files" => Ok(json!(git::commit_files(p(1)?, p(2)?)?.into_iter().take(FILES).collect::<Vec<_>>())),
         "tree" => tree_cmd(p(1)?, &a.expanded),
         "all" => all_cmd(p(1)?, &a.expanded, a.repo.as_deref()),
+        "tokenize" => vscode_textmate::tokenize_file(&vscode_dir(a.vscode.as_deref()), Path::new(p(1)?), a.positional.get(2).map(String::as_str), a.stack),
         other => Err(format!("unknown command {other}\n{USAGE}")),
     }
 }

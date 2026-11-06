@@ -1,0 +1,11 @@
+[package]
+name = "vscode-textmate"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.92"
+description = "A port of vscode-textmate 9.3.2 (TextMate grammars + themes) on the Oniguruma C library"
+publish = false
+
+[dependencies]
+onig_sys = { version = "=69.8.1", default-features = false }
+serde_json = { version = "1", features = ["preserve_order"] }
