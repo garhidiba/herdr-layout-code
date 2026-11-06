@@ -1,6 +1,6 @@
 // Spaces the list keeps after Herdr closes them. Herdr closes a space with its
 // last tab (an editor or shell exiting, the tab's ×, tab.close); the list keeps
-// such a space as a "no tabs" row that reopens it. Pure (no Herdr imports) so
+// such a space as a gray "closed" row that reopens it. Pure (no Herdr imports) so
 // it can be tested with plain node.
 //
 // A record: { id, name, named, folder, machine, color, live }. live false: Herdr

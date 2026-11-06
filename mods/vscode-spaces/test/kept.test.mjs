@@ -117,6 +117,31 @@ test("space.new reopens it with its folder and machine, its name only if someone
   assert.deepEqual(reopenArgs(sp("b", { folder: "" })), { machine: "" });
 });
 
+// What render draws: the stored list merged with spaces() right then, no stored step between.
+const draw = (stored, live, ready = here, closing = {}, now = 0) =>
+  interleave(live.map((s) => ({ id: s.id })), sync(stored, live, ready, closing, now), (r) => r.id).map((r) => r.id);
+
+test("the first draw after Herdr drops a space already shows its closed row in place", () => {
+  const stored = sync([], [sp("a"), sp("b"), sp("c")], here); // b still live in what was stored
+  assert.deepEqual(draw(stored, [sp("a"), sp("c")]), ["a", "b", "c"]);
+});
+
+test("drawing again before the list is stored draws the same rows", () => {
+  const stored = sync([], [sp("a"), sp("b"), sp("c")], here);
+  const once = sync(stored, [sp("a"), sp("c")], here);
+  assert.deepEqual(sync(once, [sp("a"), sp("c")], here), once);
+});
+
+test("a space closed from the menu is never drawn as a closed row", () => {
+  const stored = sync([], [sp("a"), sp("b")], here);
+  assert.deepEqual(draw(stored, [sp("a")], here, { b: 0 }, 10), ["a"]);
+});
+
+test("a remote space missing while its layout is unreadable is never drawn closed", () => {
+  const stored = sync([], [sp("a"), sp("r", { machine: "vps" })], new Set([null, "vps"]));
+  assert.deepEqual(draw(stored, [sp("a")], here), ["a"]);
+});
+
 test("an unreadable stored list is empty", () => {
   assert.deepEqual(load("{"), []);
   assert.deepEqual(load(null), []);

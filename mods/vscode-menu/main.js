@@ -121,7 +121,7 @@ export default class Menu extends View {
     // vscode-spaces reads these (its rows' state is its own).
     else if (it[1].startsWith("vscode-spaces.")) setShared("vscode-spaces.ask", { action: it[1].slice(14), id: it[2].id, at: Date.now() });
     else {
-      // Closed on purpose: vscode-spaces forgets it instead of keeping a "no tabs" row.
+      // Closed on purpose: vscode-spaces forgets it instead of keeping a gray "closed" row.
       if (it[1] === "space.close") {
         const now = Date.now();
         const closing = Object.fromEntries(Object.entries(shared("vscode-spaces.closing") ?? {}).filter(([, at]) => now - at < 60000));

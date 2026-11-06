@@ -77,7 +77,7 @@ export default class Spaces extends View {
     this.reconnecting = JSON.parse(localStorage.getItem("machines.reconnecting") ?? "{}");
     for (const state of Object.values(this.reconnecting)) state.busy = false;
     this.folded = new Set(JSON.parse(localStorage.getItem("machines.folded") ?? "[]"));
-    // Spaces seen, in list order; the ones Herdr closed stay as "no tabs" rows (kept.js).
+    // Spaces seen, in list order; the ones Herdr closed stay as gray "closed" rows (kept.js).
     this.kept = load(localStorage.getItem("vscode-spaces.kept"));
     this.reopening = null; // { id, machine, before, at } while space.new runs for a kept row
     this.askAt = shared("vscode-spaces.ask")?.at ?? 0; // the menu's last request, already seen
@@ -111,26 +111,14 @@ export default class Spaces extends View {
       if (k && ask.action === "open") this.reopen(k, cx);
       if (k && ask.action === "forget") this.kept = forget(this.kept, k.id);
     }
-    let list = this.kept;
-    let colors = shared("space.colors") ?? {};
-    const r = this.reopening;
-    const fresh = r && sp.find((s) => !r.before.has(s.id) && (s.machine ?? null) === r.machine);
+    const { list: next, fresh, color } = this.view(now, sp);
     if (fresh) {
       // The new space takes the kept row's place, color and position.
-      list = adopt(list, r.id, fresh.id);
-      const old = list.find((k) => k.id === fresh.id);
-      if (old?.color) setShared("space.colors", colors = { ...colors, [fresh.id]: old.color });
-      const index = liveIndex(list, fresh.id, new Set(sp.map((s) => s.id)));
+      if (color) setShared("space.colors", { ...(shared("space.colors") ?? {}), [fresh.id]: color });
+      const index = liveIndex(next, fresh.id, new Set(sp.map((s) => s.id)));
       if (index && index !== sp.findIndex((s) => s.id === fresh.id) + 1) run("space.move", { id: fresh.id, index });
       this.reopening = null;
-    } else if (r && now - r.at > 15000) this.reopening = null;
-    const ps = panes();
-    const live = sp.map((s) => ({ id: s.id, name: s.name, named: s.named, folder: place(s, ps), machine: s.machine ?? null, color: colors[s.id] }));
-    const ms = machines();
-    const ready = new Set(ms.filter((m) => m.layout === "ready").map((m) => m.name ?? null));
-    // Without an entry for this computer, its spaces showing means its layout reads.
-    if (!ms.some((m) => (m.name ?? null) === null) && sp.some((s) => !s.machine)) ready.add(null);
-    const next = sync(list, live, ready, shared("vscode-spaces.closing") ?? {}, now);
+    } else if (this.reopening && now - this.reopening.at > 15000) this.reopening = null;
     // A worktree's space closes before its folder goes: forget it once the folder is gone.
     const was = new Map(this.kept.map((k) => [k.id, k.live]));
     for (const k of next) if (k.live === false && was.get(k.id) === true) this.forgetIfGone(k, 5000, cx);
@@ -140,6 +128,25 @@ export default class Spaces extends View {
     this.keptText = text;
     localStorage.setItem("vscode-spaces.kept", text);
     return true;
+  }
+
+  // The kept list as spaces() is now, without storing it: render draws this, so a
+  // space Herdr just closed is a closed row in the same frame, not after keep()'s tick.
+  // `fresh`: the space reopened from a row (it already has the row's place); `color` the row's.
+  view(now, sp) {
+    let list = this.kept;
+    const r = this.reopening;
+    const fresh = r && sp.find((s) => !r.before.has(s.id) && (s.machine ?? null) === r.machine);
+    if (fresh) list = adopt(list, r.id, fresh.id);
+    const color = fresh ? list.find((k) => k.id === fresh.id)?.color : undefined;
+    const colors = { ...(shared("space.colors") ?? {}), ...(color ? { [fresh.id]: color } : {}) };
+    const ps = panes();
+    const live = sp.map((s) => ({ id: s.id, name: s.name, named: s.named, folder: place(s, ps), machine: s.machine ?? null, color: colors[s.id] }));
+    const ms = machines();
+    const ready = new Set(ms.filter((m) => m.layout === "ready").map((m) => m.name ?? null));
+    // Without an entry for this computer, its spaces showing means its layout reads.
+    if (!ms.some((m) => (m.name ?? null) === null) && sp.some((s) => !s.machine)) ready.add(null);
+    return { list: sync(list, live, ready, shared("vscode-spaces.closing") ?? {}, now), fresh, color };
   }
 
   // Forgets a kept space whose folder is gone (true then); unsure (machine away): kept.
@@ -351,6 +358,9 @@ export default class Spaces extends View {
   // Spaces in order, each worktree space moved under its main checkout's.
   ordered() {
     const sp = spaces(), ps = panes();
+    const view = this.view(Date.now(), sp);
+    // A space reopened from a row has its place already: no wait for its git.
+    if (view.fresh) this.shown.add(view.fresh.id);
     const ready = (w) => this.shown.has(w.id) || where(w, ps) in this.git || Date.now() - (this.born[w.id] ??= Date.now()) > 1500;
     for (const w of sp) if (!this.shown.has(w.id) && ready(w)) this.shown.add(w.id);
     const list = sp.map((w, i) => ({ w, i, g: this.git[where(w, ps)] ?? null }));
@@ -386,7 +396,7 @@ export default class Spaces extends View {
       this.ordering.machines = [...moved];
     }
     const kept = (k) => ({ w: { id: k.id, name: k.name, machine: k.machine ?? null }, kept: k });
-    return interleave(out.filter(r => this.shown.has(r.w.id)), this.kept, (r) => r.w.id).map((r) => (r.w ? r : kept(r)));
+    return interleave(out.filter(r => this.shown.has(r.w.id)), view.list, (r) => r.w.id).map((r) => (r.w ? r : kept(r)));
   }
 
   // The rows, under a header per machine once one isn't this computer.
@@ -541,11 +551,10 @@ export default class Spaces extends View {
       );
   }
 
-  // A space Herdr closed (its last tab went): dimmed, "no tabs"; a click opens it again.
+  // A space Herdr closed (its last tab went): gray avatar and name, nothing else
+  // (its color comes back when it reopens); a click opens it again.
   keptRow(k, t, collapsed) {
-    const color = k.color ?? "ansi6";
-    const fill = color.startsWith("#") ? color : (MARK[color] ?? t[color]);
-    const avatar = h_flex().size(18).flex_none().rounded(5).bg(fill).items_center().justify_center().text_size(10.5).font_bold().text_color("#ffffff").child([...k.name][0]?.toUpperCase() ?? "?");
+    const avatar = h_flex().size(18).flex_none().rounded(5).bg(t.muted).items_center().justify_center().text_size(10.5).font_bold().text_color("#ffffff").child([...k.name][0]?.toUpperCase() ?? "?");
     return h_flex()
       .id(`kept-${k.id}`)
       .h(collapsed ? 26 : 30)
@@ -557,13 +566,11 @@ export default class Spaces extends View {
       .when(!collapsed, (el) => el.rounded(8))
       .cursor_pointer()
       .hover((s) => s.bg(t.hover))
-      .tooltip(`No tabs. Click to open it again${k.folder ? ` in ${k.folder}` : ""}.`)
+      .tooltip("Closed — click to reopen")
       .on_click((_e, cx) => this.reopen(k, cx))
       .on_mouse_down("right", () => this.menu(k, "kept"))
-      .child(div().flex_none().opacity(0.45).child(avatar))
-      .when(!collapsed, (el) => el
-        .child(div().flex_shrink(0).max_w(150).truncate().text_color(t.dim).child(k.name))
-        .child(h_flex().flex_1().min_w(0).justify_end().text_size(11.5).text_color(t.dim).child(this.reopening?.id === k.id ? "Opening…" : "no tabs")));
+      .child(avatar)
+      .when(!collapsed, (el) => el.child(div().flex_shrink(0).max_w(150).truncate().text_color(t.muted).child(k.name)));
   }
 
   compact({ w, i }, t) {
