@@ -160,8 +160,8 @@ impl Highlight {
     }
 }
 
-/// Semantic colors over the TextMate tokens (phase 3: LSP `semanticTokens`, tsserver's encoded classifications, mapped
-/// through the theme's `semanticTokenColors`). Empty until something fills it: painting asks `at(line, byte)` first.
+/// Semantic colors over the TextMate tokens (LSP `semanticTokens`, tsserver's encoded classifications, mapped through
+/// the theme: lang/semantic.rs). Empty unless the theme turns semantic highlighting on: painting asks `at(line, byte)` first.
 /// Spans move with edits below them; spans on edited lines are dropped (the provider sends them again).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Span {
@@ -181,7 +181,6 @@ impl SemanticLayer {
         self.lines = vec![vec![]; lines];
     }
     /// Replaces a line's spans (sorted by start, not overlapping).
-    #[allow(dead_code)] // the phase-3 semantic tokens provider fills it
     pub fn set(&mut self, line: usize, spans: Vec<Span>) {
         if let Some(l) = self.lines.get_mut(line) {
             *l = spans;

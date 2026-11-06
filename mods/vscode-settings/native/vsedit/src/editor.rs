@@ -1,6 +1,10 @@
 //! The editor (vsedit.cjs's Editor): one file's buffer, selection and view, its edits and commands, prompts and
 //! overlays, save / quit / hot exit and auto save. Drawing and the mouse are in view.rs.
 
+mod lang_ui;
+
+pub use lang_ui::{LangDoc, LangState, MAct, Problem};
+
 use crate::autoclose::{self, Typed};
 use crate::backup;
 use crate::buffer::{caret, edit, end_of, insert_at, pos, Buffer, Change, Edit, Pos, Sel};
@@ -13,7 +17,7 @@ use crate::gitgutter::{self, GitGutter};
 use crate::highlight::{token_index, token_type_of, Highlight, SemanticLayer};
 use crate::keys::{Ev, Key};
 use crate::language::{comment_of, language_name};
-use crate::overlays::{button, Dialog, Input, InputOutcome, Outcome, Picker};
+use crate::overlays::{button, Dialog, Input, InputOutcome, Menu, Outcome, Picker};
 use crate::paint::{Color, Palette};
 use crate::scrollbar::Bar;
 use crate::settings::{self, AutoSave, Settings};
@@ -23,7 +27,7 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// Shown for the keys of features still in the JS editor (language features, the context menu, the palette).
+/// Shown for the keys of what neither editor has yet (multiple cursors, suggestions, word wrap).
 pub const NOT_YET: &str = "Not yet in the Rust editor";
 const WORD_DELAY: Duration = Duration::from_millis(250);
 
@@ -92,11 +96,14 @@ pub enum DAct {
     Discard,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum IAct {
     Goto,
     AutoSaveDelay,
     SaveAs,
+    /// Rename Symbol from this word.
+    Rename(String),
+    ChangeAll,
 }
 
 #[derive(Clone, Debug)]
@@ -109,12 +116,21 @@ pub enum PAct {
     Open(String),
     /// Go to File's ":<line>".
     GotoLine(String),
+    /// A command of the palette.
+    Command(&'static str),
+    /// A symbol: file, line, UTF-16 column.
+    Jump(PathBuf, usize, usize),
+    /// A code action of the last list.
+    Action(usize),
+    /// An information row ("Loading symbols…").
+    Nothing,
 }
 
 pub enum Popup {
     Dialog(Dialog<DAct>),
     Input(Input<IAct>),
     Picker(Picker<PAct>),
+    Menu(Menu<MAct>),
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -147,12 +163,12 @@ pub struct Message {
 
 /// Everything that belongs to one open file (vsedit.cjs DOC_FIELDS); showing another file swaps these with the editor's.
 pub struct DocState {
-    file: PathBuf,
+    pub(crate) file: PathBuf,
     doc: Doc,
-    buf: Buffer,
-    hl: Highlight,
+    pub(crate) buf: Buffer,
+    pub(crate) hl: Highlight,
     semantic: SemanticLayer,
-    indent: Indent,
+    pub(crate) indent: Indent,
     scope: Option<String>,
     language: String,
     crumbs: Vec<String>,
@@ -165,6 +181,7 @@ pub struct DocState {
     git: GitGutter,
     seen_version: u64,
     closers: (u64, Vec<Pos>),
+    lang: LangDoc,
 }
 
 impl DocState {
@@ -195,6 +212,7 @@ impl DocState {
             ranges: None,
             seen_version: 0,
             closers: (0, vec![]),
+            lang: LangDoc::default(),
         }
     }
 }
@@ -252,12 +270,16 @@ pub struct Editor {
     auto_at: Option<Instant>,
     pub exit: Option<i32>,
     /// The other open files (Go to File, Open Settings JSON, Save All, quit and hot exit go through them).
-    docs: Vec<DocState>,
+    pub(crate) docs: Vec<DocState>,
     back: Vec<NavEntry>,
     forward: Vec<NavEntry>,
     /// Go to File's list: (root, files relative to it).
     project: Option<(PathBuf, Vec<String>)>,
     vscode: PathBuf,
+    /// The current file's language session, outline and semantic state.
+    pub lang: LangDoc,
+    /// Language results, overlays and timers.
+    pub ls: LangState,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -281,7 +303,8 @@ pub enum FindAct {
 }
 
 impl Editor {
-    pub fn new(file: PathBuf, doc: Doc, hl: Highlight, index: Value, colors: &Value, vscode: PathBuf) -> Editor {
+    /// `theme`: the theme file (its colors, and semantic token colors when it turns them on).
+    pub fn new(file: PathBuf, doc: Doc, hl: Highlight, index: Value, theme: &Value, vscode: PathBuf) -> Editor {
         let settings_path = settings::settings_file();
         let (settings, settings_stamp) = settings::load(&settings_path);
         let st = DocState::new(file, doc, hl, &index, &settings);
@@ -303,7 +326,7 @@ impl Editor {
             left: st.left,
             rows: 24,
             cols: 80,
-            c: Palette::of(colors),
+            c: Palette::of(&theme["colors"]),
             index,
             settings,
             settings_stamp,
@@ -339,6 +362,8 @@ impl Editor {
             forward: vec![],
             project: None,
             vscode,
+            lang: st.lang,
+            ls: LangState::new(theme),
         }
     }
 
@@ -363,6 +388,7 @@ impl Editor {
         swap(&mut self.git, &mut st.git);
         swap(&mut self.seen_version, &mut st.seen_version);
         swap(&mut self.closers, &mut st.closers);
+        swap(&mut self.lang, &mut st.lang);
     }
 
     pub fn lines(&self) -> &[String] {
@@ -395,7 +421,11 @@ impl Editor {
 
     // ----- text rows and columns (less the scrollbars of the last frame) -----
     pub fn height(&self) -> usize {
-        (self.rows - 2 - self.hbar.shown as i32).max(1) as usize
+        (self.rows - 2 - self.panel_height() - self.hbar.shown as i32).max(1) as usize
+    }
+    /// The results panel's rows (0 without one).
+    pub fn panel_height(&self) -> i32 {
+        if self.ls.panel.is_some() { crate::overlays::Panel::height(self.rows) } else { 0 }
     }
     pub fn gutter(&self) -> usize {
         self.lines().len().to_string().len().max(3) + 3
@@ -1317,6 +1347,14 @@ impl Editor {
     }
 
     // ----- other files and navigation -----
+    /// Takes what the other open files' tokenizers sent; true when anything arrived.
+    pub fn poll_docs(&mut self) -> bool {
+        let mut any = false;
+        for d in &mut self.docs {
+            any |= d.hl.poll(&d.buf.lines);
+        }
+        any
+    }
     /// Shows the open file docs[i]; the file shown until now takes its place in `docs`.
     fn activate(&mut self, i: usize) {
         let mut st = self.docs.remove(i);
@@ -1417,11 +1455,6 @@ impl Editor {
         self.project = Some((root, list.clone()));
         list
     }
-    /// Go to File (Quick Open): the project's files by name, ":<line>" to go to a line.
-    fn quick_open(&mut self) {
-        let files = self.project_files().into_iter().map(|f| (f.clone(), String::new(), PAct::Open(f))).collect();
-        self.popup = Some(Popup::Picker(Picker::quick_open("Search files by name (: to go to a line)", files, PAct::GotoLine)));
-    }
     fn open_settings_json(&mut self) {
         let path = settings::settings_file();
         settings::load(&path); // creates it with the defaults
@@ -1453,6 +1486,14 @@ impl Editor {
             );
             return false;
         }
+        if self.settings.format_on_save && self.can("format") {
+            self.format_then_save(auto, then_quit);
+            return false;
+        }
+        self.write(auto)
+    }
+    /// Writes the file (trim, final newline from the settings): Save without the checks.
+    fn write(&mut self, auto: bool) -> bool {
         if self.settings.trim_trailing_whitespace {
             self.trim_trailing();
         }
@@ -1466,6 +1507,9 @@ impl Editor {
                 self.buf.seal();
                 backup::remove(&self.file);
                 self.git.saved();
+                if let Some(s) = &self.lang.session {
+                    s.saved(&self.file);
+                }
                 if !auto {
                     let ok = self.c.ok.clone();
                     self.say("Saved", Some(&ok), 3000);
@@ -1652,8 +1696,7 @@ impl Editor {
             vec![button("Restore", 'r', DAct::Restore), button("Discard", 'd', DAct::Discard)],
         );
     }
-    fn dialog_act(&mut self, a: DAct, term: &mut Term) {
-        let _ = term;
+    fn dialog_act(&mut self, a: DAct) {
         match a {
             DAct::QuitSave => {
                 if self.save(false, false, true) {
@@ -1709,6 +1752,8 @@ impl Editor {
     fn input_act(&mut self, a: IAct, text: String) {
         match a {
             IAct::Goto => self.goto_text(&text),
+            IAct::Rename(old) => self.rename_to(&old, text),
+            IAct::ChangeAll => self.change_all_done(true),
             IAct::AutoSaveDelay => match text.trim().parse::<f64>() {
                 Ok(n) if n.is_finite() => self.write_setting("files.autoSaveDelay", settings::js_number(n.clamp(0.1, 3600.0))),
                 _ => self.warn(format!("Not a number of seconds: {text}")),
@@ -1749,7 +1794,7 @@ impl Editor {
         let choices = langs.into_iter().map(|(label, s)| (label, s.as_ref().map_or(String::new(), |s| format!("({s})")), PAct::Language(s))).collect();
         self.choose("Select Language Mode", choices, at);
     }
-    fn pick_act(&mut self, a: PAct) {
+    fn pick_act(&mut self, a: PAct, term: Option<&mut Term>) {
         match a {
             PAct::IndentMenu(tabs) => self.pick_tab_size(tabs),
             PAct::TabSize(use_tabs, size) => {
@@ -1764,6 +1809,7 @@ impl Editor {
             }
             PAct::Language(scope) => {
                 self.scope = scope;
+                self.lang = LangDoc::default();
                 self.hl.reset(self.scope.as_deref(), &self.buf.lines);
                 self.language = language_name(self.scope.as_deref());
             }
@@ -1772,6 +1818,14 @@ impl Editor {
                 self.open(&file, None, true);
             }
             PAct::GotoLine(text) => self.goto_text(&text),
+            PAct::Command(id) => {
+                if let Some(c) = crate::commands::by_id(id) {
+                    self.run_command(c, term);
+                }
+            }
+            PAct::Jump(file, line, col) => self.jump_to(&crate::lang::Loc::at(file, crate::lang::edits::p16(line, col), None)),
+            PAct::Action(i) => self.apply_action(i),
+            PAct::Nothing => {}
         }
     }
 
@@ -1818,6 +1872,7 @@ impl Editor {
     }
     /// After each input event: restart the auto-save timer when the text changed.
     pub fn after_event(&mut self) {
+        self.note_cursor();
         if self.buf.version == self.seen_version {
             return;
         }
@@ -1844,12 +1899,12 @@ impl Editor {
     /// The earliest time something is due (a message to clear, the word highlight, auto save, the drag, git).
     pub fn deadline(&self) -> Option<Instant> {
         let word = self.word.as_ref().map(|w| w.1 + WORD_DELAY).filter(|t| *t > Instant::now());
-        [self.message.as_ref().map(|m| m.until), word, self.auto_at, self.drag_next, self.git.deadline()].into_iter().flatten().min()
+        [self.message.as_ref().map(|m| m.until), word, self.auto_at, self.drag_next, self.git.deadline(), self.lang_deadline()].into_iter().flatten().min()
     }
     /// Runs what is due; true when the screen should be drawn again.
     pub fn tick(&mut self) -> bool {
         let now = Instant::now();
-        let mut redraw = self.message.as_ref().is_some_and(|m| m.until <= now);
+        let mut redraw = self.message.as_ref().is_some_and(|m| m.until <= now) | self.lang_tick();
         if self.auto_at.is_some_and(|t| t <= now) {
             self.auto_save();
             redraw = true;
@@ -1882,11 +1937,34 @@ impl Editor {
         if self.chord_prefix.is_some() {
             return self.chord_key(ev, term);
         }
+        if self.close_hover_on_key(ev) {
+            return; // any key closes the hover; Esc only that
+        }
         if self.popup.is_some() {
-            return self.popup_event(ev, term);
+            return self.popup_event(ev, Some(term));
         }
         if self.prompt.is_some() {
             return self.prompt_key(ev);
+        }
+        if let (Some(pk), Ev::Key(k)) = (self.ls.peek.as_mut(), ev) {
+            match pk.key(k) {
+                crate::overlays::PeekOutcome::No => {}
+                crate::overlays::PeekOutcome::Stay => return,
+                crate::overlays::PeekOutcome::Close => return self.ls.peek = None,
+                crate::overlays::PeekOutcome::Open(l) => {
+                    self.ls.peek = None;
+                    return self.jump_to(&l);
+                }
+            }
+        }
+        if let (Some(pn), Ev::Key(k)) = (self.ls.panel.as_mut().filter(|p| p.focused), ev) {
+            match pn.key(k, self.rows) {
+                crate::overlays::PanelOutcome::No => {}
+                crate::overlays::PanelOutcome::Stay => return,
+                crate::overlays::PanelOutcome::Close => return self.ls.panel = None,
+                crate::overlays::PanelOutcome::Open(l) => return self.jump_to(&l),
+                crate::overlays::PanelOutcome::Toggle => return self.panel_toggle(),
+            }
         }
         let k = match ev {
             Ev::Text(t) => return self.typed(t),
@@ -1902,12 +1980,12 @@ impl Editor {
             return self.say(text, None, 60000);
         }
         if let Some(c) = self.keys.keymap.command(&chord) {
-            return self.run_act(c.act, Some(term));
+            return self.run_command(c, Some(term));
         }
         self.key(&k);
     }
 
-    pub fn popup_event(&mut self, ev: &Ev, term: &mut Term) {
+    pub fn popup_event(&mut self, ev: &Ev, term: Option<&mut Term>) {
         let area = crate::overlays::Area { c: &self.c, rows: self.rows, cols: self.cols };
         match self.popup.as_mut().unwrap() {
             Popup::Dialog(d) => match d.event(ev) {
@@ -1915,26 +1993,46 @@ impl Editor {
                 Outcome::Close => self.popup = None,
                 Outcome::Run(a) => {
                     self.popup = None;
-                    self.dialog_act(a, term);
+                    self.dialog_act(a);
                 }
             },
             Popup::Input(i) => match i.event(ev) {
                 InputOutcome::Stay => {}
-                InputOutcome::Cancel => self.popup = None,
+                InputOutcome::Changed(text) => {
+                    if matches!(i.accept, IAct::ChangeAll) {
+                        self.change_all_preview(&text);
+                    }
+                }
+                InputOutcome::Cancel => {
+                    self.popup = None;
+                    self.ls_cancel_input();
+                }
                 InputOutcome::Accept(a, text) => {
                     self.popup = None;
                     self.input_act(a, text);
                 }
             },
             Popup::Picker(p) => match p.event(ev, &area) {
+                Outcome::Stay => self.refresh_picker(false),
+                Outcome::Close => self.popup = None,
+                Outcome::Run(a) => {
+                    self.popup = None;
+                    self.pick_act(a, term);
+                }
+            },
+            Popup::Menu(m) => match m.event(ev, &area) {
                 Outcome::Stay => {}
                 Outcome::Close => self.popup = None,
                 Outcome::Run(a) => {
                     self.popup = None;
-                    self.pick_act(a);
+                    self.menu_act(a, term);
                 }
             },
         }
+    }
+    /// Esc in an inline input: Change All takes its preview back.
+    fn ls_cancel_input(&mut self) {
+        self.change_all_done(false);
     }
 
     /// Keys that aren't commands: Enter, Tab and Escape are the editor's own (movement and deletion are keymap.json's).
@@ -1946,6 +2044,7 @@ impl Editor {
             "enter" if !k.alt => self.enter(),
             "tab" => self.tab_key(k.shift),
             "escape" if !self.empty() => self.move_to(self.head(), false),
+            "escape" => self.ls.panel = None,
             _ => {}
         }
     }
@@ -1967,7 +2066,7 @@ impl Editor {
         let first = self.chord_prefix.take().unwrap_or_default();
         self.message = None;
         if let Some(c) = self.keys.keymap.command(&format!("{first} {second}")) {
-            return self.run_act(c.act, Some(term));
+            return self.run_command(c, Some(term));
         }
         let (a, b) = (self.keys.keymap.key_label(&first), self.keys.keymap.key_label(&second));
         self.warn(format!("The key combination ({a}, {b}) is not a command."));
@@ -1975,8 +2074,26 @@ impl Editor {
 
     pub fn run_act(&mut self, act: Act, term: Option<&mut Term>) {
         match act {
-            Act::Lang => self.warn(NOT_YET),
-            Act::QuickOpen => self.quick_open(),
+            Act::NotYet => self.warn(NOT_YET),
+            Act::GoTo(_)
+            | Act::PeekAt(_)
+            | Act::FindAll(_)
+            | Act::CallHierarchy
+            | Act::Rename
+            | Act::ChangeAll
+            | Act::FormatDocument
+            | Act::FormatSelection
+            | Act::CodeActions(_)
+            | Act::QuickFix
+            | Act::ShowHover
+            | Act::SmartSelect(_)
+            | Act::CursorHistory(_)
+            | Act::WorkspaceSymbols
+            | Act::ShowCommands
+            | Act::GotoSymbol
+            | Act::NextProblem(_)
+            | Act::ContextMenu => self.run_lang(act),
+            Act::QuickOpen => self.open_picker(""),
             Act::OpenSettingsJson => self.open_settings_json(),
             Act::OpenKeybindingsJson => self.open_keybindings_json(),
             Act::Navigate(dir) => self.navigate(dir),
@@ -2424,21 +2541,102 @@ mod tests {
         files.sort();
         assert_eq!(files, ["a.txt", "sub/b.rs"]);
         run(&mut ed, "workbench.action.quickOpen");
-        let Some(Popup::Picker(p)) = ed.popup.as_mut() else { panic!("no picker") };
-        let area = crate::overlays::Area { c: &Palette::of(&Value::Null), rows: 30, cols: 100 };
-        p.event(&Ev::Text("b.rs".into()), &area);
+        ed.popup_event(&Ev::Text("b.rs".into()), None);
+        let Some(Popup::Picker(p)) = ed.popup.as_ref() else { panic!("no picker") };
         assert_eq!(p.items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>(), ["sub/b.rs"]);
-        let Outcome::Run(act) = p.event(&key("enter"), &area) else { panic!() };
-        ed.popup = None;
-        ed.pick_act(act);
+        ed.popup_event(&key("enter"), None);
         assert_eq!(ed.file, dir.join("sub/b.rs"));
         run(&mut ed, "workbench.action.quickOpen");
-        let Some(Popup::Picker(p)) = ed.popup.as_mut() else { panic!() };
-        p.event(&Ev::Text(":3".into()), &area);
+        ed.popup_event(&Ev::Text(":3".into()), None);
+        let Some(Popup::Picker(p)) = ed.popup.as_ref() else { panic!() };
         assert_eq!(p.items[0].label, "Go to line 3");
-        let Outcome::Run(act) = p.event(&key("enter"), &area) else { panic!() };
-        ed.pick_act(act);
+        ed.popup_event(&key("enter"), None);
         assert_eq!(ed.head().line, 2);
+    }
+
+    #[test]
+    fn cursor_undo_goes_back_through_cursor_moves_and_redo_comes_forward() {
+        let mut ed = editor("/tmp/cu.txt", &["one two", "three"]);
+        ed.note_cursor();
+        for p in [pos(1, 0), pos(1, 5)] {
+            ed.move_to(p, false);
+            ed.after_event();
+        }
+        run(&mut ed, "cursorUndo");
+        assert_eq!(ed.head(), pos(1, 0));
+        run(&mut ed, "cursorUndo");
+        assert_eq!(ed.head(), pos(0, 0));
+        run(&mut ed, "cursorRedo");
+        assert_eq!(ed.head(), pos(1, 0));
+        ed.insert("x", false);
+        ed.after_event();
+        run(&mut ed, "cursorUndo");
+        assert_eq!(ed.head(), pos(1, 1), "a text change empties the history");
+    }
+
+    #[test]
+    fn change_all_previews_as_typed_and_esc_puts_the_word_back() {
+        let mut ed = editor("/tmp/ca.js", &["foo(foo);", "foofoo"]);
+        run(&mut ed, "editor.action.changeAll");
+        ed.popup_event(&Ev::Text("bar".into()), None);
+        assert_eq!(text(&ed), ["bar(bar);", "foofoo"], "whole words only");
+        ed.popup_event(&key("escape"), None);
+        assert_eq!(text(&ed), ["foo(foo);", "foofoo"]);
+        run(&mut ed, "editor.action.changeAll");
+        ed.popup_event(&Ev::Text("x".into()), None);
+        ed.popup_event(&key("enter"), None);
+        assert_eq!(text(&ed), ["x(x);", "foofoo"]);
+        assert_eq!(ed.message.as_ref().map(|m| m.text.as_str()), Some("Changed 2 occurrences"));
+        run(&mut ed, "undo");
+        assert_eq!(text(&ed), ["foo(foo);", "foofoo"], "one undo step");
+    }
+
+    #[test]
+    fn the_context_menu_greys_out_what_no_provider_offers_and_runs_the_rest() {
+        let mut ed = editor("/tmp/menu.txt", &["a b", "c"]);
+        run(&mut ed, "editor.action.showContextMenu");
+        let Some(Popup::Menu(m)) = ed.popup.as_ref() else { panic!("no menu") };
+        let row = |t: &str| m.rows.iter().find(|r| r.title == t).unwrap_or_else(|| panic!("{t}"));
+        assert!(row("Go to Definition").enabled, "the search fallback");
+        assert!(!row("Format Document").enabled, "no formatter for plain text");
+        assert!(row("Peek").enabled && row("Peek").submenu.len() == 4);
+        assert!(row("Command Palette...").enabled);
+        assert_eq!(m.rows.iter().filter(|r| r.sep).count(), 4);
+        ed.popup = None;
+        run(&mut ed, "workbench.action.showCommands");
+        ed.popup_event(&Ev::Text("join lines".into()), None);
+        let Some(Popup::Picker(p)) = ed.popup.as_ref() else { panic!("no palette") };
+        assert_eq!((p.text.as_str(), p.items[0].label.as_str()), (">join lines", "Join Lines"));
+        ed.popup_event(&key("enter"), None);
+        assert_eq!(text(&ed), ["a b c"]);
+    }
+
+    #[test]
+    fn go_to_definition_without_a_server_searches_the_folder() {
+        let dir = temp_folder("definition");
+        fs::write(dir.join("a.go"), "package main\n\nfunc greet() {}\n").unwrap();
+        fs::write(dir.join("b.go"), "package main\n\nfunc main() { greet() }\n").unwrap();
+        let mut ed = on_disk(&dir.join("b.go"));
+        ed.move_to(pos(2, 16), false);
+        run(&mut ed, "editor.action.revealDefinition");
+        assert!(ed.wait_jobs(5000), "no answer");
+        assert_eq!((ed.file.clone(), ed.head()), (dir.join("a.go"), pos(2, 5)));
+        run(&mut ed, "workbench.action.gotoSymbol");
+        assert!(ed.wait_jobs(5000));
+        let Some(Popup::Picker(p)) = ed.popup.as_ref() else { panic!("no symbols") };
+        assert_eq!((p.note.as_str(), p.items[0].label.as_str(), p.items[0].key.as_str()), ("regex outline (no language server)", "greet", "3"));
+    }
+
+    #[test]
+    fn expand_selection_grows_through_the_string_and_shrink_goes_back() {
+        let mut ed = editor("/tmp/s.go", &["f(\"hi there\", x)"]);
+        ed.move_to(pos(0, 4), false);
+        let mut got = vec![];
+        for id in ["editor.action.smartSelect.expand", "editor.action.smartSelect.expand", "editor.action.smartSelect.expand", "editor.action.smartSelect.shrink"] {
+            run(&mut ed, id);
+            got.push(sel(&ed));
+        }
+        assert_eq!(got, [[0, 3, 0, 5], [0, 3, 0, 11], [0, 2, 0, 12], [0, 3, 0, 11]]);
     }
 
     #[test]

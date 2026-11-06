@@ -82,6 +82,14 @@ pub struct Palette {
     pub fold_control: Color,
     pub fold_background: Color,
     pub fold_placeholder: Color,
+    pub hover_bg: Color,
+    pub hover_border: Color,
+    pub light_bulb: Color,
+    pub peek: Color,
+    pub peek_line: Color,
+    /// Diagnostics by severity (1 error, 2 warning, 3 information; 0 unused): squiggles and gutter marks, ruler marks.
+    pub diag: [Color; 4],
+    pub ruler_diag: [Color; 4],
 }
 
 impl Palette {
@@ -142,6 +150,18 @@ impl Palette {
             fold_control: bl("editorGutter.foldingControlForeground", "#c5c5c5"),
             fold_background: blend(Some(get("editor.foldBackground").map(str::to_string).unwrap_or(format!("{selection}4d")).as_str()), &bg),
             fold_placeholder: bl("editor.foldPlaceholderForeground", "#808080"),
+            hover_bg: op("editorHoverWidget.background", "#21252b"),
+            hover_border: op("editorHoverWidget.border", "#454545"),
+            light_bulb: op("editorLightBulb.foreground", "#ffcc00"),
+            peek: op("peekViewEditor.background", "#1b1d23"),
+            peek_line: op("list.activeSelectionBackground", "#2c313a"),
+            diag: [String::new(), op("editorError.foreground", "#f14c4c"), op("editorWarning.foreground", "#cca700"), op("editorInfo.foreground", "#3794ff")],
+            ruler_diag: [
+                String::new(),
+                bl("editorOverviewRuler.errorForeground", "#ff1212b3"),
+                bl("editorOverviewRuler.warningForeground", "#cca700"),
+                bl("editorOverviewRuler.infoForeground", "#3794ff"),
+            ],
             widget,
             selection,
             bg,

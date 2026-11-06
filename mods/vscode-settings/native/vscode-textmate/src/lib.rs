@@ -15,3 +15,4 @@ pub use onig::{Match, OnigString, Scanner};
 pub use grammar::{Grammar, StateStack, TokenizeLineResult2};
 pub use raw::{parse_jsonc, parse_raw_grammar};
 pub use registry::{Loader, Registry};
+pub use theme::{StyleAttributes, Theme, FONT_STYLE_NOT_SET};

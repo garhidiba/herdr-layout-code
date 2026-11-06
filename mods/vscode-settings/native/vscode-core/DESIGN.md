@@ -370,15 +370,15 @@ contract. One module per JS file: `buffer`, `keys`, `width`, `paint`, `file`, `s
   Typing a quote waits up to 20 ms for the line's tokens (the string/comment check), as the JS tokenizes it inline.
 - **Find** uses Oniguruma (exported from vscode-textmate) in place of JavaScript's RegExp: `(?i)` for Match Case
   off, `(?<![\p{L}\p{N}_$])…(?![\p{L}\p{N}_$])` for whole words; `$n`, `$&`, `$<name>`, `\n`, `\t` replacements.
-- **Semantic layer (phase 3 hook):** `highlight::SemanticLayer`, spans (line, start, end → fg, font style) painted
-  over the TextMate colors; spans move with edits below them and are dropped on edited lines. Empty in phase 2.
+- **Semantic layer:** `highlight::SemanticLayer`, spans (line, start, end → fg, font style) painted over the TextMate
+  colors; spans move with edits below them and are dropped on edited lines. Filled in phase 3 (below), only for a
+  theme with `"semanticHighlighting": true`.
 - **Keys:** ids, titles and default keys per OS come from the shared table `mods/vscode-viewer/editor/keymap.json`
   (`{ id, title, keys: { mac, win, linux } }`, read at start next to `--vscode`). An id the binary implements runs; an
-  id in `commands.rs`'s `NOT_YET_IDS` (the phase-3 features below, plus the JS editor's later batches it knows by VS Code
-  id: Quick Fix, hover, smart select, format selection, cursor undo/redo, workspace symbols, multiple cursors,
-  suggestions, word wrap) shows `Not yet in the Rust editor`; any other id means the table is newer than the binary,
-  and the file goes to the JS editor rather than lose a command. So a new JS language feature needs its id in
-  `NOT_YET_IDS`, and a new JS editing command needs its Rust port, before a release. The OS is `VSEDIT_OS`, else the platform, as in commands.cjs. Two-step chords as
+  id in `commands.rs`'s `NOT_YET_IDS` (only what the JS editor lacks too, bound by the user: multiple cursors,
+  suggestions, parameter hints, word wrap, declarations) shows `Not yet in the Rust editor`; any other id means the
+  table is newer than the binary, and the file goes to the JS editor rather than lose a command. So a new JS command
+  needs its Rust port before a release. The OS is `VSEDIT_OS`, else the platform, as in commands.cjs. Two-step chords as
   keybindings.cjs: the first key shows `(⌘K) was pressed. Waiting for second key of chord...`, the second runs the
   command or says `The key combination (…, …) is not a command.`, and a typed character counts as the second key.
   Movement and deletion (cursorHome, cursorLineStart, deleteAllLeft, macOS ⌃A/⌃E/⌃K/⌃U, …) are commands of the
@@ -390,9 +390,7 @@ contract. One module per JS file: `buffer`, `keys`, `width`, `paint`, `file`, `s
   Open Settings / Keyboard Shortcuts (JSON) (outside Herdr, or by their JSON commands), Save As (the text becomes the
   new file's document), Save All and auto save (other files written as they are; one changed on disk is left), quit
   (asks about each unsaved file, showing it) and hot exit (every unsaved file) work across them.
-- Phase 3 (JS only for now): language features (tsserver/LSP: definition, references, rename, hover, format,
-  diagnostics, document symbols and symbol breadcrumbs), the context menu, the command palette (also `>` in Go to File)
-  — their keys show `Not yet in the Rust editor`.
+- Language features, the context menu and the command palette: phase 3 below.
 - POSIX only (macOS, Linux: `libc` termios, signals, `exec`); Windows keeps the JS editor.
 
 ### Launch and engine switch
@@ -417,9 +415,10 @@ other than 1) / `not built` from `vsedit --version`, and offers the build while 
   editor's commands on real grammars: Expand Line Selection, Join Lines, Delete All Left/Right, Toggle Block Comment,
   Go/Select to Bracket, Find With Selection, Save As, Save All, Go Back/Forward, Go to File).
 - `VSEDIT_BIN=<target>/release/vsedit python3 -I mods/vscode-viewer/editor/test/e2e.py`: the JS editor's e2e
-  scenarios through the launcher with the Rust engine forced; the four phase-3 scenarios are skipped, the table says
-  which editor ran, and a scenario the Rust editor didn't run alone (a fallback to JS) fails. All 20 phase-2 scenarios
-  pass in Rust (and all 24 in JS), `small_batch` and `files_and_navigation` included.
+  scenarios through the launcher with the Rust engine forced; the table says which editor ran, and a scenario the Rust
+  editor didn't run alone (a fallback to JS) fails. All 26 scenarios pass in both editors (phase 3 removed the skip
+  list). The launcher keeps the caller's PATH first (the tool folders after it), so the tests' `herdr-app` stub wins
+  over an installed Herdr.
 
 ### Measured (this Mac, USB disk; `mods/vscode-viewer/editor/test/latency.py --runs 3`, medians)
 
@@ -436,3 +435,47 @@ run directly; through the launcher add one `sh` and one `vsedit --api` (a few ms
 Start-up is 2–4× faster (no Node, no WASM), and the minified line no longer blocks typing (the JS spends its
 25 ms slice per keystroke re-tokenizing it; the worker does that off the input thread). Typing in ordinary files
 was already ~2 ms in JS.
+
+## Editor on Rust: phase 3 (language features)
+
+### What exists
+
+- **Language layer** (`vsedit/src/lang/`, one module per `lang/*.cjs`): `rpc` (Content-Length frames, a child process
+  with its own reader thread, requests waited on with a timeout, every pending one failed when it dies), `lsp`
+  (full-text sync, the server's requests: configuration, applyEdit, workspace folders, dynamic registration),
+  `tsserver` (JSON lines in, frames out, 1-based offsets), `fallback` (git grep / grep -r definitions and references,
+  gofmt / rustfmt / prettier), `edits` (workspace edits in UTF-16 columns, Format Selection's `editsWithin`), and
+  `mod` (index.cjs: the same scope → server table and lookup paths — the project's typescript then `tsserver` on PATH,
+  rust-analyzer in `~/.cargo/bin`, clangd and sourcekit-lsp in `/usr/bin`, VS Code's JSON / CSS / HTML servers under
+  Devin.app — one server per (kind, git root), `Session` picking the provider per operation as `can` / `provider` do).
+  Plus `symbols.rs` (LSP / navtree / regex outline, the symbol path) and `smartselect.rs`.
+- **Never on the input thread.** Every server operation runs on a thread of its own and comes back as a job (a closure
+  run between input events, with a wake-up through the terminal's wake pipe); a result for a text version or file
+  that changed meanwhile is dropped, as the JS checks `buf.version`. Servers start from those threads too (the outline
+  300 ms after a file opens or changes, as the JS's first `queueOutline`), diagnostics arrive on the reader threads
+  (a counter the loop checks), and a server's `workspace/applyEdit` waits on its reader thread while the editor applies
+  it. `lang::shutdown()` kills every server whenever the editor leaves (quit, signal, crash page's Try Again); a
+  SIGKILLed editor closes their stdin, and they exit.
+- **Features**, ported from vsedit.cjs: Go to / Peek / Find All definition, type definition, implementation and
+  references (the peek box colors the other file's lines through its own tokenizer), call hierarchy with Tab, Rename
+  (Change All Occurrences in the file without a server) and Change All with its live preview, Format Document and
+  Selection (with the `editsWithin` fallback) and format on save, Refactor / Source Action pickers, Quick Fix with the
+  light bulb `◆`, hover by key and by the resting pointer (`editor.hover.enabled`), diagnostics (curly underlines,
+  gutter `●`, ruler marks, the status bar, F8), Go to Symbol (`@`) and the breadcrumbs' symbols, Go to Symbol in
+  Workspace (`#`), Expand / Shrink Selection, Cursor Undo / Redo, the context menu (VS Code's groups, Peek submenu,
+  greyed out without a provider) and the command palette (`>`; Go to File's `>` / `@` / `#` / `:`). Positions cross the
+  boundary as UTF-16 columns (the servers' unit) and become byte offsets in the editor.
+- **Semantic highlighting** (the JS editor has none): with `"semanticHighlighting": true` in the theme, after each
+  outline the editor asks the running server for `textDocument/semanticTokens/full` (`/full/delta` from the last
+  result when the server offers it) or tsserver's `encodedSemanticClassifications-full` (format 2020), maps each token
+  through the theme's `semanticTokenColors` (the most specific selector per attribute) else VS Code's default semantic
+  token → TextMate scope map through `tokenColors`, and fills the semantic layer. The akamud theme doesn't turn it on, so
+  nothing is asked and the colors are TextMate's as before.
+
+### Tests
+
+`cargo test -p vsedit` adds the language layer (frames, URIs, locations / workspace edits / hover / diagnostics shapes,
+tsserver diagnostics, UTF-16 columns, `editsWithin`, grep parsing, the outline and symbol path, smart select's chain,
+semantic token decoding, deltas and theme mapping with a small theme that turns it on, hover Markdown, menu stepping)
+and editor tests without a server (Cursor Undo / Redo, Change All's preview, the context menu's enabled rows and the
+palette, Go to Definition and Go to Symbol through the fallback, Expand / Shrink Selection in a string).

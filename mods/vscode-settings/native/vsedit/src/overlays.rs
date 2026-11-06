@@ -1,9 +1,13 @@
-//! Overlays drawn over the text (overlays.cjs): the modal dialog, the input box and the quick pick. They hold no
-//! editor state: keys and clicks come back as an `Outcome` carrying the caller's action.
+//! Overlays drawn over the text (overlays.cjs): the modal dialog, the input box, the quick pick, the context menu, the
+//! results panel, the peek box and the hover box. They hold no editor state: keys and clicks come back as an outcome
+//! carrying the caller's action.
 
 use crate::keys::{Ev, Mouse};
+use crate::lang::Loc;
 use crate::paint::{fit, Painter, Palette};
 use crate::width::{char_width, text_width};
+use std::path::{Path, PathBuf};
+use vscode_textmate::{OnigString, Scanner};
 
 const WHITE: &str = "#ffffff";
 
@@ -156,36 +160,56 @@ impl<T: Clone> Dialog<T> {
 
 // ---------- input box ----------
 
-/// A one-line prompt on the first text row (go to line, the auto save delay).
+/// A one-line prompt: on the first text row (go to line, the auto save delay, Save As), or in a box under a text
+/// position (`at`: rename, change all) with its label below.
 pub struct Input<T> {
     pub label: String,
     pub text: String,
     pub select_all: bool,
     pub accept: T,
     pub cursor: (i32, i32),
+    pub at: Option<(i32, i32)>,
 }
 
 pub enum InputOutcome<T> {
     Stay,
+    /// The text changed (a live preview may follow it).
+    Changed(String),
     Cancel,
     Accept(T, String),
 }
 
 impl<T: Clone> Input<T> {
     pub fn new(label: &str, text: &str, accept: T) -> Input<T> {
-        Input { label: label.into(), text: text.into(), select_all: !text.is_empty(), accept, cursor: (2, 1) }
+        Input { label: label.into(), text: text.into(), select_all: !text.is_empty(), accept, cursor: (2, 1), at: None }
     }
 
     pub fn render(&mut self, p: &mut Painter, a: &Area) {
-        let label = format!(" {} ", self.label);
-        p.move_to(2, 1);
-        p.text(&fit(&format!("{label}{}", self.text), a.cols as usize), &a.c.fg, &a.c.widget);
-        self.cursor = (2, a.cols.min(tw(&label) + tw(&self.text) + 1));
+        let c = a.c;
+        let Some((row, col)) = self.at else {
+            let label = format!(" {} ", self.label);
+            p.move_to(2, 1);
+            p.text(&fit(&format!("{label}{}", self.text), a.cols as usize), &c.fg, &c.widget);
+            self.cursor = (2, a.cols.min(tw(&label) + tw(&self.text) + 1));
+            return;
+        };
+        let w = a.cols.min(28.max(tw(&self.text) + 4));
+        let x = col.min(a.cols - w + 1).max(1);
+        frame(p, a, x, row, w, 3, &c.accent);
+        p.move_to(row + 1, x + 1);
+        let (fg, bg) = if self.select_all { (WHITE, &c.selection) } else { (c.fg.as_str(), &c.input) };
+        p.text(&fit(&format!(" {}", self.text), (w - 2).max(0) as usize), fg, bg);
+        if !self.label.is_empty() {
+            p.move_to(row + 2, x + 2);
+            p.text(&fit(&format!(" {} ", self.label), (w - 4).max(0) as usize), &c.bar_fg, &c.widget);
+        }
+        self.cursor = (row + 1, x + 2 + (w - 4).min(tw(&self.text)));
     }
 
-    fn set(&mut self, v: String) {
+    fn set(&mut self, v: String) -> InputOutcome<T> {
         self.text = v;
         self.select_all = false;
+        InputOutcome::Changed(self.text.clone())
     }
 
     pub fn event(&mut self, ev: &Ev) -> InputOutcome<T> {
@@ -193,7 +217,7 @@ impl<T: Clone> Input<T> {
             Ev::Text(t) | Ev::Paste(t) => {
                 let first = t.split(['\r', '\n']).next().unwrap_or("");
                 let base = if self.select_all { String::new() } else { self.text.clone() };
-                self.set(base + first);
+                return self.set(base + first);
             }
             Ev::Key(k) => match k.name.as_str() {
                 "escape" => return InputOutcome::Cancel,
@@ -201,7 +225,7 @@ impl<T: Clone> Input<T> {
                 "backspace" => {
                     let mut t = if self.select_all { String::new() } else { self.text.clone() };
                     t.pop();
-                    self.set(t);
+                    return self.set(t);
                 }
                 "left" | "right" | "home" | "end" => self.select_all = false,
                 _ => {}
@@ -217,52 +241,64 @@ impl<T: Clone> Input<T> {
 pub struct Item<T> {
     pub label: String,
     pub detail: String,
+    /// Dim text at the row's right end (a command's key, a symbol's line).
+    pub key: String,
     pub hits: Vec<usize>,
     pub act: T,
 }
 
-/// A quick pick of fixed choices, filtered as typed (fuzzy), starting on `index`.
+pub fn item<T>(label: impl Into<String>, act: T) -> Item<T> {
+    Item { label: label.into(), detail: String::new(), key: String::new(), hits: vec![], act }
+}
+
+/// A quick pick: fixed choices filtered as typed (fuzzy), or rows the editor computes from the text (`changed` tells
+/// it to, Go to File's files, `>` commands, `@` / `#` symbols, `:` line).
 pub struct Picker<T> {
     pub text: String,
     pub placeholder: String,
-    choices: Vec<(String, String, T)>,
+    /// Dim text at the input's right end (where the results come from).
+    pub note: String,
+    choices: Option<Vec<(String, String, T)>>,
     pub items: Vec<Item<T>>,
     pub index: usize,
     top: usize,
     pub cursor: (i32, i32),
-    /// Go to File: ":<line>" offers this (with the text after ':'), and at most 300 matches show.
-    goto_line: Option<fn(String) -> T>,
+    /// The text changed since the editor last filled a computed picker.
+    pub changed: bool,
 }
 
 impl<T: Clone> Picker<T> {
     pub fn new(placeholder: &str, choices: Vec<(String, String, T)>, index: usize) -> Picker<T> {
-        let mut p = Picker { text: String::new(), placeholder: placeholder.into(), choices, items: vec![], index: 0, top: 0, cursor: (2, 1), goto_line: None };
+        let mut p = Picker { text: String::new(), placeholder: placeholder.into(), note: String::new(), choices: Some(choices), items: vec![], index: 0, top: 0, cursor: (2, 1), changed: false };
         p.refresh();
         p.index = index.min(p.items.len().saturating_sub(1));
         p
     }
 
-    /// Go to File (Quick Open): the files, filtered as typed; ":<line>" goes to a line of the current file.
-    pub fn quick_open(placeholder: &str, files: Vec<(String, String, T)>, goto_line: fn(String) -> T) -> Picker<T> {
-        let mut p = Picker::new(placeholder, files, 0);
-        p.goto_line = Some(goto_line);
-        p.refresh();
-        p
+    /// Rows computed by the editor from the text, starting with `text`.
+    pub fn computed(text: &str, placeholder: &str, note: &str) -> Picker<T> {
+        Picker { text: text.into(), placeholder: placeholder.into(), note: note.into(), choices: None, items: vec![], index: 0, top: 0, cursor: (2, 1), changed: true }
+    }
+
+    pub fn is_computed(&self) -> bool {
+        self.choices.is_none()
+    }
+
+    /// New rows for a computed picker (the selection back on the first).
+    pub fn set_items(&mut self, items: Vec<Item<T>>) {
+        self.items = items;
+        (self.index, self.top, self.changed) = (0, 0, false);
     }
 
     fn refresh(&mut self) {
-        if let (Some(go), Some(line)) = (self.goto_line, self.text.strip_prefix(':')) {
-            let label = if line.is_empty() { "Type a line number to go to".to_string() } else { format!("Go to line {line}") };
-            self.items = vec![Item { label, detail: String::new(), hits: vec![], act: go(line.to_string()) }];
-            (self.index, self.top) = (0, 0);
+        let Some(choices) = &self.choices else {
+            self.changed = true;
             return;
-        }
-        let labels: Vec<&str> = self.choices.iter().map(|c| c.0.as_str()).collect();
-        let limit = if self.goto_line.is_some() { 300 } else { usize::MAX };
+        };
+        let labels: Vec<&str> = choices.iter().map(|c| c.0.as_str()).collect();
         self.items = filter(&labels, self.text.trim())
             .into_iter()
-            .take(limit)
-            .map(|(i, hits)| Item { label: self.choices[i].0.clone(), detail: self.choices[i].1.clone(), hits, act: self.choices[i].2.clone() })
+            .map(|(i, hits)| Item { label: choices[i].0.clone(), detail: choices[i].1.clone(), key: String::new(), hits, act: choices[i].2.clone() })
             .collect();
         self.index = 0;
         self.top = 0;
@@ -280,9 +316,11 @@ impl<T: Clone> Picker<T> {
         let inner = w - 2;
         frame(p, a, x, y, w, size as i32 + 3, &c.border);
         p.move_to(y + 1, x + 1);
+        let note = if !self.note.is_empty() && tw(&self.note) + 4 < inner / 2 { format!("{} ", self.note) } else { String::new() };
         p.text(" ", &c.fg, &c.input);
         let shown = if self.text.is_empty() { &self.placeholder } else { &self.text };
-        p.text(&fit(shown, (inner - 2).max(0) as usize), if self.text.is_empty() { &c.line_number } else { &c.fg }, &c.input);
+        p.text(&fit(shown, (inner - 2 - tw(&note)).max(0) as usize), if self.text.is_empty() { &c.line_number } else { &c.fg }, &c.input);
+        p.text(&note, &c.line_number, &c.input);
         p.text(" ", &c.fg, &c.input);
         self.cursor = (y + 1, x + 2 + (inner - 3).min(tw(&self.text)));
         if self.index < self.top {
@@ -297,11 +335,12 @@ impl<T: Clone> Picker<T> {
                 continue;
             };
             let bg = if self.top + r == self.index { &c.selection } else { &c.widget };
+            let key = if it.key.is_empty() { String::new() } else { format!("{} ", it.key) };
             p.text(" ", &c.fg, bg);
             let mut used = 1;
             for (i, ch) in it.label.char_indices() {
                 let cw = char_width(ch) as i32;
-                if used + cw > inner - 1 {
+                if used + cw > inner - tw(&key) - 1 {
                     break;
                 }
                 let hit = it.hits.contains(&i);
@@ -309,7 +348,8 @@ impl<T: Clone> Picker<T> {
                 used += cw;
             }
             let detail = if it.detail.is_empty() { String::new() } else { format!("  {}", it.detail) };
-            p.text(&fit(&detail, (inner - used).max(0) as usize), &c.line_number, bg);
+            p.text(&fit(&detail, (inner - used - tw(&key)).max(0) as usize), &c.line_number, bg);
+            p.text(&key, &c.bar_fg, bg);
         }
     }
 
@@ -348,6 +388,534 @@ impl<T: Clone> Picker<T> {
             _ => {}
         }
         Outcome::Stay
+    }
+}
+
+// ---------- context menu ----------
+
+/// A menu row: a separator, or a command (`act`) / submenu, greyed out when not enabled.
+#[derive(Clone)]
+pub struct Row<T> {
+    pub sep: bool,
+    pub title: String,
+    pub key: String,
+    pub enabled: bool,
+    pub act: Option<T>,
+    pub submenu: Vec<Row<T>>,
+}
+
+pub fn sep<T>() -> Row<T> {
+    Row { sep: true, title: String::new(), key: String::new(), enabled: false, act: None, submenu: vec![] }
+}
+
+/// The next selectable row from `i` (None: before the first) in direction `dir`, wrapping.
+pub fn step_menu<T>(rows: &[Row<T>], i: Option<usize>, dir: i64) -> Option<usize> {
+    let n = rows.len() as i64;
+    let i = i.map_or(if dir > 0 { -1 } else { n }, |i| i as i64);
+    (1..=n).map(|k| (((i + dir * k) % n) + n) % n).map(|j| j as usize).find(|&j| !rows[j].sep && rows[j].enabled)
+}
+
+/// VS Code's editor context menu (also the quick fix menu): arrows, Enter / Space, → opens a submenu, the pointer
+/// highlights and clicks.
+pub struct Menu<T> {
+    pub rows: Vec<Row<T>>,
+    pub index: Option<usize>,
+    pub x: i32,
+    pub y: i32,
+    w: i32,
+    h: i32,
+    sub: Option<Box<Menu<T>>>,
+    /// A submenu: where its parent menu starts (it flips to the left of it at the right edge).
+    parent_x: Option<i32>,
+}
+
+impl<T: Clone> Menu<T> {
+    pub fn new(rows: Vec<Row<T>>, x: i32, y: i32) -> Menu<T> {
+        let w = rows.iter().map(|r| if r.sep { 0 } else { tw(&r.title) + if !r.key.is_empty() || !r.submenu.is_empty() { tw(if r.key.is_empty() { "›" } else { &r.key }) + 6 } else { 2 } }).max().unwrap_or(0) + 4;
+        let h = rows.len() as i32 + 2;
+        Menu { rows, index: None, x, y, w, h, sub: None, parent_x: None }
+    }
+
+    fn place(&mut self, a: &Area) {
+        self.w = self.w.min(a.cols);
+        self.h = self.h.min(a.rows);
+        if self.x + self.w - 1 > a.cols {
+            self.x = 1.max(self.parent_x.map_or(a.cols - self.w + 1, |px| px - self.w + 1));
+        }
+        if self.y + self.h - 1 > a.rows {
+            self.y = 1.max(a.rows - self.h + 1);
+        }
+    }
+
+    pub fn render(&mut self, p: &mut Painter, a: &Area) {
+        self.place(a);
+        let c = a.c;
+        let inner = self.w - 2;
+        frame(p, a, self.x, self.y, self.w, self.h, &c.border);
+        for (i, r) in self.rows.iter().take((self.h - 2).max(0) as usize).enumerate() {
+            let row = self.y + 1 + i as i32;
+            if r.sep {
+                p.move_to(row, self.x);
+                p.text(&format!("├{}┤", "─".repeat(inner.max(0) as usize)), &c.border, &c.widget);
+                continue;
+            }
+            p.move_to(row, self.x + 1);
+            let on = self.index == Some(i);
+            let fg = if !r.enabled { c.line_number.as_str() } else if on { WHITE } else { c.fg.as_str() };
+            let bg = if on { &c.button } else { &c.widget };
+            let right = if r.submenu.is_empty() { r.key.as_str() } else { "›" };
+            p.text(&fit(&format!(" {}", r.title), (inner - tw(right) - 1).max(0) as usize), fg, bg);
+            p.text(&format!("{right} "), if !r.enabled { &c.line_number } else if on { WHITE } else { &c.bar_fg }, bg);
+        }
+        if let Some(s) = self.sub.as_mut() {
+            s.render(p, a);
+        }
+    }
+
+    fn open_sub(&mut self, a: &Area) -> bool {
+        let Some(r) = self.index.and_then(|i| self.rows.get(i)) else { return false };
+        if r.submenu.is_empty() || !r.enabled {
+            return false;
+        }
+        let mut sub = Menu::new(r.submenu.clone(), self.x + self.w - 1, self.y + self.index.unwrap_or(0) as i32);
+        sub.parent_x = Some(self.x);
+        sub.index = step_menu(&sub.rows, None, 1);
+        sub.place(a);
+        self.sub = Some(Box::new(sub));
+        true
+    }
+
+    fn activate(&mut self, a: &Area) -> Outcome<T> {
+        let Some(r) = self.index.and_then(|i| self.rows.get(i)) else { return Outcome::Stay };
+        if r.sep || !r.enabled {
+            return Outcome::Stay;
+        }
+        if !r.submenu.is_empty() {
+            self.open_sub(a);
+            return Outcome::Stay;
+        }
+        r.act.clone().map_or(Outcome::Close, Outcome::Run)
+    }
+
+    pub fn event(&mut self, ev: &Ev, a: &Area) -> Outcome<T> {
+        if let Ev::Mouse(m) = ev {
+            return self.mouse(m, a).unwrap_or(Outcome::Stay);
+        }
+        let Ev::Key(k) = ev else { return Outcome::Stay };
+        if let Some(s) = self.sub.as_mut() {
+            if k.name == "left" || k.name == "escape" {
+                self.sub = None;
+                return Outcome::Stay;
+            }
+            return s.event(ev, a);
+        }
+        match k.name.as_str() {
+            "escape" => return Outcome::Close,
+            "left" if self.parent_x.is_none() => return Outcome::Close,
+            "up" | "down" => {
+                if let Some(j) = step_menu(&self.rows, self.index, if k.name == "up" { -1 } else { 1 }) {
+                    self.index = Some(j);
+                }
+            }
+            "home" | "end" => {
+                if let Some(j) = step_menu(&self.rows, None, if k.name == "home" { 1 } else { -1 }) {
+                    self.index = Some(j);
+                }
+            }
+            "right" => {
+                self.open_sub(a);
+            }
+            "enter" | "space" => return self.activate(a),
+            _ => {}
+        }
+        Outcome::Stay
+    }
+
+    /// None when the event isn't this menu's (a submenu's pointer outside it goes to its parent).
+    fn mouse(&mut self, m: &Mouse, a: &Area) -> Option<Outcome<T>> {
+        if let Some(s) = self.sub.as_mut() {
+            if let Some(o) = s.mouse(m, a) {
+                return Some(o);
+            }
+        }
+        if !inside(m, self.x, self.y, self.w, self.h) {
+            if self.parent_x.is_some() {
+                return None;
+            }
+            let click = !m.release && !m.motion && !m.wheel();
+            return Some(if click { Outcome::Close } else { Outcome::Stay });
+        }
+        let i = (m.y - self.y - 1) as usize;
+        let Some(r) = self.rows.get(i).filter(|r| !r.sep) else { return Some(Outcome::Stay) };
+        if r.enabled {
+            self.index = Some(i);
+            if r.submenu.is_empty() {
+                self.sub = None;
+            } else if self.sub.is_none() {
+                self.open_sub(a);
+            }
+        }
+        Some(if m.press() { self.activate(a) } else { Outcome::Stay })
+    }
+}
+
+// ---------- results panel ----------
+
+/// A results panel row: a file (its result count) or one result.
+enum PanelRow {
+    File(PathBuf, usize),
+    Item(usize),
+}
+
+pub enum PanelOutcome {
+    /// Not the panel's event.
+    No,
+    Stay,
+    Close,
+    Open(Loc),
+    Toggle,
+}
+
+/// References, implementations, calls: results grouped by file at the bottom, like VS Code's references view.
+pub struct Panel {
+    pub title: String,
+    pub items: Vec<Loc>,
+    /// Tab's label (call hierarchy: the other direction).
+    pub toggle: Option<String>,
+    pub focused: bool,
+    rows: Vec<PanelRow>,
+    index: Option<usize>,
+    top: usize,
+    files: usize,
+}
+
+impl Panel {
+    pub fn new(title: &str, items: Vec<Loc>, toggle: Option<String>) -> Panel {
+        let mut files: Vec<PathBuf> = vec![];
+        for it in &items {
+            if !files.contains(&it.file) {
+                files.push(it.file.clone());
+            }
+        }
+        let mut rows = vec![];
+        for f in &files {
+            let mine: Vec<usize> = (0..items.len()).filter(|&i| items[i].file == *f).collect();
+            rows.push(PanelRow::File(f.clone(), mine.len()));
+            rows.extend(mine.into_iter().map(PanelRow::Item));
+        }
+        let index = rows.iter().position(|r| matches!(r, PanelRow::Item(_)));
+        Panel { title: title.into(), files: files.len(), items, toggle, focused: true, rows, index, top: 0 }
+    }
+
+    pub fn height(rows: i32) -> i32 {
+        4.max(rows * 4 / 10)
+    }
+
+    pub fn render(&mut self, p: &mut Painter, a: &Area, root: &Path) {
+        let c = a.c;
+        let h = Panel::height(a.rows);
+        let y0 = a.rows - h;
+        let n = self.items.len();
+        let summary = if n > 0 { format!("{n} result{} in {} file{}", if n == 1 { "" } else { "s" }, self.files, if self.files == 1 { "" } else { "s" }) } else { "No results".into() };
+        let hint = format!("{}Enter open · Esc close ", self.toggle.as_ref().map_or(String::new(), |t| format!("Tab: {t} · ")));
+        p.move_to(y0, 1);
+        p.styled(&fit(&format!(" {}   {summary}", self.title.to_uppercase()), (a.cols - tw(&hint)).max(0) as usize), &c.fg, &c.bar, 2, None);
+        if tw(&hint) < a.cols {
+            p.text(&hint, &c.bar_fg, &c.bar);
+        }
+        let size = (h - 1) as usize;
+        let index = self.index.unwrap_or(0);
+        if index < self.top {
+            self.top = index;
+        } else if index >= self.top + size {
+            self.top = index + 1 - size;
+        }
+        for r in 0..size {
+            p.move_to(y0 + 1 + r as i32, 1);
+            let on = self.index == Some(self.top + r);
+            let bg = if on { if self.focused { &c.selection } else { &c.current_line } } else { &c.widget };
+            match self.rows.get(self.top + r) {
+                None => p.text(&" ".repeat(a.cols.max(0) as usize), &c.fg, &c.widget),
+                Some(PanelRow::File(f, count)) => {
+                    let name = f.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                    let dir = f.parent().and_then(|d| d.strip_prefix(root).ok()).map(|d| d.to_string_lossy().into_owned()).filter(|d| !d.is_empty()).unwrap_or_else(|| ".".into());
+                    p.text(" ▾ ", &c.bar_fg, bg);
+                    p.styled(&name, &c.fg, bg, 2, None);
+                    p.text(&fit(&format!("  {dir}  ({count})"), (a.cols - 3 - tw(&name)).max(0) as usize), &c.line_number, bg);
+                }
+                Some(PanelRow::Item(i)) => {
+                    let it = &self.items[*i];
+                    let lead = format!("     {:<8} ", format!("{}:{}", it.line + 1, it.col + 1));
+                    let preview = it.preview.as_deref().unwrap_or("").trim();
+                    let text = match &it.name {
+                        Some(name) => format!("{name}{}   {preview}", if it.detail.is_empty() { String::new() } else { format!("  {}", it.detail) }),
+                        None => preview.to_string(),
+                    };
+                    p.text(&lead, &c.line_number, bg);
+                    p.text(&fit(&text, (a.cols - tw(&lead)).max(0) as usize), &c.fg, bg);
+                }
+            }
+        }
+    }
+
+    fn step(&mut self, dir: i64) {
+        let mut j = self.index.map_or(-1, |i| i as i64) + dir;
+        while j >= 0 && (j as usize) < self.rows.len() {
+            if matches!(self.rows[j as usize], PanelRow::Item(_)) {
+                self.index = Some(j as usize);
+                return;
+            }
+            j += dir;
+        }
+    }
+
+    fn current(&self) -> Option<Loc> {
+        match self.rows.get(self.index?)? {
+            PanelRow::Item(i) => self.items.get(*i).cloned(),
+            PanelRow::File(..) => None,
+        }
+    }
+
+    pub fn key(&mut self, k: &crate::keys::Key, rows: i32) -> PanelOutcome {
+        match k.name.as_str() {
+            "escape" => PanelOutcome::Close,
+            "up" => {
+                self.step(-1);
+                PanelOutcome::Stay
+            }
+            "down" => {
+                self.step(1);
+                PanelOutcome::Stay
+            }
+            "pageup" | "pagedown" => {
+                for _ in 0..Panel::height(rows) - 2 {
+                    self.step(if k.name == "pageup" { -1 } else { 1 });
+                }
+                PanelOutcome::Stay
+            }
+            "enter" => match self.current() {
+                Some(l) => {
+                    self.focused = false;
+                    PanelOutcome::Open(l)
+                }
+                None => PanelOutcome::Stay,
+            },
+            "tab" if self.toggle.is_some() => PanelOutcome::Toggle,
+            "tab" => PanelOutcome::Stay,
+            _ => PanelOutcome::No,
+        }
+    }
+
+    pub fn mouse(&mut self, m: &Mouse, rows: i32) -> PanelOutcome {
+        let y0 = rows - Panel::height(rows);
+        if m.y < y0 || m.y > rows - 1 {
+            return PanelOutcome::No;
+        }
+        if m.wheel() {
+            self.top = (self.top as i64 + if m.button == 64 { -3 } else { 3 }).clamp(0, self.rows.len().saturating_sub(1) as i64) as usize;
+            return PanelOutcome::Stay;
+        }
+        if !m.press() {
+            return PanelOutcome::Stay;
+        }
+        self.focused = true;
+        let i = self.top + (m.y - y0 - 1).max(0) as usize;
+        if m.y > y0 && matches!(self.rows.get(i), Some(PanelRow::Item(_))) {
+            self.index = Some(i);
+            if let Some(l) = self.current() {
+                return PanelOutcome::Open(l);
+            }
+        }
+        PanelOutcome::Stay
+    }
+}
+
+// ---------- peek ----------
+
+/// ~8 lines around items[index] in a box under the cursor line (drawn by the editor); ↑/↓ switch results.
+pub struct Peek {
+    pub title: String,
+    pub items: Vec<Loc>,
+    pub index: usize,
+}
+
+pub enum PeekOutcome {
+    No,
+    Stay,
+    Close,
+    Open(Loc),
+}
+
+impl Peek {
+    pub const LINES: i32 = 8;
+    pub const HEIGHT: i32 = Peek::LINES + 2;
+
+    pub fn key(&mut self, k: &crate::keys::Key) -> PeekOutcome {
+        match k.name.as_str() {
+            "escape" => PeekOutcome::Close,
+            "enter" => PeekOutcome::Open(self.items[self.index].clone()),
+            "up" | "down" if self.items.len() > 1 && !k.shift && !k.alt && !k.cmd => {
+                let n = self.items.len();
+                self.index = (self.index + if k.name == "up" { n - 1 } else { 1 }) % n;
+                PeekOutcome::Stay
+            }
+            _ => PeekOutcome::No,
+        }
+    }
+}
+
+// ---------- hover ----------
+
+/// A hover line: text, a code block's line, or a rule.
+#[derive(Debug, PartialEq)]
+pub struct MdLine {
+    pub text: String,
+    pub code: bool,
+    pub rule: bool,
+}
+
+/// Replaces every match of `pattern` in `text` by `rep(groups)` (groups[0] the whole match, "" for unmatched groups).
+fn re_replace(text: &str, pattern: &str, rep: &dyn Fn(&[&str]) -> String) -> String {
+    let Ok(mut sc) = Scanner::new(&[pattern.to_string()]) else { return text.to_string() };
+    let s = OnigString::new(text.to_string());
+    let (mut out, mut at, mut last) = (String::new(), 0, 0);
+    while at <= text.len() {
+        let Some(m) = sc.find_next_match(&s, at) else { break };
+        let (a, b) = (m.captures[0].0 as usize, m.captures[0].1 as usize);
+        let groups: Vec<&str> = m.captures.iter().map(|&(x, y)| if x >= 0 && y >= x { &text[x as usize..y as usize] } else { "" }).collect();
+        out.push_str(&text[last..a]);
+        out.push_str(&rep(&groups));
+        last = b;
+        at = if b > a { b } else { b + text[b..].chars().next().map_or(1, char::len_utf8) };
+    }
+    out.push_str(&text[last.min(text.len())..]);
+    out
+}
+
+fn matches(text: &str, pattern: &str) -> bool {
+    Scanner::new(&[pattern.to_string()]).ok().and_then(|mut s| s.find_next_match(&OnigString::new(text.to_string()), 0)).is_some()
+}
+
+/// Hover Markdown as terminal lines of at most `width` cells (overlays.cjs markdownLines): code blocks keep their
+/// lines, other text loses its Markdown marks and wraps at spaces; runs of blank lines become one, none at the ends.
+pub fn markdown_lines(md: &str, width: usize) -> Vec<MdLine> {
+    let mut out: Vec<MdLine> = vec![];
+    let push = |out: &mut Vec<MdLine>, l: MdLine| {
+        if !l.text.is_empty() || out.last().is_some_and(|o| !o.text.is_empty()) {
+            out.push(l);
+        }
+    };
+    // pieces of at most `width` cells pushed; the last one returned
+    let hard_wrap = |out: &mut Vec<MdLine>, mut line: String, code: bool| -> String {
+        loop {
+            let (mut i, mut w) = (0, 0);
+            for ch in line.chars() {
+                let cw = char_width(ch);
+                if w + cw > width {
+                    break;
+                }
+                w += cw;
+                i += ch.len_utf8();
+            }
+            if i >= line.len() || i == 0 {
+                return line;
+            }
+            push(out, MdLine { text: line[..i].to_string(), code, rule: false });
+            line = line[i..].to_string();
+        }
+    };
+    let mut fence = false;
+    for raw in md.replace("\r\n", "\n").replace('\r', "\n").split('\n') {
+        if matches(raw, r"^\s*(```|~~~)") {
+            fence = !fence;
+            continue;
+        }
+        if fence {
+            let t = hard_wrap(&mut out, raw.replace('\t', "    "), true);
+            push(&mut out, MdLine { text: t, code: true, rule: false });
+            continue;
+        }
+        if matches(raw, r"^\s*(-{3,}|\*{3,}|_{3,})\s*$") {
+            push(&mut out, MdLine { text: "─".repeat(width), code: false, rule: true });
+            continue;
+        }
+        let mut t = re_replace(raw, r"^\s{0,3}#{1,6}\s+", &|_| String::new());
+        t = re_replace(&t, r"!?\[([^\]]*)\]\([^)]*\)", &|g| g[1].into());
+        t = re_replace(&t, r"\{@link(?:code|plain)?\s+([^}|\s]+)[|\s]?([^}]*)\}", &|g| if g[2].trim().is_empty() { g[1].into() } else { g[2].trim().into() });
+        t = re_replace(&t, r"(\*\*|__)(.+?)\1", &|g| g[2].into());
+        t = re_replace(&t, r"(^|[^\w*])[*_](?=\S)(.+?)[*_](?![\w*])", &|g| format!("{}{}", g[1], g[2]));
+        t = re_replace(&t, r"`([^`]+)`", &|g| g[1].into());
+        t = re_replace(&t, r"\\([\\`*_{}\[\]()#+\-.!|<>])", &|g| g[1].into());
+        t = t.replace("&nbsp;", " ");
+        t = re_replace(&t, r"(?i)<br\s*/?>", &|_| String::new());
+        let t = t.trim_end();
+        // words keep the spaces before them, so indentation stays
+        let mut words: Vec<&str> = vec![];
+        let mut from = 0;
+        let b = t.as_bytes();
+        for i in 1..b.len() {
+            if b[i] == b' ' && b[i - 1] != b' ' && i > from {
+                words.push(&t[from..i]);
+                from = i;
+            }
+        }
+        words.push(&t[from..]);
+        let mut line = String::new();
+        for word in words {
+            if !line.is_empty() && text_width(&format!("{line}{word}"), 8) > width {
+                push(&mut out, MdLine { text: line.clone(), code: false, rule: false });
+                line = word.trim_start().to_string();
+            } else {
+                line.push_str(word);
+            }
+            line = hard_wrap(&mut out, line, false);
+        }
+        push(&mut out, MdLine { text: line, code: false, rule: false });
+    }
+    while out.last().is_some_and(|l| l.text.is_empty()) {
+        out.pop();
+    }
+    out
+}
+
+/// Markdown in a box over the text, above `at` (the hovered word's screen cell) or below without room; not modal.
+pub struct Hover {
+    pub markdown: String,
+    pub at: (i32, i32),
+    /// Opened by the mouse (it closes when the pointer leaves).
+    pub mouse: bool,
+    rect: Option<(i32, i32, i32, i32)>,
+}
+
+impl Hover {
+    pub const ROWS: usize = 14;
+
+    pub fn new(markdown: String, at: (i32, i32), mouse: bool) -> Hover {
+        Hover { markdown, at, mouse, rect: None }
+    }
+
+    pub fn render(&mut self, p: &mut Painter, a: &Area) {
+        let c = a.c;
+        let max = 10.max((a.cols - 2).min(80));
+        let lines = markdown_lines(&self.markdown, (max - 2) as usize);
+        let w = max.min(lines.iter().map(|l| if l.rule { 0 } else { tw(&l.text) }).max().unwrap_or(0) + 4);
+        let rows = lines.len().min(Hover::ROWS).min((a.rows - 4).max(0) as usize);
+        let h = rows as i32 + 2;
+        let y = if self.at.0 - h >= 1 { self.at.0 - h } else { (self.at.0 + 1).min(a.rows - h) };
+        let x = 1.max((self.at.1 - 1).min(a.cols - w + 1));
+        self.rect = Some((x, y, w, h));
+        frame(p, a, x, y, w, h, &c.hover_border);
+        let inner = (w - 2).max(0) as usize;
+        for (i, l) in lines.iter().take(rows).enumerate() {
+            p.move_to(y + 1 + i as i32, x + 1);
+            let last = lines.len() > rows && i == rows - 1;
+            let text = if l.rule { "─".repeat(inner) } else { fit(&format!(" {}", if last { "…" } else { &l.text }), inner) };
+            p.text(&text, if l.rule { &c.border } else if l.code { &c.highlight } else { &c.fg }, &c.hover_bg);
+        }
+    }
+
+    pub fn contains(&self, m: &Mouse) -> bool {
+        self.rect.is_some_and(|(x, y, w, h)| inside(m, x, y, w, h))
     }
 }
 
@@ -393,5 +961,23 @@ mod tests {
         assert_eq!(filter(&files, "vsedit")[0].0, 1);
         assert!(fuzzy("xyz", "abc").is_none());
         assert_eq!(fuzzy("lf", "LF").map(|f| f.1), Some(vec![0, 1]));
+    }
+
+    #[test]
+    fn hover_markdown_loses_its_marks_keeps_code_and_wraps() {
+        let md = "```typescript\nfunction greet(name: string): string\n```\n\n\n**Says** `hi` to {@link Person the person} — see [docs](http://x).\n\n---\n*@param* name";
+        let got: Vec<(String, bool, bool)> = markdown_lines(md, 20).into_iter().map(|l| (l.text, l.code, l.rule)).collect();
+        let want = [("function greet(name:", true, false), (" string): string", true, false), ("", false, false), ("Says hi to the", false, false), ("person — see docs.", false, false), ("", false, false), (&"─".repeat(20), false, true), ("@param name", false, false)];
+        assert_eq!(got, want.iter().map(|(t, c, r)| (t.to_string(), *c, *r)).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn menus_skip_separators_and_disabled_rows() {
+        let row = |t: &str, on: bool| Row { sep: false, title: t.into(), key: String::new(), enabled: on, act: Some(t.to_string()), submenu: vec![] };
+        let rows = vec![row("a", false), row("b", true), sep(), row("c", true)];
+        assert_eq!(step_menu(&rows, None, 1), Some(1));
+        assert_eq!(step_menu(&rows, Some(1), 1), Some(3));
+        assert_eq!(step_menu(&rows, Some(3), 1), Some(1));
+        assert_eq!(step_menu(&rows, None, -1), Some(3));
     }
 }

@@ -35,6 +35,8 @@ pub struct Settings {
     pub trim_trailing_whitespace: bool,
     pub insert_final_newline: bool,
     pub breadcrumbs: bool,
+    /// editor.hover.enabled: the hover after the pointer rests on a word
+    pub hover: bool,
 }
 
 impl Default for Settings {
@@ -48,6 +50,7 @@ impl Default for Settings {
             trim_trailing_whitespace: false,
             insert_final_newline: false,
             breadcrumbs: true,
+            hover: true,
         }
     }
 }
@@ -56,7 +59,7 @@ fn defaults_json() -> Value {
     json!({
         "files.autoSave": "off", "files.autoSaveDelay": 1, "editor.tabSize": 4, "editor.insertSpaces": true,
         "editor.formatOnSave": false, "files.trimTrailingWhitespace": false, "files.insertFinalNewline": false,
-        "breadcrumbs.enabled": true,
+        "breadcrumbs.enabled": true, "editor.hover.enabled": true,
     })
 }
 
@@ -86,6 +89,7 @@ pub fn normalize(raw: &Value) -> Settings {
     v.trim_trailing_whitespace = flag("files.trimTrailingWhitespace", false);
     v.insert_final_newline = flag("files.insertFinalNewline", false);
     v.breadcrumbs = flag("breadcrumbs.enabled", true);
+    v.hover = flag("editor.hover.enabled", true);
     v
 }
 

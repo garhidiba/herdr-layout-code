@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 pub const DELAY: Duration = Duration::from_millis(300);
 const POLL: Duration = Duration::from_secs(3);
 const MAX_LINES: usize = 200_000;
-const MAX_EDITS: usize = 1000;
+pub const MAX_EDITS: usize = 1000;
 const GIT: &[&str] = &["--no-optional-locks", "-c", "core.fsmonitor=false"];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -39,7 +39,18 @@ pub enum Mark {
 }
 
 /// Hunks of `lines` against `base`: common ends trimmed, past `limit` edits the rest of the middle is one change.
-pub fn diff_hunks<'a>(base: &'a [String], lines: &'a [String], limit: usize) -> Vec<Hunk> {
+pub fn diff_hunks(base: &[String], lines: &[String], limit: usize) -> Vec<Hunk> {
+    line_hunks(base, lines, limit)
+        .into_iter()
+        .map(|(a0, a1, b0, b1)| {
+            let kind = if a0 == a1 { Kind::Added } else if b0 == b1 { Kind::Deleted } else { Kind::Modified };
+            Hunk { kind, start: b0, end: b1 }
+        })
+        .collect()
+}
+
+/// The changed runs (a0, a1, b0, b1): base lines [a0, a1) became lines [b0, b1) (gitgutter.cjs lineHunks).
+pub fn line_hunks<'a>(base: &'a [String], lines: &'a [String], limit: usize) -> Vec<(usize, usize, usize, usize)> {
     let (mut s, mut ea, mut eb) = (0, base.len(), lines.len());
     while s < ea && s < eb && base[s] == lines[s] {
         s += 1;
@@ -64,10 +75,11 @@ pub fn diff_hunks<'a>(base: &'a [String], lines: &'a [String], limit: usize) -> 
         o
     });
     let mut out = vec![];
-    let (mut i, mut j) = (0, s);
+    let (mut i, mut ia, mut j) = (0, s, s);
     while i < ops.len() {
         if ops[i] == b' ' {
             i += 1;
+            ia += 1;
             j += 1;
             continue;
         }
@@ -80,8 +92,8 @@ pub fn diff_hunks<'a>(base: &'a [String], lines: &'a [String], limit: usize) -> 
             }
             i += 1;
         }
-        let kind = if removed == 0 { Kind::Added } else if added == 0 { Kind::Deleted } else { Kind::Modified };
-        out.push(Hunk { kind, start: j, end: j + added });
+        out.push((ia, ia + removed, j, j + added));
+        ia += removed;
         j += added;
     }
     out

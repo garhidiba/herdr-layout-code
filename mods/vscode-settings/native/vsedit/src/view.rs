@@ -32,6 +32,8 @@ struct Deco<'a> {
     hits: &'a [Hit],
     hit_bg: &'a str,
     folded: bool,
+    /// This line's squiggles (bytes [from, to), color), the most severe first.
+    problems: Vec<(usize, usize, String)>,
 }
 
 fn tw(s: &str) -> i32 {
@@ -67,6 +69,11 @@ impl Editor {
         self.git.start();
         let changes = gitgutter::marks_for(&self.git.hunks, self.top, end - 1);
         let ranges = if self.gutter_hover { Some(self.fold_ranges()) } else { None };
+        if self.lang.outline.as_ref().is_none_or(|o| o.version != self.buf.version) {
+            self.queue_outline();
+        }
+        let problems = self.problems();
+        let bulb = self.light_bulb_line();
         let c = &self.c;
 
         // breadcrumbs
@@ -93,7 +100,18 @@ impl Editor {
             let folded = self.folds.has(l);
             let active = l == self.head().line;
             let chevron = if folded { "›" } else if ranges.as_ref().is_some_and(|rs| folding::range_at(rs, l).is_some()) { "⌄" } else { " " };
-            self.paint_gutter(&mut p, l, active, changes.get(&l).copied(), chevron);
+            let mut spans: Vec<(usize, usize, String, u8)> = vec![];
+            for d in &problems {
+                if d.start.line > l {
+                    break;
+                }
+                if let Some((f, t)) = Editor::problem_span(d, l, &self.buf.lines[l]) {
+                    spans.push((f, t, self.c.diag[d.severity as usize].clone(), d.severity));
+                }
+            }
+            spans.sort_by_key(|s| s.3);
+            let mark = if bulb == Some(l) { Some(("◆", self.c.light_bulb.clone())) } else { spans.first().map(|s| ("●", s.2.clone())) };
+            self.paint_gutter(&mut p, l, active, changes.get(&l).copied(), chevron, mark);
             let line_bg = if active && empty { self.c.current_line.clone() } else if folded { self.c.fold_background.clone() } else { self.c.bg.clone() };
             while mi < ms.len() && ms[mi].0 < l {
                 mi += 1;
@@ -116,15 +134,29 @@ impl Editor {
                 hits: &occ[hi..kh],
                 hit_bg: hits.as_ref().map_or("", |h| h.bg.as_str()),
                 folded,
+                problems: spans.into_iter().map(|s| (s.0, s.1, s.2)).collect(),
             };
             self.paint_line(&mut p, l, &line_bg, (ss, se), &ms[mi..k], current, width, &deco);
         }
-        self.marks = if self.vbar.shown { Some(self.ruler_marks(&ms, hits.as_ref())) } else { None };
+        self.marks = if self.vbar.shown { Some(self.ruler_marks(&ms, hits.as_ref(), &problems)) } else { None };
         self.vbar.paint(&mut p, &self.c, self.marks.as_deref());
         if self.hbar.shown {
             p.move_to(height as i32 + 2, 1);
             p.text(&" ".repeat(self.cols as usize), &self.c.fg, &self.c.bg);
             self.hbar.paint(&mut p, &self.c, None);
+        }
+        if self.ls.peek.is_some() {
+            let v = self.row_of(self.head().line) as i32 - self.row_of(self.top) as i32 + 3;
+            self.ls.peek_row = v.min(height as i32 + 2 - crate::overlays::Peek::HEIGHT).max(2);
+            self.render_peek(&mut p);
+        }
+        let area = Area { c: &self.c, rows: self.rows, cols: self.cols };
+        if let Some(pn) = self.ls.panel.as_mut() {
+            let root = crate::lang::git_root(&self.file);
+            pn.render(&mut p, &area, &root);
+        }
+        if let Some(h) = self.ls.hover_box.as_mut() {
+            h.render(&mut p, &area);
         }
         self.render_status(&mut p);
         let mut cursor = self.render_prompt(&mut p);
@@ -141,6 +173,10 @@ impl Editor {
             Some(Popup::Picker(pk)) => {
                 pk.render(&mut p, &area);
                 cursor = Some(pk.cursor);
+            }
+            Some(Popup::Menu(m)) => {
+                m.render(&mut p, &area);
+                cursor = Some((-1, -1));
             }
             None => {}
         }
@@ -165,16 +201,63 @@ impl Editor {
         p.out
     }
 
-    /// Breadcrumbs: the file's folders and name (symbols come with the language features); only the name when off.
+    /// Breadcrumbs: the file's folders and name, then the symbols around the cursor; only the name when off.
     fn crumb_text(&self) -> String {
         if !self.settings.breadcrumbs {
             return format!(" {}", self.crumbs.last().map_or("", String::as_str));
         }
-        format!(" {}", self.crumbs.join(" › "))
+        let names: Vec<String> = self.crumbs.iter().cloned().chain(self.crumb_symbols()).collect();
+        format!(" {}", names.join(" › "))
+    }
+
+    /// The peek box: the result's file and ~8 lines around it, the result highlighted.
+    fn render_peek(&mut self, p: &mut Painter) {
+        let Some(pk) = self.ls.peek.as_ref() else { return };
+        let (it, title, n, index) = (pk.items[pk.index].clone(), pk.title.clone(), pk.items.len(), pk.index);
+        let (row, w) = (self.ls.peek_row, self.cols);
+        let doc = if it.file == self.file { None } else { self.doc_index(&it.file) };
+        let c = &self.c;
+        let right = format!("{}Enter open · Esc close ", if n > 1 { format!("{} of {n} · ↑↓ · ", index + 1) } else { String::new() });
+        let root = crate::lang::git_root(&self.file);
+        let dir = it.file.parent().and_then(|d| d.strip_prefix(&root).ok()).map(|d| d.to_string_lossy().into_owned()).filter(|d| !d.is_empty()).unwrap_or_else(|| ".".into());
+        let head = format!(" {}  {dir}  — {title}", it.file.file_name().map_or_else(String::new, |f| f.to_string_lossy().into_owned()));
+        p.move_to(row, 1);
+        p.text(&fit(&head, (w - tw(&right)).max(0) as usize), &c.fg, &c.widget);
+        if tw(&right) < w {
+            p.text(&right, &c.bar_fg, &c.widget);
+        }
+        let loaded = it.file == self.file || doc.is_some();
+        let (lines, hl, tab) = match doc {
+            Some(i) => (&self.docs[i].buf.lines, &self.docs[i].hl, self.docs[i].indent.size),
+            None => (&self.buf.lines, &self.hl, self.tab()),
+        };
+        let first = it.line.saturating_sub(2);
+        let gw = 7usize;
+        for r in 0..crate::overlays::Peek::LINES {
+            p.move_to(row + 1 + r, 1);
+            let l = first + r as usize;
+            if !loaded || l >= lines.len() {
+                p.text(&fit(if r == 0 && !loaded { "  Loading…" } else { "" }, w as usize), &c.line_number, &c.peek);
+                continue;
+            }
+            let target = l == it.line;
+            let bg = if target { c.peek_line.as_str() } else { c.peek.as_str() };
+            p.text(&format!("{:>5}  ", l + 1), if target { &c.line_number_active } else { &c.line_number }, bg);
+            let text = &lines[l];
+            let from = crate::lang::edits::byte_of(text, it.col);
+            let to = it.end.filter(|e| e.line == l).map_or(from, |e| crate::lang::edits::byte_of(text, e.col));
+            let bg_at = |i: usize| -> Option<&str> { (target && i >= from && i < to).then_some(c.find_match.as_str()) };
+            let (x, _) = self.paint_text(p, None, text, hl.line(l), (w as usize).saturating_sub(gw), 0, bg, &bg_at, tab, None, None);
+            if x < (w as usize).saturating_sub(gw) {
+                p.text(&" ".repeat(w as usize - gw - x), &c.fg, bg);
+            }
+        }
+        p.move_to(row + crate::overlays::Peek::LINES + 1, 1);
+        p.text(&"─".repeat(w.max(0) as usize), &c.accent, &c.bg);
     }
 
     fn layout_bars(&mut self) {
-        let base = (self.rows - 2).max(1) as usize;
+        let base = (self.rows - 2 - self.panel_height()).max(1) as usize;
         let n = self.view_count();
         let widest = self.widest(self.top, base);
         let gw = self.gutter();
@@ -204,7 +287,7 @@ impl Editor {
         w
     }
 
-    fn ruler_marks(&mut self, ms: &[Hit], hits: Option<&Hits>) -> Vec<Option<String>> {
+    fn ruler_marks(&mut self, ms: &[Hit], hits: Option<&Hits>, problems: &[crate::editor::Problem]) -> Vec<Option<String>> {
         let n = self.view_count();
         let len = self.vbar.length.max(0) as usize;
         let mut marks: Vec<Option<String>> = vec![None; len];
@@ -234,6 +317,12 @@ impl Editor {
                 let k = cell(self, m.0);
                 marks[k] = Some(h.ruler.clone());
             }
+        }
+        let mut ps: Vec<&crate::editor::Problem> = problems.iter().collect();
+        ps.sort_by_key(|d| std::cmp::Reverse(d.severity)); // errors win
+        for d in ps {
+            let k = cell(self, d.start.line);
+            marks[k] = Some(self.c.ruler_diag[d.severity as usize].clone());
         }
         if !self.empty() {
             let k = cell(self, self.sel.anchor.line);
@@ -306,10 +395,14 @@ impl Editor {
         })
     }
 
-    /// The gutter: a free cell (diagnostics marks), the line number, the git change bar, the fold chevron.
-    fn paint_gutter(&self, p: &mut Painter, l: usize, active: bool, change: Option<Mark>, fold: &str) {
+    /// The gutter: a problem's mark `●` or the light bulb `◆` (`mark`: glyph and color), the line number, the git
+    /// change bar, the fold chevron.
+    fn paint_gutter(&self, p: &mut Painter, l: usize, active: bool, change: Option<Mark>, fold: &str, mark: Option<(&str, String)>) {
         let c = &self.c;
-        p.text(" ", &c.line_number, &c.bg);
+        match &mark {
+            Some((g, color)) => p.text(g, color, &c.bg),
+            None => p.text(" ", &c.line_number, &c.bg),
+        }
         p.text(&format!("{:>w$}", l + 1, w = self.gutter() - 3), if active { &c.line_number_active } else { &c.line_number }, &c.bg);
         let (glyph, color) = match change {
             Some(Mark::Added) => ("▎", &c.git_added),
@@ -323,7 +416,7 @@ impl Editor {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn paint_line(&self, p: &mut Painter, l: usize, line_bg: &str, (ss, se): (Pos, Pos), matches: &[Hit], current: Option<Hit>, width: usize, deco: &Deco) {
+    fn paint_line<'a>(&'a self, p: &mut Painter, l: usize, line_bg: &'a str, (ss, se): (Pos, Pos), matches: &[Hit], current: Option<Hit>, width: usize, deco: &'a Deco) {
         let c = &self.c;
         let text = &self.buf.lines[l];
         let size = self.tab();
@@ -345,7 +438,9 @@ impl Editor {
         let guide_at = |k: usize| -> Option<&str> {
             (g.count > 0 && k.is_multiple_of(size) && k / size < g.count).then(|| if Some(k / size) == g.active { c.guide_active.as_str() } else { c.guide.as_str() })
         };
-        let (mut x, col) = self.paint_text(p, l, text, self.hl.line(l), width, self.left, line_bg, &bg_at, size, Some(&guide_at));
+        let curly_at = |i: usize| -> Option<&'a str> { deco.problems.iter().find(|s| i >= s.0 && i < s.1).map(|s| s.2.as_str()) };
+        let curly: Option<&dyn Fn(usize) -> Option<&'a str>> = if deco.problems.is_empty() { None } else { Some(&curly_at) };
+        let (mut x, col) = self.paint_text(p, Some(l), text, self.hl.line(l), width, self.left, line_bg, &bg_at, size, Some(&guide_at), curly);
         if x < width && sel_from.is_some() && sel_to > text.len() && col >= self.left {
             p.text(" ", &c.fg, &c.selection);
             x += 1;
@@ -379,13 +474,13 @@ impl Editor {
         }
     }
 
-    /// Paints a line's visible part [left, left+width) with token colors (and the semantic layer over them).
-    /// Returns (cells painted, the line's display width).
+    /// Paints a line's visible part [left, left+width) with token colors (and, for a line of the current file, the
+    /// semantic layer over them); `curly_at`: the squiggle color at a byte. Returns (cells painted, display width).
     #[allow(clippy::too_many_arguments)]
     fn paint_text<'a>(
         &'a self,
         p: &mut Painter,
-        line: usize,
+        line: Option<usize>,
         text: &str,
         tokens: Option<&Tokens>,
         width: usize,
@@ -394,6 +489,7 @@ impl Editor {
         bg_at: &dyn Fn(usize) -> Option<&'a str>,
         tab: usize,
         guide_at: Option<&dyn Fn(usize) -> Option<&'a str>>,
+        curly_at: Option<&dyn Fn(usize) -> Option<&'a str>>,
     ) -> (usize, usize) {
         let c = &self.c;
         let (mut col, mut ti, mut x, mut start) = (0usize, 0usize, 0usize, 0usize);
@@ -422,10 +518,11 @@ impl Editor {
                 fg = self.hl.color_map.get(foreground_of(meta)).and_then(|o| o.as_deref()).unwrap_or(c.fg.as_str());
                 style = font_style_of(meta);
             }
-            if let Some(span) = self.semantic.at(line, i) {
+            if let Some(span) = line.and_then(|l| self.semantic.at(l, i)) {
                 (fg, style) = (span.fg.as_str(), span.style);
             }
             let bg = bg_at(i).unwrap_or(line_bg);
+            let curly = curly_at.and_then(|f| f(i));
             let (w, mut glyph) = if ch == '\t' {
                 let w = tab - col % tab;
                 (w, " ".repeat(w))
@@ -458,11 +555,11 @@ impl Editor {
                     p.out.push(ch);
                 }
             } else if col >= left && col + w <= right {
-                p.styled(&glyph, &fgc, bg, style, None);
+                p.styled(&glyph, &fgc, bg, style, curly);
                 x += w;
             } else if col + w > left {
                 let vis = (col + w).min(right) - col.max(left);
-                p.styled(&" ".repeat(vis), &fgc, bg, style, None);
+                p.styled(&" ".repeat(vis), &fgc, bg, style, curly);
                 x += vis;
             }
             col += w;
@@ -490,6 +587,19 @@ impl Editor {
             (left_text, left_color) = (m.text.clone(), m.color.clone());
         } else {
             self.message = None;
+        }
+        if left_text.is_empty() {
+            // the problem at the cursor, else the file's problem counts
+            if let Some(d) = self.problems_at(self.head()).into_iter().next() {
+                left_text = format!("{}{}", d.message.split('\n').next().unwrap_or(""), if d.source.is_empty() { String::new() } else { format!("  {}", d.source) });
+                left_color = self.c.diag[d.severity as usize].clone();
+            } else {
+                let ps = self.problems();
+                if !ps.is_empty() {
+                    let n = |sev: u8| ps.iter().filter(|p| p.severity == sev).count();
+                    left_text = format!("⊗ {}  ⚠ {}{}", n(1), n(2), if n(3) > 0 { format!("  ℹ {}", n(3)) } else { String::new() });
+                }
+            }
         }
         if self.prompt.is_some() && !self.find.query.is_empty() {
             let n = self.matches().len();
@@ -611,7 +721,7 @@ impl Editor {
             return None;
         }
         let over = m.x <= self.gutter() as i32 && m.y >= 2 && m.y <= self.height() as i32 + 1;
-        let mut frame = false;
+        let mut frame = self.mouse_hover(m);
         if over != self.gutter_hover {
             self.gutter_hover = over;
             frame = true;
@@ -623,14 +733,14 @@ impl Editor {
         if self.hbar.hovering(m) {
             out += &self.hbar.repaint(&self.c, None);
         }
-        if frame || (!out.is_empty() && self.prompt.is_some()) {
+        if frame || (!out.is_empty() && (self.prompt.is_some() || self.ls.peek.is_some())) {
             return None;
         }
         Some(out)
     }
 
     /// Terminal cell -> buffer position (rows: 1 breadcrumbs, 2.. text).
-    fn cell_to_pos(&mut self, x: i32, y: i32) -> Pos {
+    pub fn cell_to_pos(&mut self, x: i32, y: i32) -> Pos {
         let max = self.view_count() as i64 - 1;
         let v = (self.row_of(self.top) as i64 + y as i64 - 2).clamp(0, max.max(0)) as usize;
         let line = self.line_at_row(v);
@@ -678,7 +788,8 @@ impl Editor {
             self.left = (self.left as i64 + if m.button == 64 { -6 } else { 6 }).max(0) as usize;
             return true;
         }
-        let covered = self.prompt.as_ref().is_some_and(|pr| m.y < if pr.replace { 4 } else { 3 } && m.x >= self.find_box.map_or(self.cols - 47, |b| b.0));
+        let peek = self.ls.peek.is_some() && m.y >= self.ls.peek_row && m.y < self.ls.peek_row + crate::overlays::Peek::HEIGHT;
+        let covered = peek || self.prompt.as_ref().is_some_and(|pr| m.y < if pr.replace { 4 } else { 3 } && m.x >= self.find_box.map_or(self.cols - 47, |b| b.0));
         if !(covered && self.vbar.drag.is_none()) {
             match self.vbar.mouse(m) {
                 BarMouse::No => {}
@@ -721,10 +832,26 @@ impl Editor {
 
     pub fn mouse(&mut self, m: &Mouse, term: &mut Term) {
         if self.popup.is_some() {
-            return self.popup_event(&Ev::Mouse(*m), term);
+            return self.popup_event(&Ev::Mouse(*m), Some(term));
+        }
+        if self.ls.hover_box.is_some() && !m.motion && !m.release {
+            self.ls.hover_box = None; // a click or the wheel closes the hover
         }
         if self.find_mouse(m) || self.bar_mouse(m) {
             return;
+        }
+        if let Some(pn) = self.ls.panel.as_mut() {
+            match pn.mouse(m, self.rows) {
+                crate::overlays::PanelOutcome::No => {}
+                crate::overlays::PanelOutcome::Open(l) => {
+                    self.jump_to(&l);
+                    if let Some(pn) = self.ls.panel.as_mut() {
+                        pn.focused = true;
+                    }
+                    return;
+                }
+                _ => return,
+            }
         }
         if m.wheel() && !m.shift {
             self.top = self.scrolled(if m.button == 64 { -3 } else { 3 }, None);
@@ -764,7 +891,7 @@ impl Editor {
         }
         if m.y == 1 {
             if m.press() && self.settings.breadcrumbs {
-                self.warn(crate::editor::NOT_YET); // Go to Symbol comes with the language features
+                self.run_act(crate::commands::Act::GotoSymbol, None);
             }
             return;
         }
@@ -777,9 +904,21 @@ impl Editor {
             if self.empty() || p < s || p > e {
                 self.move_to(p, false);
             }
-            return self.warn(crate::editor::NOT_YET); // the context menu comes with the language features
+            return self.open_menu(m.x, m.y);
         }
-        if m.button != 0 || m.motion {
+        if m.button != 0 {
+            return;
+        }
+        if let Some(pn) = self.ls.panel.as_mut() {
+            pn.focused = false;
+        }
+        if self.ls.peek.is_some() && !m.motion {
+            if m.y >= self.ls.peek_row && m.y < self.ls.peek_row + crate::overlays::Peek::HEIGHT {
+                return;
+            }
+            self.ls.peek = None;
+        }
+        if m.motion {
             return;
         }
         if m.x == self.gutter() as i32 && self.click_fold(p.line) {

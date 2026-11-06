@@ -7,16 +7,13 @@ through tsserver Show Hover (keys and mouse), Quick Fix, Expand / Shrink Selecti
 Workspace; line comments and Cursor Undo.
 usage: python3 -I mods/vscode-viewer/editor/test/e2e.py [scenario ...]
 VSEDIT_BIN=<path to the Rust vsedit> runs the same scenarios against the Rust editor through the launcher (vsedit.sh);
-the language-feature scenarios (phase 3, still JS-only) are skipped then, and each result says which editor ran."""
+each result says which editor ran, and a scenario the Rust editor didn't run alone (a fallback to JS) fails."""
 import fcntl, json, os, pty, re, select, shutil, signal, struct, subprocess, sys, tempfile, termios, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 EDITOR = os.path.join(HERE, "..", "vsedit.cjs")
 LAUNCHER = os.path.join(HERE, "..", "vsedit.sh")
 RUST_BIN = os.environ.get("VSEDIT_BIN")
-# Scenarios of features that stay in the JS editor until phase 3 (language servers, context menu, command palette).
-PHASE3 = {"run_menu_and_cmd_save", "run_typescript", "run_format", "run_symbols_and_problems", "run_medium_language",
-          "run_medium_editing"}
 TOKENIZE = os.path.join(HERE, "..", "..", "vscode", "tokenize.cjs")
 
 TSX = '''import React from "react";
@@ -1024,8 +1021,6 @@ def main():
             name = run.__name__
             if only and name not in only and name[4:] not in only:
                 continue
-            if RUST_BIN and name in PHASE3:
-                results.append((name, "skipped (phase 3)", "")); continue
             open(engines, "w").close()
             try:
                 run(tmp); status = "pass"

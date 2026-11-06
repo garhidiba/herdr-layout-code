@@ -18,11 +18,14 @@ mod gitgutter;
 mod hexview;
 mod highlight;
 mod keys;
+mod lang;
 mod language;
 mod overlays;
 mod paint;
 mod scrollbar;
 mod settings;
+mod smartselect;
+mod symbols;
 mod term;
 mod view;
 mod width;
@@ -108,16 +111,14 @@ fn main() {
     let Ok(index) = std::fs::read_to_string(vscode.join("index.json")).map_err(|e| e.to_string()).and_then(|t| serde_json::from_str::<serde_json::Value>(&t).map_err(|e| e.to_string())) else {
         fallback("no grammars at --vscode");
     };
-    let colors = std::fs::read_to_string(vscode.join("theme.json"))
-        .ok()
-        .and_then(|t| vscode_textmate::parse_jsonc(&t).ok())
-        .and_then(|t| t.get("colors").cloned())
-        .unwrap_or(serde_json::Value::Null);
+    let theme = std::fs::read_to_string(vscode.join("theme.json")).ok().and_then(|t| vscode_textmate::parse_jsonc(&t).ok()).unwrap_or(serde_json::Value::Null);
+    let colors = theme.get("colors").cloned().unwrap_or(serde_json::Value::Null);
 
     let Ok(mut term) = Term::new() else { fallback("no raw mode") };
     let doc = open(&mut term, &file, &paint::Palette::of(&colors));
     let hl = Highlight::start(vscode.clone(), term::wake);
-    let mut ed = Editor::new(file.clone(), doc, hl, index, &colors, vscode);
+    let mut ed = Editor::new(file.clone(), doc, hl, index, &theme, vscode);
+    ed.install_lang_hooks();
     let message = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let m = message.clone();
     std::panic::set_hook(Box::new(move |info| {
@@ -132,6 +133,7 @@ fn main() {
         let mut page = errorpage::ErrorPage::new(&file, &reason, editor::breadcrumbs(&file), ed.c.clone());
         if app::run(&mut term, &mut page) == errorpage::Choice::Retry {
             term.restore();
+            lang::shutdown();
             use std::os::unix::process::CommandExt;
             let e = std::process::Command::new(std::env::current_exe().unwrap_or_default()).args(std::env::args().skip(1)).exec();
             eprintln!("vsedit: {e}");
@@ -221,6 +223,7 @@ fn run(term: &mut Term, ed: &mut Editor) {
         term.write(&format!("\x1b[?25l{out}"));
     };
     ed.offer_backup();
+    ed.note_cursor(); // where Cursor Undo goes back to first
     let scope = ed.scope.clone();
     ed.hl.reset(scope.as_deref(), &ed.buf.lines);
     draw(ed, term); // the text at once, uncolored
@@ -285,6 +288,9 @@ fn run(term: &mut Term, ed: &mut Editor) {
         let lines = std::mem::take(&mut ed.buf.lines);
         changed |= ed.hl.poll(&lines);
         ed.buf.lines = lines;
+        if ed.ls.peek.is_some() {
+            changed |= ed.poll_docs(); // the peek box colors lines of other files
+        }
         changed |= ed.tick();
         if Instant::now() >= next_poll {
             next_poll = Instant::now() + Duration::from_secs(2);
@@ -300,7 +306,9 @@ fn run(term: &mut Term, ed: &mut Editor) {
     }
 }
 
+/// Leaves the terminal as it was; the language servers end with the editor.
 fn leave(term: &mut Term) {
+    lang::shutdown();
     term.write(term::LEAVE);
     term.restore();
     term::right_clicks_to("menu", true);

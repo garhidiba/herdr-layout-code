@@ -13,8 +13,32 @@ use std::sync::OnceLock;
 /// What a command does in the editor.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Act {
-    /// A language feature, the context menu, the command palette or a later JS batch (NOT_YET_IDS): phase 3.
-    Lang,
+    /// What the JS editor doesn't have either (NOT_YET_IDS): multiple cursors, suggestions, word wrap, ….
+    NotYet,
+    /// Go to Definition / Type Definition / Implementation / References (the language operation).
+    GoTo(&'static str),
+    PeekAt(&'static str),
+    FindAll(&'static str),
+    CallHierarchy,
+    Rename,
+    ChangeAll,
+    FormatDocument,
+    FormatSelection,
+    /// Refactor… ("refactor") / Source Action… ("source").
+    CodeActions(&'static str),
+    QuickFix,
+    ShowHover,
+    /// Expand (1) / Shrink (-1) Selection.
+    SmartSelect(i32),
+    /// Cursor Undo (-1) / Redo (1).
+    CursorHistory(i32),
+    /// Go to Symbol in Workspace (the quick pick with "#").
+    WorkspaceSymbols,
+    /// The command palette (the quick pick with ">").
+    ShowCommands,
+    GotoSymbol,
+    NextProblem(i32),
+    ContextMenu,
     Copy(bool),
     Paste,
     QuickOpen,
@@ -85,31 +109,51 @@ pub enum FindOption {
     Regex,
 }
 
-/// Ids the JS editor has (or is getting) that wait for phase 3 here: language features (tsserver / LSP), the context
-/// menu and the command palette, and the JS editor's later batches (smart select, cursor undo, multiple cursors,
-/// suggestions, word wrap). Their keys say NOT_YET; the file stays in this editor.
+/// VS Code ids neither editor has yet (multiple cursors, suggestions, parameter hints, word wrap, declarations, …):
+/// bound by the user, their keys say NOT_YET.
 const NOT_YET_IDS: &[&str] = &[
-    "editor.action.revealDefinition", "editor.action.goToTypeDefinition", "editor.action.goToImplementation", "editor.action.goToReferences",
-    "editor.action.peekDefinition", "editor.action.referenceSearch.trigger", "editor.action.peekImplementation", "editor.action.peekTypeDefinition",
-    "references-view.findReferences", "references-view.findImplementations", "references-view.showCallHierarchy", "editor.action.rename",
-    "editor.action.changeAll", "editor.action.formatDocument", "editor.action.formatSelection", "editor.action.refactor",
-    "editor.action.sourceAction", "editor.action.quickFix", "editor.action.codeAction", "editor.action.organizeImports",
-    "editor.action.showHover", "editor.action.showDefinitionPreviewHover", "editor.action.triggerSuggest",
-    "editor.action.triggerParameterHints", "editor.action.revealDeclaration", "editor.action.peekDeclaration",
-    "workbench.action.showCommands", "workbench.action.gotoSymbol", "workbench.action.showAllSymbols", "editor.action.marker.next",
-    "editor.action.marker.prev", "editor.action.showContextMenu", "editor.action.smartSelect.expand", "editor.action.smartSelect.shrink",
-    "cursorUndo", "cursorRedo", "editor.action.insertCursorAbove", "editor.action.insertCursorBelow",
-    "editor.action.insertCursorAtEndOfEachLineSelected", "editor.action.selectHighlights", "editor.action.toggleWordWrap",
+    "editor.action.codeAction", "editor.action.organizeImports", "editor.action.showDefinitionPreviewHover", "editor.action.triggerSuggest",
+    "editor.action.triggerParameterHints", "editor.action.revealDeclaration", "editor.action.peekDeclaration", "editor.action.insertCursorAbove",
+    "editor.action.insertCursorBelow", "editor.action.insertCursorAtEndOfEachLineSelected", "editor.action.selectHighlights", "editor.action.toggleWordWrap",
 ];
 
-/// What each command id runs (commands.cjs's RUNS): `Lang` for NOT_YET_IDS; None for an id this editor has never heard
-/// of — keymap.json is then newer than the binary, and the file goes to the JS editor rather than lose a command.
+/// What each command id runs (commands.cjs's RUNS): `NotYet` for NOT_YET_IDS; None for an id this editor has never
+/// heard of — keymap.json is then newer than the binary, and the file goes to the JS editor rather than lose a command.
 pub fn act_of(id: &str) -> Option<Act> {
     use Act::*;
     if NOT_YET_IDS.contains(&id) {
-        return Some(Lang);
+        return Some(NotYet);
     }
     Some(match id {
+        "editor.action.revealDefinition" => GoTo("definition"),
+        "editor.action.goToTypeDefinition" => GoTo("typeDefinition"),
+        "editor.action.goToImplementation" => GoTo("implementation"),
+        "editor.action.goToReferences" => GoTo("references"),
+        "editor.action.peekDefinition" => PeekAt("definition"),
+        "editor.action.referenceSearch.trigger" => PeekAt("references"),
+        "editor.action.peekImplementation" => PeekAt("implementation"),
+        "editor.action.peekTypeDefinition" => PeekAt("typeDefinition"),
+        "references-view.findReferences" => FindAll("references"),
+        "references-view.findImplementations" => FindAll("implementation"),
+        "references-view.showCallHierarchy" => CallHierarchy,
+        "editor.action.rename" => Rename,
+        "editor.action.changeAll" => ChangeAll,
+        "editor.action.formatDocument" => FormatDocument,
+        "editor.action.formatSelection" => FormatSelection,
+        "editor.action.quickFix" => QuickFix,
+        "editor.action.showHover" => ShowHover,
+        "editor.action.smartSelect.expand" => SmartSelect(1),
+        "editor.action.smartSelect.shrink" => SmartSelect(-1),
+        "cursorUndo" => CursorHistory(-1),
+        "cursorRedo" => CursorHistory(1),
+        "workbench.action.showAllSymbols" => WorkspaceSymbols,
+        "editor.action.refactor" => CodeActions("refactor"),
+        "editor.action.sourceAction" => CodeActions("source"),
+        "workbench.action.showCommands" => ShowCommands,
+        "workbench.action.gotoSymbol" => GotoSymbol,
+        "editor.action.marker.next" => NextProblem(1),
+        "editor.action.marker.prev" => NextProblem(-1),
+        "editor.action.showContextMenu" => ContextMenu,
         "editor.action.clipboardCutAction" => Copy(true),
         "editor.action.clipboardCopyAction" => Copy(false),
         "editor.action.clipboardPasteAction" => Paste,
@@ -243,7 +287,6 @@ impl Os {
 
 pub struct Command {
     pub id: String,
-    #[allow(dead_code)] // phase 3: the command palette and the context menu show titles
     pub title: String,
     /// Default keys (normalized) per OS: mac, win, linux.
     pub keys: [Vec<String>; 3],
@@ -285,6 +328,18 @@ pub fn commands() -> &'static [Command] {
             return vscode_textmate::parse_jsonc(&text).ok().and_then(|v| parse_keymap(&v).ok()).unwrap_or_default();
         }
         vec![]
+    })
+}
+
+/// The language operation a command needs (commands.cjs RUNS' cap): without a provider it says so instead of running.
+pub fn cap_of(act: Act) -> Option<&'static str> {
+    Some(match act {
+        Act::GoTo(k) | Act::PeekAt(k) | Act::FindAll(k) | Act::CodeActions(k) => k,
+        Act::CallHierarchy => "callHierarchy",
+        Act::Rename => "rename",
+        Act::FormatDocument => "format",
+        Act::WorkspaceSymbols => "workspaceSymbols",
+        _ => return None,
     })
 }
 
@@ -462,7 +517,6 @@ impl Keymap {
     }
 
     /// The key shown for a command: the user's newest binding still in effect, else the first default.
-    #[allow(dead_code)] // phase 3 (menu and palette labels)
     pub fn label(&self, id: &str) -> String {
         let live: Vec<&Binding> = self.bindings.iter().filter(|b| b.command == id && self.by_chord.get(&b.key).map(String::as_str) == Some(id)).collect();
         live.iter().rev().find(|b| b.user).or(live.first()).map(|b| self.key_label(&b.key)).unwrap_or_default()
@@ -529,10 +583,15 @@ mod tests {
     }
 
     #[test]
-    fn phase_3_ids_say_not_yet_and_only_unheard_of_ids_send_the_file_to_js() {
-        for id in ["editor.action.quickFix", "editor.action.showHover", "cursorUndo", "workbench.action.showAllSymbols", "editor.action.rename"] {
-            assert_eq!(act_of(id), Some(Act::Lang), "{id}");
+    fn only_what_js_lacks_too_says_not_yet_and_unheard_of_ids_send_the_file_to_js() {
+        for id in ["editor.action.insertCursorAbove", "editor.action.triggerSuggest", "editor.action.toggleWordWrap"] {
+            assert_eq!(act_of(id), Some(Act::NotYet), "{id}");
         }
+        for c in commands() {
+            assert_ne!(c.act, Act::NotYet, "{} is in keymap.json, so the JS editor has it", c.id);
+        }
+        assert_eq!(act_of("cursorUndo"), Some(Act::CursorHistory(-1)));
+        assert_eq!(cap_of(act_of("editor.action.rename").unwrap()), Some("rename"));
         assert_eq!(act_of("editor.action.joinLines"), Some(Act::JoinLines));
         assert_eq!(act_of("editor.action.somethingNew"), None);
         assert!(parse_keymap(&json!({ "commands": [{ "id": "editor.action.formatSelection", "keys": {} }] })).is_ok());

@@ -431,7 +431,7 @@ impl HexView {
     fn key(&mut self, ev: &Ev) -> io::Result<Flow<()>> {
         if let Some(p) = self.popup.as_mut() {
             match p.event(ev) {
-                InputOutcome::Stay => {}
+                InputOutcome::Stay | InputOutcome::Changed(_) => {}
                 InputOutcome::Cancel => self.popup = None,
                 InputOutcome::Accept(a, t) => {
                     self.popup = None;
