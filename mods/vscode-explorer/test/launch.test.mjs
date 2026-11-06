@@ -6,6 +6,7 @@ import { mkdtempSync, writeFileSync, chmodSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { directRun, createOpenTab } from "../launch.js";
+import { openArgs } from "../paths.js";
 
 const editor = { name: "a.ts", folder: "/p", argv: ["exec", "node", "/h/vsedit.cjs", "/p/a.ts", "--close-on-exit"] };
 const where = { space: "sp1", tab: "tb1" };
@@ -18,6 +19,11 @@ test("the editor starts in a labelled core terminal, straight from sh (no login 
   assert.deepEqual([program[0], program[1]], ["/bin/sh", "-c"]);
   assert.deepEqual(program.slice(3), ["node", "/h/vsedit.cjs", "/p/a.ts", "--close-on-exit"]);
   assert.deepEqual(directRun({ folder: "/p", argv: ["node", "x"] }, where).slice(-2), ["node", "x"]);
+});
+
+test("the Explorer's editor argv starts the vsedit.sh launcher straight from sh, keeping --close-on-exit", () => {
+  const args = directRun(openArgs("/p/a.ts", { appHome: "/h", folder: "/p" }), where);
+  assert.deepEqual(args.slice(args.indexOf("--") + 4), ["sh", "/h/mods/vscode-viewer/editor/vsedit.sh", "/p/a.ts", "--close-on-exit"]);
 });
 
 // Runs the launch line as hc would, with a fake login shell that reports how it was called.

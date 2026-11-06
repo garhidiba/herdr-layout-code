@@ -22,11 +22,14 @@ engine=${VSEDIT_ENGINE:-$(value 'editor\.engine')}
 if [ -z "$engine" ] && [ "$RUST_READY" = 1 ]; then engine=$(value 'core\.engine'); fi
 log() { if [ -n "${VSEDIT_ENGINE_LOG:-}" ]; then echo "$1" >> "$VSEDIT_ENGINE_LOG"; fi; }
 
-# Herdr starts programs with PATH=/usr/bin:/bin; node usually lives in Homebrew or ~/.local.
-PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin"; export PATH
+# Herdr starts programs with PATH=/usr/bin:/bin; node usually lives in Homebrew or ~/.local. The Explorer starts this
+# script straight from `sh -c` (launch.js), so no login shell runs unless node is nowhere else (nvm): then, as
+# launch.js does, the login shell finds it.
+PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; export PATH
 if [ "$engine" = rust ] && [ -x "$bin" ] && [ "$("$bin" --api 2>/dev/null)" = "$API" ]; then
   log rust
   exec "$bin" --vscode "$here/../vscode" --fallback "$here/vsedit.cjs" "$@"
 fi
 log js
-exec node "$here/vsedit.cjs" "$@"
+command -v node >/dev/null && exec node "$here/vsedit.cjs" "$@"
+exec "${SHELL:-/bin/sh}" -lic 'exec "$0" "$@"' node "$here/vsedit.cjs" "$@"

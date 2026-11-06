@@ -382,8 +382,9 @@ contract. One module per JS file: `buffer`, `keys`, `width`, `paint`, `file`, `s
 
 ### Launch and engine switch
 
-Every opener (`openArgs` in the Explorer, the Settings dialog's JSON files) runs
-`exec sh <herdr home>/mods/vscode-viewer/editor/vsedit.sh <file> [--close-on-exit]`. The launcher execs
+Every opener (`openArgs` in the Explorer, the Settings dialog's JSON files) asks for
+`["exec", "sh", "<herdr home>/mods/vscode-viewer/editor/vsedit.sh", <file>, "--close-on-exit"?]`; `launch.js` starts it
+straight from `sh -c` without the login shell (`exec` dropped), `tab.new` when that fails. The launcher execs
 `<herdr home>/vscode-core/vsedit --vscode … --fallback …/vsedit.cjs` when `"editor.engine": "rust"` and
 `vsedit --api` prints `1`; otherwise `node vsedit.cjs`. The binary execs `node vsedit.cjs` itself (before touching
 the terminal) when it can't start. **`"core.engine": "rust"` does not route to the Rust editor yet** (`RUST_READY=0`
