@@ -323,6 +323,7 @@ test("hot exit backups: written per path, read back only for that path, stale wh
   assert.equal(B.read(file + "x"), null);
   fs.writeFileSync(file, "changed on disk\n");
   assert.equal(B.changedSince(b, file), true);
+  assert.equal(B.changedSince({ ...b, mtimeMs: Math.floor(fs.statSync(file).mtimeMs / 1000) * 1000, size: fs.statSync(file).size }, file), false); // the mod's whole seconds
   B.remove(file);
   assert.equal(B.read(file), null);
   assert.equal(B.pathHash("/a/b"), B.pathHash("/a/b"));

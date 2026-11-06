@@ -1,0 +1,20 @@
+// Example of ~/.config/herdr-app/vscode-settings.json, read by the terminal editor (vsedit) and the vscode-viewer tab.
+// Copy it there only if you don't have one yet; the editor creates it with these defaults on first run.
+// Names and values follow VS Code's settings, except files.autoSaveDelay is in SECONDS (VS Code: milliseconds).
+// Comments are allowed here, but "File: Toggle Auto Save" and "File: Set Auto Save Delay…" rewrite the file as plain
+// JSON (other keys are kept, comments are not).
+{
+  // "off" | "afterDelay" (save files.autoSaveDelay seconds after the last edit) | "onFocusChange" (save when the
+  // terminal tab / viewer tab loses focus).
+  "files.autoSave": "off",
+  // Seconds, decimals allowed (0.5), clamped to 0.1-3600.
+  "files.autoSaveDelay": 1,
+  // Indentation for files that have no indented line to detect it from (new or empty files).
+  "editor.tabSize": 4,
+  "editor.insertSpaces": true,
+  // Format Document on every save (manual or auto), with tsserver, a language server, gofmt, rustfmt or prettier.
+  "editor.formatOnSave": false,
+  // Applied on every save (manual or auto).
+  "files.trimTrailingWhitespace": false,
+  "files.insertFinalNewline": false
+}

@@ -26,10 +26,11 @@ function read(file) {
 
 function remove(file) { try { fs.unlinkSync(backupFile(file)); } catch {} }
 
-// True when the file on disk is no longer what it was when the backup was written.
+// True when the file on disk is no longer what it was when the backup was written. Compared to the second, since the
+// viewer mod (main.js) only gets whole-second mtimes from stat.
 function changedSince(b, file) {
   const st = diskStamp(file);
-  return b.mtimeMs == null ? !!st : !st || st.mtimeMs !== b.mtimeMs || st.size !== b.size;
+  return b.mtimeMs == null ? !!st : !st || Math.floor(st.mtimeMs / 1000) !== Math.floor(b.mtimeMs / 1000) || st.size !== b.size;
 }
 
 module.exports = { backupDir, backupFile, pathHash, write, read, remove, changedSince };

@@ -2,9 +2,11 @@
 // Opens straight into Herdr's built-in editor (Atom One Dark colors, VS Code's file-type recognition from langs.json),
 // saves with Cmd+S ("vscode-viewer.save" in keys.json), flags changes on disk, and shows a VS Code-style status bar.
 // Images open as a preview; markdown opens rendered, with Edit to switch to the editor.
+// Auto save follows files.autoSave in <herdr home>/vscode-settings.json (shared with the terminal editor). A mod can't stop
+// its tab from closing, so unsaved text is kept as a hot-exit backup in close() and offered back on the next open.
 import { View, div, image, PathBuilder, Background } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState, TextView } from "gpui-base";
-import { props, readTextFile, writeTextFile, exec, theme, appHome, nextCommand } from "herdr";
+import { props, readTextFile, writeTextFile, exec, theme, appHome, nextCommand, focused, panes } from "herdr";
 // Herdr starts with PATH=/usr/bin:/bin, so Homebrew/user tools (node, code, codex, trash) are looked up here too.
 const userExec = (cmd, args, opts) => exec("sh", ["-c", 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; exec "$0" "$@"', cmd, ...args], opts);
 
@@ -59,6 +61,27 @@ function sipsSize(out) {
 // image() only loads from the app's folder, so images are copied to <app>/mods/vscode-viewer/.cache/<path hash>-<mtime>-<size>.<ext>.
 const CACHE = "mods/vscode-viewer/.cache";
 const pathHash = (s) => { let h = 5381; for (const c of s) h = (h * 33 ^ c.charCodeAt(0)) >>> 0; return h.toString(36); };
+// Hot-exit backups: <app>/mods/vscode-viewer/.backups/<path hash>.json, the format editor/backup.cjs reads and writes:
+// { path, text, cursor, time, mtimeMs, size } (mtimeMs/size: the file on disk at backup time; compared to the second).
+const BACKUPS = "mods/vscode-viewer/.backups";
+// { mtime (s), size } of a local file, or null.
+async function statOf(file) {
+  const st = await exec("sh", ["-c", `stat -f '%m %z' "$1" 2>/dev/null || stat -c '%Y %s' "$1"`, "sh", file]).catch(() => null);
+  const [mtime, size] = (st?.stdout ?? "").trim().split(" ").map(Number);
+  return st?.code === 0 && Number.isFinite(size) ? { mtime, size } : null;
+}
+// VS Code settings files allow comments and trailing commas.
+const loose = (s) => JSON.parse(s.replace(/^\uFEFF/, "").replace(/("(?:[^"\\]|\\.)*")|\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, (m, str) => str ?? "").replace(/,(\s*[}\]])/g, "$1"));
+// files.autoSave / files.autoSaveDelay (seconds, 0.1-3600) from vscode-settings.json; off when missing or invalid.
+async function readAutoSave() {
+  try {
+    const raw = loose(await readTextFile(`${appHome()}/vscode-settings.json`));
+    const mode = ["afterDelay", "onFocusChange"].includes(raw["files.autoSave"]) ? raw["files.autoSave"] : "off";
+    const d = Number(raw["files.autoSaveDelay"]);
+    return { mode, delay: Number.isFinite(d) && raw["files.autoSaveDelay"] != null ? Math.max(0.1, Math.min(3600, d)) : 1 };
+  } catch { return { mode: "off", delay: 1 }; }
+}
+const timeText = (ms) => { const d = new Date(ms), p = (n) => String(n).padStart(2, "0"); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; };
 const RECT = () => PathBuilder.fill().move_to("0%", "0%").line_to("100%", "0%").line_to("100%", "100%").line_to("0%", "100%").close().build();
 
 const tables = {};  // shared by every viewer: highlighter names (langs.json) and VS Code language scopes (vscode/index.json)
@@ -95,9 +118,54 @@ export default class Viewer extends View {
     this.code = null; this.dirty = false; this.conflict = false; this.wrap = false;
     this.error = null; this.table = null; this.language = "Plain Text"; this.facts = null;
     this.kind = kindOf(this.file ?? ""); this.preview = this.kind === "markdown"; this.img = null;
+    this.autoSave = { mode: "off", delay: 1 }; this.autoToken = 0; this.hadFocus = false; this.restore = null;
     this.load(cx);
     cx.timer.every(3000, cx => this.load(cx));
     cx.spawn(async cx => { for (;;) { const c = await nextCommand(); if (c === "save") await this.save(cx); } });
+    // onFocusChange: save when this tab stops being the focused pane.
+    cx.timer.every(500, cx => {
+      const mine = props().pane ?? (panes().filter(p => p.mod === "vscode-viewer").length === 1 ? panes().find(p => p.mod === "vscode-viewer").pane : null);
+      const now = !!mine && focused()?.pane === mine;
+      if (this.hadFocus && !now && this.autoSave.mode === "onFocusChange") this.save(cx);
+      this.hadFocus = now;
+    });
+  }
+
+  // Herdr calls this when the tab closes: keep unsaved text as a hot-exit backup (bounded: one stat and one write).
+  async close() {
+    if (!this.code || !this.dirty || this.on) return;
+    try {
+      const st = await statOf(this.file);
+      await exec("mkdir", ["-p", `${appHome()}/${BACKUPS}`]);
+      await writeTextFile(this.backupPath(), JSON.stringify({ path: this.file, text: this.code.value(), cursor: null, time: Date.now(),
+        mtimeMs: st ? st.mtime * 1000 : null, size: st?.size ?? null }));
+    } catch {}
+  }
+  backupPath() { return `${appHome()}/${BACKUPS}/${pathHash(this.file)}.json`; }
+  removeBackup() { if (!this.on) exec("rm", ["-f", this.backupPath()]).catch(() => {}); }
+  // On first load: a backup with other text than the disk is offered back.
+  async findBackup(disk) {
+    if (this.on) return;
+    const b = await readTextFile(this.backupPath()).then(t => JSON.parse(t)).catch(() => null);
+    if (!b || b.path !== this.file || typeof b.text !== "string") return;
+    if (b.text === disk) return this.removeBackup();
+    const st = await statOf(this.file);
+    const changed = b.mtimeMs == null ? !!st : !st || Math.floor(b.mtimeMs / 1000) !== st.mtime || b.size !== st.size;
+    this.restore = { text: b.text, time: b.time, changed };
+  }
+  restoreBackup(cx) {
+    const r = this.restore;
+    this.restore = null;
+    if (!r || !this.code) return cx.notify();
+    this.preview = false; this.build(r.text); this.dirty = r.text !== this.text;
+    cx.notify();
+  }
+  discardBackup(cx) { this.restore = null; this.removeBackup(); cx.notify(); }
+  // afterDelay: save `delay` seconds after the last change (a newer change restarts the wait).
+  scheduleAutoSave(cx) {
+    if (this.autoSave.mode !== "afterDelay" || !this.dirty || this.on) return;
+    const token = ++this.autoToken;
+    cx.timer.after(this.autoSave.delay * 1000, cx => { if (token === this.autoToken && !this.conflict) this.save(cx); });
   }
 
   build(value) {
@@ -105,13 +173,14 @@ export default class Viewer extends View {
     const name = this.file.split("/").pop();
     this.code = EditorState.new({ language: lookup(name, this.table) ?? "text", readonly: Boolean(this.on), value, font_size: 13,
       soft_wrap: this.wrap, syntax: { ...ONE_DARK, ...(this.palette ?? {}) } });
-    this.code.on("change", (_e, cx) => { this.dirty = this.code.value() !== this.text; cx.notify(); });
+    this.code.on("change", (_e, cx) => { this.dirty = this.code.value() !== this.text; this.scheduleAutoSave(cx); cx.notify(); });
   }
 
   // Untouched buffers follow the disk; edited ones only flag a conflict.
   load(cx) {
     cx.spawn(async cx => {
       try {
+        this.autoSave = await readAutoSave();
         if (!this.table) {
           this.table = await tableReady("langs.json");
           this.palette = (await palettesReady())[extOf(this.file.split("/").pop())];
@@ -125,7 +194,11 @@ export default class Viewer extends View {
         else if (disk.includes("\0")) { this.code?.release(); this.code = null; this.error = "Binary file · no text preview"; }
         else if (disk !== this.text) {
           if (this.dirty) this.conflict = true;
-          else { this.error = null; this.conflict = false; this.text = disk; this.facts = facts(disk); this.build(disk); }
+          else {
+            const first = this.text === null;
+            this.error = null; this.conflict = false; this.text = disk; this.facts = facts(disk); this.build(disk);
+            if (first) await this.findBackup(disk);
+          }
         }
       } catch { this.error = "Cannot open this file (binary or larger than 1 MiB)"; }
       finally { cx.notify(); }
@@ -138,9 +211,9 @@ export default class Viewer extends View {
     if (this.copying) return;
     this.copying = true;
     try {
-      const st = await exec("sh", ["-c", `stat -f '%m %z' "$1" 2>/dev/null || stat -c '%Y %s' "$1"`, "sh", this.file]);
-      const [mtime, size] = st.stdout.trim().split(" ").map(Number);
-      if (st.code !== 0 || !Number.isFinite(size)) { this.img = null; this.error = "This file is no longer available"; return; }
+      const st = await statOf(this.file);
+      if (!st) { this.img = null; this.error = "This file is no longer available"; return; }
+      const { mtime, size } = st;
       if (this.img?.key === `${mtime}-${size}`) return;
       const id = pathHash(this.file), name = `${id}-${mtime}-${size}.${extOf(this.file)}`;
       const cp = await exec("sh", ["-c", `mkdir -p "$1" && rm -f "$1/$2"-* && cp "$3" "$1/$4"`, "sh", `${appHome()}/${CACHE}`, id, this.file, name]);
@@ -158,11 +231,12 @@ export default class Viewer extends View {
       const expected = force ? await readTextFile(this.file) : this.text;
       await writeTextFile(this.file, value, expected);
       this.text = value; this.facts = facts(value); this.dirty = false; this.conflict = false; this.error = null;
+      this.removeBackup();
     } catch { this.conflict = true; }
     cx.notify();
   }
 
-  revert(cx) { this.dirty = false; this.conflict = false; this.text = null; this.load(cx); }
+  revert(cx) { this.dirty = false; this.conflict = false; this.text = null; this.restore = null; this.removeBackup(); this.load(cx); }
 
   toggleWrap(cx) {
     this.wrap = !this.wrap;
@@ -205,10 +279,15 @@ export default class Viewer extends View {
         .child(div().flex_1().text_color("#e5c07b").child("This file changed on disk."))
         .child(button("reload", "Reload (discard my edits)", cx => this.revert(cx)))
         .child(button("overwrite", "Overwrite", cx => this.save(cx, true)))))
+      .when(Boolean(this.restore), el => el.child(h_flex().flex_none().px(14).py(6).gap(10).items_center().bg(t.chrome).border_b(1).border_color(t.border).text_size(12)
+        .child(div().flex_1().text_color("#e5c07b").child(`Restore unsaved changes from ${timeText(this.restore.time)}?${this.restore.changed ? " The file has changed on disk since." : ""}`))
+        .child(button("restore", "Restore", cx => this.restoreBackup(cx)))
+        .child(button("discard", "Discard", cx => this.discardBackup(cx)))))
       .child(this.body(t))
       .child(h_flex().h(22).flex_none().px(12).gap(16).items_center().bg(t.chrome).border_t(1).border_color(t.border).text_size(11.5).text_color(t.muted)
         .child(div().child(text ? this.language : IMAGES[extOf(this.file)]))
         .when(this.on, el => el.child(div().child("Read-only (remote)")))
+        .when(text && !this.on && this.autoSave.mode !== "off", el => el.child(div().child(this.autoSave.mode === "afterDelay" ? `Auto Save: after ${this.autoSave.delay}s` : "Auto Save: on focus change")))
         .child(div().flex_1())
         .when(Boolean(this.img), el => el.when(Boolean(this.img.dims), el => el.child(div().child(this.img.dims))).child(div().child(sizeText(this.img.size))))
         .when(Boolean(this.facts), el => el.child(div().child(`${this.facts.lines.toLocaleString()} lines`)).child(div().child(this.facts.indent)).child(div().child("UTF-8")).child(div().child(this.facts.eol))));
