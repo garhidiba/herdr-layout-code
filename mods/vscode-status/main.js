@@ -240,6 +240,9 @@ export default class WorkspaceStatus extends View {
           }))
           .when(Boolean(extra), el => el.child(div().text_color(t.dim).child(extra))))
         .content(this.card(t, title, wins, extra, note, footer))))
+      .child(div().id("settings").flex().items_center().text_color(t.dim).cursor_pointer().hover(s => s.text_color(t.foreground))
+        .tooltip("Settings").accessibility_label("Settings").on_click(() => run("mod.open", { name: "vscode-settings" }))
+        .child(svg("mods/workspace-chrome/settings.svg").size(13)))
       .child(div().id("palette").text_color(t.dim).on_click(() => run("app.palette")).child(this.hint(t)));
   }
 }
