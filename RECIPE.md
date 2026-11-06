@@ -22,6 +22,7 @@ Herdr's main layout turned into a VS Code–style workbench: a file explorer wit
   - Each usage window shows: time to reset (session `3h 25m`; weekly `4d 21h`, `5h 10m` once under a day), a 40×5px bar (green `ansi2` < 70%, yellow `ansi3` 70–90%, red `ansi1` ≥ 90%), the percent.
   - Codex credit balance (e.g. `29,412`).
   - Hovering a group opens a 250px card with each window's name, `N% used`, a full-width bar and `resets 11/12 19:00 (4d 21h left)`.
+  - The card ends with a **Reset limits ↗** button that opens the provider's usage page (`https://claude.ai/settings/usage`, `https://chatgpt.com/codex/settings/usage`), where saved limit resets are redeemed. There is no CLI or local API for them, so nothing is redeemed from Herdr.
 - **Editor tab** (`vscode-viewer`, opened from the Explorer):
   - Header (30px): breadcrumbs of the last 3 folders `›` the file with its Material icon, then ghost buttons **Wrap**, **Revert** (only when edited), **Open in VS Code**, **Save ⌘S** / **Saved**.
   - Herdr's built-in editor on `#282c34` with text `#abb2bf`, 13px, line numbers.

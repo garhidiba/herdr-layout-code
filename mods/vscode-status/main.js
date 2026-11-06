@@ -24,6 +24,8 @@ function windowLabel(w) {
 // 29412.43 -> "29,412"
 const credits = (b) => `${Math.round(Number(b)).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",")}`;
 
+const RESET_PAGES = { Claude: "https://claude.ai/settings/usage", Codex: "https://chatgpt.com/codex/settings/usage" };
+
 export default class WorkspaceStatus extends View {
   init(_props, cx) {
     this.codex = null; this.claude = null;
@@ -76,7 +78,7 @@ export default class WorkspaceStatus extends View {
     return key ? `${key}  commands` : "commands";
   }
 
-  // The hover card for one provider: every window with its bar, usage and reset time.
+  // The hover card for one provider: every window with its bar, usage and reset time, and a link to redeem limit resets.
   card(t, title, wins, extra, note) {
     const bar = (used, color) => div().w_full().h(6).rounded(3).bg(t.border).overflow_hidden().child(div().w(Math.max(2, Math.round(220 * used / 100))).h(6).rounded(3).bg(color));
     return v_flex().w(250).p(12).gap(10).rounded(8).bg(t.popover).border_1().border_color(t.border).text_size(12).text_color(t.foreground)
@@ -90,7 +92,11 @@ export default class WorkspaceStatus extends View {
       }))
       .when(wins.every(w => w.used === null), el => el.child(div().text_color(t.dim).child("No data yet. It appears once a session refreshes its status line.")))
       .when(Boolean(extra), el => el.child(h_flex().justify_between().child(div().text_color(t.muted).child("Credits")).child(div().child(extra))))
-      .when(Boolean(note), el => el.child(div().text_size(11).text_color(t.dim).child(note)));
+      .when(Boolean(note), el => el.child(div().text_size(11).text_color(t.dim).child(note)))
+      // Limit resets are redeemed on the provider's usage page (no CLI or local API for them).
+      .when(Boolean(RESET_PAGES[title]), el => el.child(div().id(`reset-${title}`).h(26).flex().items_center().justify_center().rounded(6)
+        .bg(t.chrome).border_1().border_color(t.border).cursor_pointer().hover(s => s.bg(t.hover)).text_size(11.5)
+        .on_click(() => exec("open", [RESET_PAGES[title]]).catch(() => {})).child("Reset limits ↗")));
   }
 
   render() {
