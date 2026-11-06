@@ -681,6 +681,10 @@ impl Editor {
                 }
             }
         }
+        let offer = if left_text.is_empty() { self.install_offer() } else { None };
+        if let Some(h) = &offer {
+            left_text = format!("Install {} ({})?", h.label, h.command);
+        }
         if self.prompt.is_some() && !self.find.query.is_empty() {
             let n = self.matches().len();
             let k = self.current_match();
@@ -691,6 +695,9 @@ impl Editor {
         p.move_to(self.rows, 1);
         p.text(&fit(&format!("  {left_text}"), (self.cols - rw).max(0) as usize), &left_color, &self.c.bar);
         self.status_hits.clear();
+        if offer.is_some() && self.prompt.is_none() {
+            self.status_hits.push((3, tw(&left_text).min((self.cols - rw - 2).max(0)), StatusAct::Install));
+        }
         if rw > self.cols {
             return;
         }
@@ -971,6 +978,7 @@ impl Editor {
             if m.press() {
                 if let Some(&(_, _, a)) = self.status_hits.iter().find(|h| m.x >= h.0 && m.x < h.0 + h.1) {
                     match a {
+                        StatusAct::Install => self.install_server(),
                         StatusAct::Goto => self.run_act(crate::commands::Act::GotoLine, None),
                         StatusAct::Indent => self.pick_indent(),
                         StatusAct::Eol => self.pick_eol(),

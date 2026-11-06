@@ -229,6 +229,43 @@ pub fn install_hint(kind: &'static str, has: &dyn Fn(&str) -> bool) -> Option<In
     Some(InstallHint { kind, label, command })
 }
 
+/// The status bar's install offer per server kind, decided once a session; None once taken (or nothing to offer).
+fn offers() -> &'static Mutex<HashMap<&'static str, Option<InstallHint>>> {
+    static OFFERS: OnceLock<Mutex<HashMap<&'static str, Option<InstallHint>>>> = OnceLock::new();
+    OFFERS.get_or_init(Mutex::default)
+}
+
+/// The install offer for a session's missing server, looked up the first time its kind is seen (VS Code's extension
+/// recommendations: once per language a session). Blocks on PATH lookups: call it off the editor's thread.
+pub fn offer(s: &Session) -> Option<InstallHint> {
+    let kind = s.kind?;
+    if let Some(o) = offers().lock().ok()?.get(kind) {
+        return o.clone();
+    }
+    let hint = s.install_hint();
+    offers().lock().ok()?.insert(kind, hint.clone());
+    hint
+}
+
+/// The offer decided for `kind`, without looking anything up.
+pub fn offered(kind: &str) -> Option<InstallHint> {
+    offers().lock().ok()?.get(kind).cloned().flatten()
+}
+
+/// The offer for `kind` was taken: it isn't shown again this session.
+pub fn take_offer(kind: &'static str) {
+    if let Ok(mut o) = offers().lock() {
+        o.insert(kind, None);
+    }
+}
+
+/// What an install tab runs: `command` in `sh` with the launcher's tool folders on PATH, then how it ended, waiting for
+/// Enter so the tab stays readable. The command is an argument, never spliced into the script.
+pub fn install_argv(command: &str) -> Vec<String> {
+    const SCRIPT: &str = r#"PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$HOME/.cargo/bin:$HOME/go/bin"; export PATH; printf '$ %s\n' "$1"; sh -c "$1"; s=$?; echo; if [ "$s" -eq 0 ]; then echo "Installed. The editor starts it in a few seconds."; else echo "The install failed (exit $s)."; fi; printf 'Press Enter to close. '; read -r _"#;
+    ["sh", "-c", SCRIPT, "sh", command].iter().map(|s| s.to_string()).collect()
+}
+
 /// Forgets that `kind`'s server was missing, so the next use looks for it again (after an install).
 pub fn retry(kind: &str) {
     if let Ok(mut pool) = pool().lock() {
@@ -566,6 +603,10 @@ impl Session {
             Server::Ts(t) => t.semantic_tokens(ctx),
             Server::Lsp(l) => l.semantic_tokens(ctx),
         }
+    }
+    /// The server kind serving this file, if any.
+    pub fn kind(&self) -> Option<&'static str> {
+        self.kind
     }
     /// How to install this file's missing server, if it has one.
     pub fn install_hint(&self) -> Option<InstallHint> {

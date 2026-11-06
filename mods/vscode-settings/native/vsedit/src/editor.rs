@@ -287,6 +287,8 @@ pub struct Editor {
 
 #[derive(Clone, Copy, Debug)]
 pub enum StatusAct {
+    /// The missing language server's install offer.
+    Install,
     Goto,
     Indent,
     Eol,

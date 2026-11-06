@@ -831,6 +831,65 @@ def run_symbols_and_problems(tmp):
     print("symbols + diagnostics (tsserver): ok")
 
 
+def fake_server(folder, name):
+    """A fake language server (fake-lsp.cjs) installed as `name` in `folder`."""
+    f = os.path.join(folder, name)
+    with open(f, "w") as out:
+        out.write(f'#!/bin/sh\nexec "{shutil.which("node")}" "{os.path.join(HERE, "fake-lsp.cjs")}" "{name}" "$@"\n')
+    os.chmod(f, 0o755)
+
+
+def run_install_prompt(tmp):
+    """A YAML file without its server: with extensions.ignoreRecommendations nothing is offered; else the status bar offers
+    "Install YAML language server (npm i -g yaml-language-server)?" (a stub npm is the tool here), a click asks Herdr for a
+    new terminal tab running it (the stub herdr-app logs terminal.open with the command), and once the server turns up
+    (a fake one put on PATH) the editor starts it within seconds: its error gets the red underline."""
+    env, log = herdr_stub(tmp)
+    stub = env["PATH"].split(":")[0]
+    extra = [stub, *os.environ["PATH"].split(":"), "/opt/homebrew/bin", "/usr/local/bin", os.path.expanduser("~/.local/bin"), os.path.expanduser("~/.cargo/bin")]
+    if shutil.which("yaml-language-server", path=":".join(extra)):
+        print("install prompt: skipped (yaml-language-server is installed)")
+        return
+    with open(os.path.join(stub, "npm"), "w") as f:
+        f.write("#!/bin/sh\nexit 0\n")
+    os.chmod(os.path.join(stub, "npm"), 0o755)
+    proj = os.path.join(tmp, "yamlproj")
+    os.makedirs(proj)
+    file = os.path.join(proj, "a.yaml")
+    open(file, "w").write("key: [\n")
+    offer = "Install YAML language server (npm i -g yaml-language-server)?"
+    settings = ISOLATED["VSEDIT_SETTINGS"]
+    os.makedirs(os.path.dirname(settings), exist_ok=True)
+    before = open(settings).read() if os.path.exists(settings) else None
+    raw = json.loads(before) if before else {}
+    open(settings, "w").write(json.dumps({**raw, "extensions.ignoreRecommendations": True}) + "\n")
+    try:
+        t = Term(file, cols=140, env=env)
+        assert t.read("Ln 1, Col 1")
+        assert not t.read(offer, timeout=2), "offered although extensions.ignoreRecommendations is on"
+        t.send(QUIT)
+        assert t.wait_exit() == 0
+    finally:
+        if before is None:
+            os.remove(settings)
+        else:
+            open(settings, "w").write(before)
+    t = Term(file, cols=140, env=env)  # wide enough for the whole offer beside the status bar's items
+    assert t.read(offer, timeout=10), "no install offer:\n" + plain(t)[-300:]
+    t.send("\x1b[<0;5;30M\x1b[<0;5;30m", wait=0.5)
+    assert t.read("Installing YAML language server in a new terminal tab", timeout=3), "the click did not start the install"
+    calls = open(log).read()
+    assert "do terminal.open --place tab --name Install YAML language server --folder " + proj in calls, calls
+    assert '--argv ["sh","-c",' in calls and '"sh","npm i -g yaml-language-server"]' in calls, calls
+    fake_server(stub, "yaml-language-server")
+    assert t.read("YAML language server is installed", timeout=8), "the installed server was not noticed:\n" + plain(t)[-300:]
+    assert t.read("\x1b[4m\x1b[58:2::241:76:76m", timeout=10), "the new server's problem has no red underline"
+    assert t.read("fake yaml-language-server --stdio", timeout=5), "the problem is not the server's"
+    t.send(QUIT)
+    assert t.wait_exit() == 0
+    print("install prompt: ok")
+
+
 def run_git_gutter(tmp):
     """A file in a temp git repo: a typed line gets the modified bar, a new line the added bar (editorGutter colors), ⌥F5 /
     ⇧⌥F5 go to the next / previous change; after a commit the bars go."""
@@ -1107,7 +1166,7 @@ def main():
     ISOLATED.update(VSEDIT_ENGINE_LOG=engines, VSEDIT_INLINE_USAGE=os.path.join(tmp, "inline-usage.json"))
     scenarios = [run_tsx, run_go, run_crlf, run_hex, run_error_page, run_drag_scroll, run_minified, run_scrollbars, run_decorations,
                  run_autoclose, run_git_gutter, run_folding, run_menu_and_cmd_save, run_save_dialog, run_auto_save, run_hot_exit,
-                 run_keybindings, run_mac_keys, run_format, run_typescript, run_find_and_status, run_symbols_and_problems, run_small_batch,
+                 run_keybindings, run_mac_keys, run_format, run_typescript, run_find_and_status, run_symbols_and_problems, run_install_prompt, run_small_batch,
                  run_files_and_navigation, run_medium_language, run_medium_editing, run_inline_suggest]
     only = set(sys.argv[1:])
     results = []

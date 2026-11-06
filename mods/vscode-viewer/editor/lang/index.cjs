@@ -62,6 +62,22 @@ function installHint(kind, has = (tool) => which(tool)) {
   const found = spec.install.find(([tool]) => has(tool));
   return found ? { kind, label: spec.label, command: found[1] } : null;
 }
+// The status bar's install offer per server kind, decided once a session; null once taken (or nothing to offer).
+const offers = new Map();
+// The install offer for a session's missing server, looked up the first time its kind is seen (VS Code's extension
+// recommendations: once per language a session).
+function offer(session) {
+  const kind = session.kind;
+  if (!kind) return null;
+  if (!offers.has(kind)) offers.set(kind, installHint(kind));
+  return offers.get(kind);
+}
+const offered = (kind) => offers.get(kind) ?? null;
+const takeOffer = (kind) => offers.set(kind, null);
+// What an install tab runs: `command` in sh with the launcher's tool folders on PATH, then how it ended, waiting for
+// Enter so the tab stays readable. The command is an argument, never spliced into the script.
+const INSTALL_SCRIPT = `PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$HOME/.cargo/bin:$HOME/go/bin"; export PATH; printf '$ %s\\n' "$1"; sh -c "$1"; s=$?; echo; if [ "$s" -eq 0 ]; then echo "Installed. The editor starts it in a few seconds."; else echo "The install failed (exit $s)."; fi; printf 'Press Enter to close. '; read -r _`;
+const installArgv = (command) => ["sh", "-c", INSTALL_SCRIPT, "sh", command];
 // True when `kind`'s server can be started (its program is found).
 const found = (kind) => !!SERVERS[kind]?.command();
 // Forgets that `kind`'s server was missing, so the next use looks for it again (after an install).
@@ -150,4 +166,4 @@ class Session {
 // Kills every server (called on exit; must be synchronous).
 function shutdown() { for (const s of pool.values()) if (s && !(s instanceof Error)) { try { s.dispose(); s.kill(); } catch {} } pool.clear(); }
 
-module.exports = { Session, shutdown, setApplyEdit, setOnDiagnostics, SCOPES, SERVERS, installHint, retry, found };
+module.exports = { Session, shutdown, setApplyEdit, setOnDiagnostics, SCOPES, SERVERS, installHint, retry, found, offer, offered, takeOffer, installArgv };

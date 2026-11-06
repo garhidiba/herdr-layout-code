@@ -27,6 +27,7 @@ pub type Job = Box<dyn FnOnce(&mut Editor) + Send>;
 const WORD_DELAY: Duration = Duration::from_millis(250);
 const HOVER_DELAY: Duration = Duration::from_millis(300);
 const OUTLINE_DELAY: Duration = Duration::from_millis(300);
+const INSTALL_POLL: Duration = Duration::from_secs(3);
 const CURSOR_STACK: usize = 50;
 
 /// VS Code's default editor context menu: groups, with Peek as a submenu.
@@ -147,6 +148,8 @@ pub struct LangState {
     actions: Vec<Action>,
     rename: Option<Ctx>,
     change_all: Option<ChangeAll>,
+    /// After an install was started: (kind, label, next look for the server, when to stop looking).
+    installing: Option<(&'static str, &'static str, Instant, Instant)>,
 }
 
 impl LangState {
@@ -174,6 +177,7 @@ impl LangState {
             actions: vec![],
             rename: None,
             change_all: None,
+            installing: None,
         }
     }
 }
@@ -864,7 +868,7 @@ impl Editor {
     fn load_outline(&mut self, pick: bool) {
         let (s, ctx, version, file) = (self.session(), self.lang_ctx(self.head()), self.buf.version, self.file.clone());
         self.ls.outline_busy = true;
-        self.spawn(move || s.symbols(&ctx), move |ed, (source, items)| {
+        self.spawn(move || (s.symbols(&ctx), crate::lang::offer(&s)), move |ed, ((source, items), _)| {
             ed.ls.outline_busy = false;
             if ed.file != file || ed.buf.version != version {
                 return ed.queue_outline();
@@ -1125,7 +1129,45 @@ impl Editor {
 
     // ----- timers -----
     pub fn lang_deadline(&self) -> Option<Instant> {
-        [self.ls.outline_at, self.ls.hover_at.map(|h| h.0), self.ls.bulb.as_ref().and_then(|b| b.ask_at)].into_iter().flatten().min()
+        [self.ls.outline_at, self.ls.hover_at.map(|h| h.0), self.ls.bulb.as_ref().and_then(|b| b.ask_at), self.ls.installing.map(|i| i.2)].into_iter().flatten().min()
+    }
+
+    // ----- missing language servers (VS Code's extension recommendations) -----
+    /// The status bar's offer to install this file's missing server (once per language a session), unless turned off.
+    pub fn install_offer(&self) -> Option<crate::lang::InstallHint> {
+        if self.settings.ignore_recommendations {
+            return None;
+        }
+        crate::lang::offered(self.lang.session.as_ref()?.kind()?)
+    }
+    /// Runs the offer's install in a new terminal tab (herdr-app terminal.open), so it is seen; never on its own. Outside
+    /// Herdr, or without herdr-app (a remote machine), the status bar says what to run. Then it looks for the server
+    /// every 3 s, 10 minutes at most, and starts it once it is there.
+    pub fn install_server(&mut self) {
+        let Some(h) = self.install_offer() else { return };
+        crate::lang::take_offer(h.kind);
+        if std::env::var_os("HC_TERMINAL_ID").is_none() || crate::term::which("herdr-app").is_none() {
+            return self.say(format!("Run in a terminal: {}", h.command), None, 15000);
+        }
+        let root = crate::lang::git_root(&self.file).to_string_lossy().into_owned();
+        let argv = serde_json::to_string(&crate::lang::install_argv(h.command)).unwrap_or_default();
+        crate::term::herdr(&["do", "terminal.open", "--place", "tab", "--name", &format!("Install {}", h.label), "--folder", &root, "--argv", &argv], false);
+        self.say(format!("Installing {} in a new terminal tab…", h.label), None, 5000);
+        let now = Instant::now();
+        self.ls.installing = Some((h.kind, h.label, now + INSTALL_POLL, now + Duration::from_secs(600)));
+    }
+    /// After an install: true when the server turned up (it starts with the next outline).
+    fn install_tick(&mut self, now: Instant) -> bool {
+        let Some((kind, label, next, end)) = self.ls.installing.filter(|i| i.2 <= now) else { return false };
+        if crate::lang::found(kind) {
+            self.ls.installing = None;
+            crate::lang::retry(kind);
+            self.queue_outline();
+            self.say(format!("{label} is installed"), None, 3000);
+            return true;
+        }
+        self.ls.installing = (now < end).then_some((kind, label, next.max(now) + INSTALL_POLL, end));
+        false
     }
     /// Runs the language timers that are due; true to draw again.
     pub fn lang_tick(&mut self) -> bool {
@@ -1147,7 +1189,7 @@ impl Editor {
         if self.ls.bulb.as_ref().and_then(|b| b.ask_at).is_some_and(|t| t <= now) {
             self.ask_bulb();
         }
-        redraw
+        redraw | self.install_tick(now)
     }
 }
 

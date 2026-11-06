@@ -39,6 +39,8 @@ pub struct Settings {
     pub hover: bool,
     /// editor.inlineSuggest.* (not written into a new file)
     pub inline: crate::inline::InlineSettings,
+    /// extensions.ignoreRecommendations: no status bar offer to install a missing language server
+    pub ignore_recommendations: bool,
 }
 
 impl Default for Settings {
@@ -54,6 +56,7 @@ impl Default for Settings {
             breadcrumbs: true,
             hover: true,
             inline: crate::inline::InlineSettings::default(),
+            ignore_recommendations: false,
         }
     }
 }
@@ -62,7 +65,7 @@ fn defaults_json() -> Value {
     json!({
         "files.autoSave": "off", "files.autoSaveDelay": 1, "editor.tabSize": 4, "editor.insertSpaces": true,
         "editor.formatOnSave": false, "files.trimTrailingWhitespace": false, "files.insertFinalNewline": false,
-        "breadcrumbs.enabled": true, "editor.hover.enabled": true,
+        "breadcrumbs.enabled": true, "editor.hover.enabled": true, "extensions.ignoreRecommendations": false,
     })
 }
 
@@ -94,6 +97,7 @@ pub fn normalize(raw: &Value) -> Settings {
     v.breadcrumbs = flag("breadcrumbs.enabled", true);
     v.hover = flag("editor.hover.enabled", true);
     v.inline = crate::inline::normalize(raw);
+    v.ignore_recommendations = flag("extensions.ignoreRecommendations", false);
     v
 }
 

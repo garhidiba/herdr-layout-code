@@ -764,6 +764,7 @@ class Editor {
   async loadOutline() {
     const buf = this.buf, file = this.file, version = buf.version;
     const { source, items } = await this.lang.symbols(this.langCtx());
+    Lang.offer(this.lang);
     const st = file === this.file ? this : this.docs.get(file);
     if (!st || st.buf !== buf || buf.version !== version) return null;
     st.outline = { version, source, items };
@@ -784,6 +785,32 @@ class Editor {
     if (!this.settings["breadcrumbs.enabled"]) return " " + this.crumbs.at(-1);
     const names = [...this.crumbs, ...SYM.symbolPath(this.outline?.items ?? [], this.head).map(s => s.name)];
     return " " + names.join(" › ");
+  }
+  // ----- missing language servers (VS Code's extension recommendations) -----
+  // The status bar's offer to install this file's missing server (once per language a session), unless turned off.
+  installOffer() {
+    if (this.settings["extensions.ignoreRecommendations"] || !this.session?.kind) return null;
+    return Lang.offered(this.session.kind);
+  }
+  // Runs the offer's install in a new terminal tab (herdr-app terminal.open), so it is seen; never on its own. Outside
+  // Herdr, or without herdr-app (a remote machine), the status bar says what to run. Then it looks for the server every
+  // 3 s, 10 minutes at most, and starts it once it is there.
+  installServer() {
+    const h = this.installOffer();
+    if (!h) return;
+    Lang.takeOffer(h.kind);
+    const bin = process.env.HC_TERMINAL_ID && which("herdr-app");
+    if (!bin) return this.say(`Run in a terminal: ${h.command}`, this.colors.barFg, 15000);
+    require("child_process").spawn(bin, ["do", "terminal.open", "--place", "tab", "--name", `Install ${h.label}`, "--folder", gitRoot(this.file),
+      "--argv", JSON.stringify(Lang.installArgv(h.command))], { stdio: "ignore", detached: true }).on("error", () => {}).unref();
+    this.say(`Installing ${h.label} in a new terminal tab…`, this.colors.barFg, 5000);
+    const end = Date.now() + 600000;
+    clearInterval(this.installTimer);
+    this.installTimer = setInterval(() => {
+      if (Lang.found(h.kind)) { clearInterval(this.installTimer); Lang.retry(h.kind); this.say(`${h.label} is installed`); this.queueOutline(); this.redraw(); }
+      else if (Date.now() > end || this.done) clearInterval(this.installTimer);
+    }, 3000);
+    this.installTimer.unref?.();
   }
   // ----- diagnostics (from the language server: tsserver's geterr events, LSP publishDiagnostics) -----
   // Errors, warnings and information (hints aren't drawn) in document order, clamped to the text.
@@ -1919,6 +1946,8 @@ class Editor {
         leftText = `⊗ ${n(1)}  ⚠ ${n(2)}` + (n(3) ? `  ℹ ${n(3)}` : "");
       }
     }
+    const offer = leftText ? null : this.installOffer();
+    if (offer) leftText = `Install ${offer.label} (${offer.command})?`;
     if (this.prompt?.kind === "find" && this.find.query) {
       const n = this.matches().length, k = this.currentMatch();
       leftText = n ? `Find: ${k === -1 ? "?" : k + 1} of ${n}${n >= 20000 ? "+" : ""}` : "Find: No results";
@@ -1928,6 +1957,7 @@ class Editor {
     P.move(this.rows, 1);
     P.text(fit("  " + leftText, Math.max(0, this.cols - rw)), leftColor, c.bar);
     this.statusHits = [];
+    if (offer && !(this.prompt?.kind === "find" && this.find.query)) this.statusHits.push({ x: 3, w: Math.min(W.textWidth(leftText, 8), Math.max(0, this.cols - rw - 2)), run: () => this.installServer() });
     if (rw > this.cols) return;
     P.text(rightText, c.barFg, c.bar);
     let x = this.cols - rw + 1;
