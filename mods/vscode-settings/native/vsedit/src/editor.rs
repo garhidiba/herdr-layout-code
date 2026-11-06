@@ -199,15 +199,20 @@ pub struct DocState {
     wrap_rows: WrapRows,
 }
 
+/// What a line's rows depend on besides its text: the wrap width, the tab size, editor.wrappingIndent.
+type WrapKey = (usize, usize, &'static str);
+
 /// Rows per line while wrapping (-1 where an edit changed the line, counted again on the next ensure_rows) and the
 /// first view row of each line, for one wrap width/tab/indent mode, text version and fold version.
 #[derive(Default)]
 pub struct WrapRows {
-    key: (usize, usize, &'static str),
+    key: WrapKey,
     counts: Vec<i32>,
     start: Vec<usize>,
     version: u64,
     fold_version: u64,
+    /// The last line asked for, (line, text version, wrap key): a long line isn't hashed again for every row of a frame.
+    last: Option<((usize, u64, WrapKey), Rc<Rows>)>,
 }
 
 impl WrapRows {
@@ -513,8 +518,15 @@ impl Editor {
     }
     /// A line's rows (one while not wrapping or when it fits).
     pub fn wrap_of(&mut self, line: usize) -> Rc<Rows> {
-        let (w, tab, mode) = (self.wrap_width(), self.tab(), self.settings.wrapping_indent);
-        self.wraps.get(&self.buf.lines[line], w, tab, mode)
+        let key = (line, self.buf.version, (self.wrap_width(), self.tab(), self.settings.wrapping_indent));
+        if let Some((k, r)) = &self.wrap_rows.last {
+            if *k == key {
+                return r.clone();
+            }
+        }
+        let r = self.wraps.get(&self.buf.lines[line], key.2 .0, key.2 .1, key.2 .2);
+        self.wrap_rows.last = Some((key, r.clone()));
+        r
     }
     /// p's row within its line and its x there (cells from the row's left edge, the wrap indent included).
     pub fn row_pos(&mut self, p: Pos) -> (usize, usize) {
