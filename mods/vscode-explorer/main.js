@@ -8,7 +8,7 @@ import { spaces, panes, focused, exec, hc, readTextFile, watchFolder, theme, win
 import { openArgs } from "./paths.js";
 import { createOpenTab } from "./launch.js";
 import { freshRoot, encode, decode } from "./cache.js";
-import { ExplorerMenu, ExplorerDialog, openMenu, refreshKey } from "./menu.js";
+import { ExplorerMenu, ExplorerDialog, openMenu, openInCode, refreshKey } from "./menu.js";
 import { createCore } from "./core.js";
 // Herdr starts with PATH=/usr/bin:/bin, so Homebrew/user tools (node, code, codex, trash) are looked up here too.
 const openTab = createOpenTab({ hc, run, spaces });
@@ -295,6 +295,7 @@ export default class Files extends View {
         .on_click((e, cx) => {
           if (entry.dir) return this.toggle(path, cx);
           if (e.modifiers.platform && !this.on) userExec("code", [abs]).catch(() => {});
+          else if (e.modifiers.platform) openInCode(abs, this.on).catch(err => notify({ title: "Explorer", body: String(err?.message ?? err), level: "error" }));
           else this.open(path, cx);
         })
         .child(entry.dir ? svg(`mods/vscode-explorer/chevron-${open ? "down" : "right"}.svg`).size(12).flex_none().text_color(t.dim) : div().w(12).flex_none())

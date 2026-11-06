@@ -1,7 +1,7 @@
 // node --test mods/vscode-explorer/test/paths.test.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
-import { openArgs, relativeTo, within, copyName, freeName, nameProblem, menuItems, menuHeight, parentOf } from "../paths.js";
+import { openArgs, relativeTo, within, copyName, freeName, nameProblem, menuItems, menuHeight, parentOf, openWith, vscodeRemoteArgs } from "../paths.js";
 
 const home = "/Users/me/.config/herdr-app";
 
@@ -11,6 +11,7 @@ test("code opens in the terminal editor, images/markdown/remote files in the vie
   assert.equal(openArgs("/p/README.md", { appHome: home }).mod, "vscode-viewer");
   assert.equal(openArgs("/p/logo.PNG", { appHome: home }).mod, "vscode-viewer");
   assert.deepEqual(openArgs("/p/a.ts", { on: "box", appHome: home }), { name: "a.ts", mod: "vscode-viewer", props: { file: "/p/a.ts", on: "box" } });
+  assert.equal(openArgs("/p/a.ts", { on: "box", appHome: home, how: "editor" }).mod, "vscode-viewer"); // the terminal editor is local only
   assert.equal(openArgs("/p/README.md", { appHome: home, how: "editor" }).argv[1], "sh");
   assert.equal(openArgs("/p/a.ts", { appHome: home, how: "viewer" }).mod, "vscode-viewer");
   assert.equal(parentOf("/a"), "/");
@@ -47,7 +48,7 @@ test("new names must be non-empty, slash-free and not taken", () => {
   assert.equal(nameProblem("a.txt", false), null);
 });
 
-test("the menu groups items like VS Code and hides file operations for remote folders", () => {
+test("the menu groups items like VS Code; a remote entry has every item but Reveal in Finder", () => {
   const labels = (rows) => rows.map(r => (r === "-" ? "-" : r[0]));
   assert.deepEqual(labels(menuItems({ dir: true, remote: false, canPaste: true })), [
     "New File…", "New Folder…", "-", "Reveal in Finder", "Open in Integrated Terminal", "-", "Cut", "Copy", "Paste", "-",
@@ -55,6 +56,25 @@ test("the menu groups items like VS Code and hides file operations for remote fo
   assert.deepEqual(labels(menuItems({ dir: false, remote: false, canPaste: false })), [
     "Open Preview", "Open With…", "-", "Reveal in Finder", "Open in Integrated Terminal", "-", "Cut", "Copy", "-",
     "Copy Path", "Copy Relative Path", "-", "Rename…", "Delete"]);
-  assert.deepEqual(labels(menuItems({ dir: false, remote: true, canPaste: true })), ["Open Preview", "-", "Copy Path", "Copy Relative Path"]);
+  assert.deepEqual(labels(menuItems({ dir: true, remote: true, canPaste: true })), [
+    "New File…", "New Folder…", "-", "Open in Integrated Terminal", "-", "Cut", "Copy", "Paste", "-",
+    "Copy Path", "Copy Relative Path", "-", "Rename…", "Delete"]);
+  assert.deepEqual(labels(menuItems({ dir: false, remote: true, canPaste: false })), [
+    "Open Preview", "Open With…", "-", "Open in Integrated Terminal", "-", "Cut", "Copy", "-",
+    "Copy Path", "Copy Relative Path", "-", "Rename…", "Delete"]);
   assert.equal(menuHeight(["-", ["a"]]), 10 + 9 + 26);
+});
+
+test("Open With offers the terminal editor and system apps only for local files", () => {
+  assert.deepEqual(openWith(false).map(r => r[1]), ["editor", "viewer", "code", "system"]);
+  assert.deepEqual(openWith(true).map(r => r[1]), ["viewer", "code"]);
+});
+
+test("VS Code opens a remote path through Remote-SSH on plain ssh machines only", () => {
+  const box = { name: "box", target: "root@10.0.0.5", via: false };
+  assert.deepEqual(vscodeRemoteArgs(box, "/srv/my app/a#1.ts", false), ["--file-uri", "vscode-remote://ssh-remote+root@10.0.0.5/srv/my%20app/a%231.ts"]);
+  assert.deepEqual(vscodeRemoteArgs(box, "/srv", true), ["--folder-uri", "vscode-remote://ssh-remote+root@10.0.0.5/srv"]);
+  assert.equal(vscodeRemoteArgs({ ...box, via: "fly ssh console" }, "/srv", true), null);
+  assert.equal(vscodeRemoteArgs({ ...box, target: "a b/c" }, "/srv", true), null);
+  assert.equal(vscodeRemoteArgs(null, "/srv", true), null);
 });

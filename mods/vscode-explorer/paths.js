@@ -8,7 +8,7 @@ export const baseName = (p) => p.slice(p.lastIndexOf("/") + 1);
 export const parentOf = (p) => p.slice(0, p.lastIndexOf("/")) || "/";
 
 // tab.new args: the terminal editor (started in `folder`, default the file's own), or the vscode-viewer tab
-// (images, markdown, remote files, or when asked).
+// (images, markdown, remote files, or when asked). Every way of opening a file goes through here, the remote ones too.
 export function openArgs(file, { on = null, appHome, how = "auto", folder = parentOf(file) }) {
   const name = baseName(file);
   if (how === "viewer" || on || (how === "auto" && VIEWER_EXT.test(name))) return { name, mod: "vscode-viewer", props: { file, on } };
@@ -44,26 +44,33 @@ export function nameProblem(name, taken) {
   return null;
 }
 
-// Context menu rows: [label, action, hint] or "-" for a separator.
+// Context menu rows: [label, action, hint] or "-" for a separator. A remote entry has the same items but Reveal in
+// Finder: Finder only sees this computer, and Copy Path already gives the remote path.
 export function menuItems({ dir, remote, canPaste }) {
-  const local = !remote;
   const groups = [
-    dir && local ? [["New File…", "newFile"], ["New Folder…", "newFolder"]] : [],
-    dir ? [] : [["Open Preview", "open"], ...(local ? [["Open With…", "openWith"]] : [])],
-    local ? [["Reveal in Finder", "reveal", "⌥⌘R"], ["Open in Integrated Terminal", "terminal"]] : [],
-    local ? [["Cut", "cut", "⌘X"], ["Copy", "copy", "⌘C"], ...(canPaste ? [["Paste", "paste", "⌘V"]] : [])] : [],
+    dir ? [["New File…", "newFile"], ["New Folder…", "newFolder"]] : [["Open Preview", "open"], ["Open With…", "openWith"]],
+    [...(remote ? [] : [["Reveal in Finder", "reveal", "⌥⌘R"]]), ["Open in Integrated Terminal", "terminal"]],
+    [["Cut", "cut", "⌘X"], ["Copy", "copy", "⌘C"], ...(canPaste ? [["Paste", "paste", "⌘V"]] : [])],
     [["Copy Path", "copyPath", "⌥⌘C"], ["Copy Relative Path", "copyRelative", "⇧⌥⌘C"]],
-    local ? [["Rename…", "rename", "↵"], ["Delete", "delete", "⌘⌫"]] : [],
-  ].filter(g => g.length);
+    [["Rename…", "rename", "↵"], ["Delete", "delete", "⌘⌫"]],
+  ];
   return groups.flatMap((g, i) => (i ? ["-", ...g] : g));
 }
 
-export const OPEN_WITH = [
-  ["VS Code Editor (terminal)", "editor"],
-  ["Herdr Editor (viewer)", "viewer"],
-  ["Open in VS Code", "code"],
-  ["System Default", "system"],
-];
+// Open With. A remote file opens in the viewer (openArgs) until the terminal editor runs on that machine: a remote
+// space's tabs hold only that machine's terminals. System Default is an app on this computer.
+export const openWith = (remote) => remote
+  ? [["Herdr Editor (viewer)", "viewer"], ["Open in VS Code", "code"]]
+  : [["VS Code Editor (terminal)", "editor"], ["Herdr Editor (viewer)", "viewer"], ["Open in VS Code", "code"], ["System Default", "system"]];
+
+// `code` arguments opening a remote path through VS Code's Remote-SSH, from the machine's `hc machine ls` row; null
+// when the machine isn't plain ssh (a --via command) or its target has characters a URI authority can't take as is.
+export function vscodeRemoteArgs(machine, path, dir) {
+  const target = machine?.via ? null : machine?.target;
+  if (!target || !/^[\w.@:-]+$/.test(target)) return null;
+  const uri = `vscode-remote://ssh-remote+${target}${path.split("/").map(encodeURIComponent).join("/")}`;
+  return [dir ? "--folder-uri" : "--file-uri", uri];
+}
 
 // Popup height for rows (26px each, 9px per separator, 10px padding).
 export const menuHeight = (rows) => rows.reduce((h, r) => h + (r === "-" ? 9 : 26), 10);

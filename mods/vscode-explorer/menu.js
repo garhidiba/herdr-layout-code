@@ -2,9 +2,10 @@
 // (props { menu } or { dialog }), so they share the open rule in paths.js with the tree.
 import { div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { exec, hc, run, spaces, props, openOverlay, closeOverlay, theme, shared, setShared, appHome, writeTextFile } from "herdr";
+import { exec, hc, run, spaces, props, openOverlay, closeOverlay, theme, shared, setShared, appHome, writeTextFile, notify } from "herdr";
 import { createOpenTab } from "./launch.js";
-import { menuItems, menuHeight, OPEN_WITH, openArgs, baseName, parentOf, relativeTo, within, freeName, nameProblem } from "./paths.js";
+import { menuItems, menuHeight, openWith, openArgs, baseName, parentOf, relativeTo, nameProblem, vscodeRemoteArgs } from "./paths.js";
+import { createOps } from "./ops.js";
 
 const openTab = createOpenTab({ hc, run, spaces });
 const CLIPBOARD = "vscode-explorer.clipboard", REFRESH = "vscode-explorer.refresh";
@@ -12,7 +13,6 @@ export const refreshKey = REFRESH;
 
 // Herdr starts with PATH=/usr/bin:/bin; Homebrew/user tools (code, trash) live elsewhere.
 const sh = (script, ...args) => exec("sh", ["-c", 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; ' + script, "explorer", ...args]);
-const exists = async (p) => (await exec("test", ["-e", p])).code === 0;
 const refresh = () => setShared(REFRESH, Date.now());
 const copyText = (text) => sh('printf %s "$1" | pbcopy', text).catch(() => {});
 // Finder's Trash (or the `trash` command when installed); never rm.
@@ -25,17 +25,26 @@ export function openMenu(target) {
 }
 
 const dialog = (spec, height = 196) => openOverlay({ mod: "vscode-explorer", kind: "dialog", width: 440, height, props: { dialog: spec } });
+// A machine that can't be reached (or VS Code that can't open it) is a toast; any other failure the small dialog.
+const toast = (e) => notify({ title: "Explorer", body: String(e?.message ?? e), level: "error" });
 
-async function paste(folder) {
+async function paste(folder, on) {
   const clip = shared(CLIPBOARD);
   if (!clip) return;
-  const src = clip.path;
-  if (within(folder, src)) throw new Error(`Cannot paste ${baseName(src)} into itself.`);
-  if (clip.cut && parentOf(src) === folder) { setShared(CLIPBOARD, null); return; }
-  const name = await freeName(baseName(src), (n) => exists(`${folder}/${n}`), clip.dir);
-  const r = await exec(clip.cut ? "mv" : "cp", [...(clip.cut ? ["-n"] : ["-R", "-n"]), src, `${folder}/${name}`]);
-  if (r.code !== 0) throw new Error(r.stderr.trim() || "Paste failed");
+  await createOps(exec, on).paste(clip, folder);
   if (clip.cut) setShared(CLIPBOARD, null);
+}
+
+// VS Code on the path: `code` here, or Remote-SSH for a path on an ssh machine.
+export async function openInCode(path, on, dir = false) {
+  if (!on) return sh('exec code "$1"', path);
+  const r = await hc(["machine", "ls", "--json"]);
+  let machine = null;
+  try { machine = JSON.parse(r.stdout).machines.find(m => m.name === on); } catch {}
+  const args = vscodeRemoteArgs(machine, path, dir);
+  if (!args) throw Object.assign(new Error(`${on} isn't a plain ssh machine, so VS Code's Remote-SSH can't open it.`), { unreachable: true });
+  const c = await sh('command -v code >/dev/null || { echo "The code command is not installed." >&2; exit 127; }; exec code "$@"', ...args);
+  if (c.code !== 0) throw Object.assign(new Error(c.stderr.trim() || "VS Code didn't start"), { unreachable: true });
 }
 
 // Plain class composed by the mod's View for a { menu } overlay.
@@ -50,7 +59,7 @@ export class ExplorerMenu {
 
   rows() {
     const t = this.target;
-    return this.withList ? OPEN_WITH : menuItems({ dir: t.dir, remote: !!t.on, canPaste: !!shared(CLIPBOARD) });
+    return this.withList ? openWith(!!t.on) : menuItems({ dir: t.dir, remote: !!t.on, canPaste: !!shared(CLIPBOARD) });
   }
 
   close() { closeOverlay(props().overlay); }
@@ -61,21 +70,21 @@ export class ExplorerMenu {
     // Closed once the tab is shown: closing first could end the wait. A second pick meanwhile is ignored.
     const open = (args) => !this.opening && (this.opening = true) && cx.spawn(async cx => { try { await openTab(args, cx); } finally { this.close(); } });
     if (action === "open") return open(openArgs(t.path, { on: t.on, appHome: appHome(), folder: t.root }));
-    if (action === "editor" || action === "viewer") return open(openArgs(t.path, { appHome: appHome(), how: action, folder: t.root }));
+    if (action === "editor" || action === "viewer") return open(openArgs(t.path, { on: t.on, appHome: appHome(), how: action, folder: t.root }));
     this.close();
-    const fail = (e) => dialog({ kind: "error", text: String(e?.message ?? e) }, 150);
+    const fail = (e) => e?.unreachable ? toast(e) : dialog({ kind: "error", text: String(e?.message ?? e) }, 150);
     switch (action) {
-      case "code": return sh('exec code "$1"', t.path).catch(fail);
+      case "code": return openInCode(t.path, t.on, t.dir).catch(fail);
       case "system": return exec("open", [t.path]).catch(fail);
       case "reveal": return exec("open", ["-R", t.path]).catch(fail);
       case "terminal": return run("terminal.open", { folder, place: "tab" });
-      case "cut": case "copy": return setShared(CLIPBOARD, { path: t.path, dir: t.dir, cut: action === "cut" });
-      case "paste": return paste(folder).then(refresh, fail);
+      case "cut": case "copy": return setShared(CLIPBOARD, { path: t.path, dir: t.dir, cut: action === "cut", on: t.on ?? null });
+      case "paste": return paste(folder, t.on).then(refresh, fail);
       case "copyPath": return copyText(t.path);
       case "copyRelative": return copyText(relativeTo(t.root, t.path));
-      case "newFile": case "newFolder": return dialog({ kind: action, folder, root: t.root });
-      case "rename": return dialog({ kind: "rename", path: t.path, root: t.root });
-      case "delete": return dialog({ kind: "delete", path: t.path, dir: t.dir }, 170);
+      case "newFile": case "newFolder": return dialog({ kind: action, folder, root: t.root, on: t.on });
+      case "rename": return dialog({ kind: "rename", path: t.path, root: t.root, on: t.on });
+      case "delete": return dialog({ kind: "delete", path: t.path, dir: t.dir, on: t.on }, 170);
     }
   }
 
@@ -123,8 +132,9 @@ export class ExplorerDialog {
   close() { closeOverlay(props().overlay); }
 
   async apply(cx) {
-    const s = this.spec;
+    const s = this.spec, ops = createOps(exec, s.on ?? null);
     if (s.kind === "delete") {
+      if (s.on) return ops.remove(s.path);
       const r = await sh(TRASH, s.path);
       if (r.code !== 0) throw new Error(r.stderr.trim() || "Could not move to Trash");
       return;
@@ -132,19 +142,25 @@ export class ExplorerDialog {
     const name = this.input.value().trim();
     const folder = s.kind === "rename" ? parentOf(s.path) : s.folder, target = `${folder}/${name}`;
     if (s.kind === "rename" && name === baseName(s.path)) return;
-    const problem = nameProblem(name, name && !name.includes("/") && await exists(target));
+    const problem = nameProblem(name, name && !name.includes("/") && await ops.exists(target));
     if (problem) throw new Error(problem);
-    if (s.kind === "newFolder") { const r = await exec("mkdir", [target]); if (r.code !== 0) throw new Error(r.stderr.trim()); return; }
-    if (s.kind === "newFile") { await writeTextFile(target, "", null); await openTab(openArgs(target, { appHome: appHome(), folder: s.root }), cx); return; }
-    const r = await exec("mv", ["-n", s.path, target]);
-    if (r.code !== 0) throw new Error(r.stderr.trim() || "Rename failed");
+    if (s.kind === "newFolder") return ops.mkdir(target);
+    if (s.kind === "newFile") {
+      if (s.on) await ops.newFile(target); else await writeTextFile(target, "", null);
+      await openTab(openArgs(target, { on: s.on, appHome: appHome(), folder: s.root }), cx);
+      return;
+    }
+    await ops.move(s.path, target);
   }
 
   submit(cx) {
     if (this.spec.kind === "error") return this.close();
     cx.spawn(async (cx) => {
       try { await this.apply(cx); this.close(); refresh(); }
-      catch (e) { this.error = String(e?.message ?? e); cx.notify(); }
+      catch (e) {
+        if (e?.unreachable) { toast(e); return this.close(); }
+        this.error = String(e?.message ?? e); cx.notify();
+      }
     });
   }
 
@@ -152,8 +168,9 @@ export class ExplorerDialog {
     const t = theme(), s = this.spec;
     const title = { newFile: "New File", newFolder: "New Folder", rename: "Rename", error: "Explorer" }[s.kind]
       ?? `Are you sure you want to delete '${baseName(s.path)}'?`;
-    const detail = s.kind === "delete" ? `You can restore this ${s.dir ? "folder" : "file"} from the Trash.` : s.kind === "error" ? s.text : null;
-    const yes = s.kind === "delete" ? "Move to Trash" : s.kind === "error" ? "OK" : s.kind === "rename" ? "Rename" : "Create";
+    const detail = s.kind === "delete" ? (s.on ? `On ${s.on} it goes to the Trash when trash or gio is installed there; otherwise it is deleted for good.`
+      : `You can restore this ${s.dir ? "folder" : "file"} from the Trash.`) : s.kind === "error" ? s.text : null;
+    const yes = s.kind === "delete" ? (s.on ? "Delete" : "Move to Trash") : s.kind === "error" ? "OK" : s.kind === "rename" ? "Rename" : "Create";
     const button = (id, label, primary, onClick) => h_flex().id(id).h(32).px(14).items_center().rounded(8).border_1()
       .border_color(primary ? t.solid : t.input).bg(primary ? t.solid : t.raised).text_color(primary ? t.solid_foreground : t.foreground)
       .cursor_pointer().hover(st => st.opacity(0.88)).on_click(onClick).child(label);
