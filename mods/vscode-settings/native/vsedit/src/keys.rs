@@ -323,9 +323,19 @@ mod tests {
 
     #[test]
     fn sgr_mouse_wheel_and_motion() {
-        let (ev, _) = parse("\x1b[<0;7;2M\x1b[<32;100;2M\x1b[<69;20;2M\x1b[<0;9;3m");
+        let (ev, _) = parse("\x1b[<0;7;2M\x1b[<32;100;2M\x1b[<69;20;2M\x1b[<0;9;3m\x1b[<4;9;3M\x1b[<36;12;4M");
         let m = |button, x, y, release, motion, shift| Ev::Mouse(Mouse { button, x, y, release, motion, shift, ..Default::default() });
-        assert_eq!(ev, vec![m(0, 7, 2, false, false, false), m(0, 100, 2, false, true, false), m(65, 20, 2, false, false, true), m(0, 9, 3, true, false, false)]);
+        assert_eq!(
+            ev,
+            vec![
+                m(0, 7, 2, false, false, false),
+                m(0, 100, 2, false, true, false),
+                m(65, 20, 2, false, false, true),
+                m(0, 9, 3, true, false, false),
+                m(0, 9, 3, false, false, true), // Shift+press
+                m(0, 12, 4, false, true, true), // Shift+drag
+            ]
+        );
     }
 
     #[test]

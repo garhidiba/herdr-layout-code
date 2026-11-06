@@ -650,6 +650,23 @@ def run_drag_scroll(tmp):
     print("drag auto-scroll + horizontal wheel: ok")
 
 
+def run_shift_click(tmp):
+    """XTSHIFTESCAPE on enter (ghostty/xterm report Shift+click instead of selecting) and off on exit; a Shift+press
+    extends the selection from the cursor."""
+    file = os.path.join(tmp, "shift.txt")
+    open(file, "w").write("foo bar\nbaz qux\nend\n")
+    t = Term(file)
+    assert t.read("Ln 1, Col 1")
+    assert "\x1b[>1s" in screen_of(t), "Shift+click not asked for (CSI > 1 s)"
+    t.send("\x1b[<0;9;3M\x1b[<0;9;3m", wait=0.3)    # click line 2, column 3
+    t.send("\x1b[<4;8;2M\x1b[<4;8;2m", wait=0.3)    # Shift+click line 1, column 2
+    assert t.read("Ln 1, Col 2 (9 selected)"), "Shift+click did not extend: " + plain(t)[-200:]
+    t.send(QUIT)
+    assert t.wait_exit() == 0
+    assert b"\x1b[>0s" in t.out[-300:], "Shift+click not handed back (CSI > 0 s)"
+    print("shift+click: ok")
+
+
 def run_minified(tmp):
     """A 300 KB one-line bundle is colored on screen (keywords #C678DD) and stays responsive to typing."""
     file = os.path.join(tmp, "bundle.min.js")
@@ -1280,7 +1297,7 @@ def main():
     open(ISOLATED["VSEDIT_SETTINGS"], "w").write('{"files.autoSave": "off", "files.autoSaveDelay": 1, "editor.inlineSuggest.provider": "off"}\n')
     engines = os.path.join(tmp, "engines.log")
     ISOLATED.update(VSEDIT_ENGINE_LOG=engines, VSEDIT_INLINE_USAGE=os.path.join(tmp, "inline-usage.json"))
-    scenarios = [run_tsx, run_go, run_crlf, run_hex, run_error_page, run_drag_scroll, run_minified, run_scrollbars, run_decorations,
+    scenarios = [run_tsx, run_go, run_crlf, run_hex, run_error_page, run_drag_scroll, run_shift_click, run_minified, run_scrollbars, run_decorations,
                  run_autoclose, run_git_gutter, run_folding, run_menu_and_cmd_save, run_save_dialog, run_auto_save, run_cursor_style, run_hot_exit,
                  run_keybindings, run_mac_keys, run_format, run_typescript, run_find_and_status, run_symbols_and_problems, run_install_prompt, run_small_batch,
                  run_files_and_navigation, run_medium_language, run_medium_editing, run_inline_suggest, run_references_and_lenses]

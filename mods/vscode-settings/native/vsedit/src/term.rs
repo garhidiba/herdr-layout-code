@@ -10,9 +10,10 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// Alternate screen, bracketed paste, SGR mouse, alternate scroll off (saved first), focus reports, Kitty keyboard
-/// "disambiguate", bar cursor; LEAVE undoes each.
-pub const ENTER: &str = "\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?1007s\x1b[?1007l\x1b[?1004h\x1b[>1u\x1b[5 q";
-pub const LEAVE: &str = "\x1b[0m\x1b[<u\x1b[?1004l\x1b[?1007r\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?2004l\x1b[0 q\x1b]112\x07\x1b[?25h\x1b[?1049l";
+/// "disambiguate", Shift+click reported to the app (XTSHIFTESCAPE: ghostty and xterm keep it for their own selection
+/// otherwise; other terminals may still), bar cursor; LEAVE undoes each.
+pub const ENTER: &str = "\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?1007s\x1b[?1007l\x1b[?1004h\x1b[>1u\x1b[>1s\x1b[5 q";
+pub const LEAVE: &str = "\x1b[0m\x1b[>0s\x1b[<u\x1b[?1004l\x1b[?1007r\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?2004l\x1b[0 q\x1b]112\x07\x1b[?25h\x1b[?1049l";
 
 static WAKE_FD: AtomicI32 = AtomicI32::new(-1);
 /// The last terminating signal received (0 for none).

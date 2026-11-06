@@ -203,6 +203,7 @@ test("function keys, Shift+F10, the menu key and focus reports", () => {
   assert.equal(keyOf("\x1bOQ"), "f2");
   assert.deepEqual(parse("\x1b[I\x1b[O").events, [{ type: "focus", focused: true }, { type: "focus", focused: false }]);
   assert.deepEqual(parse("\x1b[<2;10;5M").events[0], { type: "mouse", button: 2, x: 10, y: 5, release: false, motion: false, shift: false, alt: false, ctrl: false });
+  assert.deepEqual(parse("\x1b[<4;10;5M\x1b[<36;12;6M").events.map(e => [e.button, e.shift, e.motion]), [[0, true, false], [0, true, true]]); // Shift+press, Shift+drag
   assert.equal(parse("\x1b[115;9").rest, "\x1b[115;9"); // split sequence waits for the rest
 });
 

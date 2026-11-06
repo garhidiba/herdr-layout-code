@@ -416,7 +416,7 @@ other than 1) / `not built` from `vsedit --version`, and offers the build while 
   Go/Select to Bracket, Find With Selection, Save As, Save All, Go Back/Forward, Go to File).
 - `VSEDIT_BIN=<target>/release/vsedit python3 -I mods/vscode-viewer/editor/test/e2e.py`: the JS editor's e2e
   scenarios through the launcher with the Rust engine forced; the table says which editor ran, and a scenario the Rust
-  editor didn't run alone (a fallback to JS) fails. All 29 scenarios pass in both editors (phase 3 removed the skip
+  editor didn't run alone (a fallback to JS) fails. All 31 scenarios pass in both editors (phase 3 removed the skip
   list). The launcher keeps the caller's PATH first (the tool folders after it), so the tests' `herdr-app` stub wins
   over an installed Herdr.
 
