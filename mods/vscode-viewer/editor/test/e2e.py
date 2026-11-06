@@ -28,8 +28,12 @@ func main() {
 '''
 
 
-# Settings, backups and Herdr are never the real ones: main() points these at a temp folder.
+# Settings, backups and Herdr are never the real ones: main() points these at a temp folder. The keys are Linux's
+# (VSEDIT_OS=linux: Ctrl keys, Ctrl+W closes) unless a scenario runs with MAC.
 ISOLATED = {}
+QUIT = "\x17"                       # Ctrl+W: Close Editor (Windows/Linux)
+MAC = {"VSEDIT_OS": "mac"}
+MAC_QUIT = "\x1b[119;9u"            # ⌘W as Kitty CSI-u
 
 
 class Term:
@@ -136,7 +140,7 @@ def run_tsx(tmp):
     t.send("x")                     # 한x글
     t.send("\x13")
     assert t.read("Saved", timeout=2), "no Saved message"
-    t.send("\x11")
+    t.send(QUIT)
     assert t.wait_exit() == 0
     assert t.out.endswith(b"\x1b[?1049l") or b"\x1b[?1049l" in t.out[-200:], "terminal not restored"
     want = TSX.replace("hello</div>;\n", "hello</div>; ok\n  한x글\n")
@@ -159,7 +163,7 @@ def run_go(tmp):
     t.send("\x13")
     assert t.read("Saved", timeout=2)
     t.send("zz")                     # unsaved edit -> quit asks
-    t.send("\x11")
+    t.send(QUIT)
     assert t.read("Do you want to save", timeout=2), "no dirty prompt"
     t.send("d")
     assert t.wait_exit() == 0
@@ -174,7 +178,7 @@ def run_crlf(tmp):
     t = Term(file)
     assert t.read("CRLF"), "CRLF not shown"
     t.send("\x1b[1;5F")              # Ctrl+End
-    t.send("!"); t.send("\x13"); t.read("Saved", timeout=2); t.send("\x11")
+    t.send("!"); t.send("\x13"); t.read("Saved", timeout=2); t.send(QUIT)
     assert t.wait_exit() == 0
     assert open(file, "rb").read() == b"one\r\ntwo!", open(file, "rb").read()
     print("crlf: ok")
@@ -203,7 +207,7 @@ def run_menu_and_cmd_save(tmp):
     env, log = herdr_stub(tmp)
     file = os.path.join(tmp, "menu.txt")
     open(file, "w").write("hello world\n")
-    t = Term(file, env=env)
+    t = Term(file, env={**env, **MAC})
     assert t.read("Ln 1, Col 1"), "no first frame"
     assert "\x1b[>1u" in screen_of(t) and "\x1b[?1004h" in screen_of(t), "Kitty keyboard / focus reports not enabled"
     t.send("\x1b[<2;20;2M\x1b[<2;20;2m")
@@ -219,8 +223,8 @@ def run_menu_and_cmd_save(tmp):
     t.send("\x1b[F"); t.send("!")
     t.send("\x1b[115;9u")           # ⌘S as Kitty CSI-u
     assert t.read("Saved", timeout=2), "⌘S did not save"
-    t.send("\x1b[113;9u")           # ⌘Q is not ours; Ctrl+Q quits
-    t.send("\x11")
+    t.send("\x1b[113;9u")           # ⌘Q is not ours; ⌘W closes
+    t.send(MAC_QUIT)
     assert t.wait_exit() == 0
     assert open(file).read() == "hello world!\n"
     out = screen_of(t)
@@ -232,6 +236,30 @@ def run_menu_and_cmd_save(tmp):
     print("menu + ⌘S: ok")
 
 
+def run_mac_keys(tmp):
+    """macOS keys (VSEDIT_OS=mac): what Herdr sends for ⌘→ / ⌘← (Ctrl+E / Ctrl+A) moves to the line end / start instead of
+    selecting all, Ctrl+F / Ctrl+N move, Ctrl+K deletes to the line end, Ctrl+U (Herdr's ⌘⌫) to the line start, and the
+    chord ⌘K ⌘C comments the line after the "(⌘K) was pressed" hint."""
+    file = os.path.join(tmp, "mac.js")
+    open(file, "w").write("let a = 1;\nlet b = 2;\n")
+    t = Term(file, env=MAC)
+    assert t.read("Ln 1, Col 1"), "no first frame"
+    t.send("\x05"); t.send("!")                      # Ctrl+E (⌘→): line end
+    t.send("\x01"); t.send("x")                      # Ctrl+A (⌘←): line start, not Select All
+    t.send("\x06"); t.send("\x0b")                   # Ctrl+F right, Ctrl+K delete to the line end
+    t.send("\x0e"); t.send("\x05"); t.send("\x15")   # Ctrl+N down, Ctrl+E, Ctrl+U (⌘⌫) delete to the line start
+    t.send("\x10")                                  # Ctrl+P up
+    t.send("\x1b[107;9u")                           # ⌘K
+    assert "(⌘K) was pressed. Waiting for second key o" in plain(t), "no chord hint"
+    t.send("\x1b[99;9u")                            # ⌘C: Add Line Comment
+    t.send("\x1b[115;9u")                           # ⌘S
+    assert t.read("Saved", timeout=2), "⌘S did not save"
+    assert open(file).read() == "// xl\n\n", repr(open(file).read())
+    t.send(MAC_QUIT)
+    assert t.wait_exit() == 0
+    print("mac keys + ⌘K ⌘C: ok")
+
+
 def run_keybindings(tmp):
     """vscode-keybindings.json rebinds Delete Line to ⌘⇧D (Kitty CSI-u) and removes its ⌘⇧K default; the file is read
     again while the editor runs."""
@@ -241,7 +269,7 @@ def run_keybindings(tmp):
                         ' { "key": "cmd+shift+k", "command": "-editor.action.deleteLines" }]\n')
     file = os.path.join(tmp, "keys.txt")
     open(file, "w").write("one\ntwo\nthree\n")
-    t = Term(file)
+    t = Term(file, env=MAC)
     assert t.read("Ln 1, Col 1"), "no first frame"
     t.send("\x1b[107;10u")          # ⌘⇧K: removed, does nothing
     t.send("\x1b[100;10u")          # ⌘⇧D: Delete Line
@@ -255,7 +283,7 @@ def run_keybindings(tmp):
     t.send("\x1b[115;9u")
     assert t.read("Saved", timeout=2), "⌘S did not save"
     assert open(file).read() == "three\n", open(file).read()
-    t.send("\x11")
+    t.send(MAC_QUIT)
     assert t.wait_exit() == 0
     os.remove(kb)
     print("keybindings: ok")
@@ -297,7 +325,7 @@ def run_typescript(tmp):
     assert open(os.path.join(proj, "b.ts")).read() == TS_B.replace("greet", "hello"), "b.ts not renamed on disk"
     t.send("\x13"); assert t.read("Saved", timeout=2)
     assert open(os.path.join(proj, "a.ts")).read() == TS_A.replace("greet", "hello")
-    t.send("\x11")
+    t.send(QUIT)
     assert t.wait_exit() == 0
     print("typescript (definition, references, rename): ok")
 
@@ -310,29 +338,29 @@ def run_format(tmp):
     open(file, "w").write("package main\nfunc  main( ) {\nx:=1\n_ = x}\n")
     t = Term(file)
     assert t.read("Ln 1, Col 1")
-    t.send("\x1b[102;4u", wait=0.5)               # ⌥⇧F as Kitty CSI-u
+    t.send("\x1b[105;6u", wait=0.5)               # Ctrl+Shift+I (Linux Format Document) as Kitty CSI-u
     t.read("never", timeout=1.5)
     t.send("\x13"); assert t.read("Saved", timeout=2)
-    t.send("\x11"); assert t.wait_exit() == 0
+    t.send(QUIT); assert t.wait_exit() == 0
     assert open(file).read() == "package main\n\nfunc main() {\n\tx := 1\n\t_ = x\n}\n", repr(open(file).read())
     print("format (gofmt): ok")
 
 
 def run_save_dialog(tmp):
-    """Unsaved changes: Ctrl+Q asks Save / Don't Save / Cancel; Esc cancels, Enter saves and quits."""
+    """Unsaved changes: Ctrl+W asks Save / Don't Save / Cancel; Esc cancels, Enter saves and quits."""
     file = os.path.join(tmp, "dialog.txt")
     open(file, "w").write("abc\n")
     t = Term(file)
     assert t.read("Ln 1, Col 1")
     t.send("X")
-    t.send("\x11")
+    t.send(QUIT)
     assert t.read("Do you want to save the changes you made to dialog.txt?", timeout=2)
     sc = screen_of(t)
     assert "Your changes will be lost if you don't save them." in sc and " Save " in sc and " Don't Save " in sc and " Cancel " in sc
     t.send("\x1b[27u")                            # Esc = Cancel
     t.send("Y")
     t.out = b""
-    t.send("\x11")
+    t.send(QUIT)
     assert t.read("Do you want to save", timeout=2)
     t.send("\r")                                  # Enter = Save
     assert t.wait_exit() == 0
@@ -352,7 +380,7 @@ def run_auto_save(tmp):
     t.send("Z")
     t.read("never", timeout=1.2)
     assert open(file).read() == "Zone\n", "not auto-saved: " + repr(open(file).read())
-    t.send("\x11")
+    t.send(QUIT)
     assert t.wait_exit() == 0, "quit should not ask: the file was auto-saved"
     assert json.load(open(settings))["keep.me"] == 1
     print("auto save: ok")
@@ -378,7 +406,7 @@ def run_hot_exit(tmp):
     assert " Restore " in screen_of(t) and " Discard " in screen_of(t)
     t.send("\r")                                  # Restore
     t.send("\x13"); assert t.read("Saved", timeout=2)
-    t.send("\x11"); assert t.wait_exit() == 0
+    t.send(QUIT); assert t.wait_exit() == 0
     assert open(file).read() == "NEW base\n"
     assert os.listdir(ISOLATED["VSEDIT_BACKUPS"]) == [], "backup not removed after save"
     print("hot exit: ok")
@@ -409,7 +437,7 @@ def run_hex(tmp):
     t.send("\x06"); t.send("de ad be ef\r", wait=0.5)
     assert t.read("Found at 0x80005", timeout=3), "search failed:\n" + plain(t)[-400:]
     assert "00080000  f8 f9 fa fb fc de ad be  ef " in plain(t), plain(t)[-800:]
-    t.send("\x11")
+    t.send(QUIT)
     assert t.wait_exit() == 0
     assert b"\x1b[?1049l" in t.out[-200:] and b"\x1b[<u" in t.out[-300:], "terminal not restored"
     small = os.path.join(tmp, "nul.txt")
@@ -418,7 +446,7 @@ def run_hex(tmp):
     assert t.read("Open Anyway", timeout=3)
     t.send("a", wait=0.3)                         # Open Anyway: the text editor with NUL as a control picture
     assert t.read("Ln 1, Col 1", timeout=5) and "ab\u2400cd" in plain(t), plain(t)[-400:]
-    t.send("\x11")
+    t.send(QUIT)
     assert t.wait_exit() == 0
     print("hex viewer: ok")
 
@@ -439,7 +467,7 @@ def run_error_page(tmp):
     t.out = b""
     t.send("t", wait=0.3)                         # Try Again
     assert t.read("Ln 1, Col 1", timeout=5), "Try Again did not open the file:\n" + plain(t)[-400:]
-    t.send("\x11")
+    t.send(QUIT)
     assert t.wait_exit() == 0
 
     env, log = herdr_stub(tmp)
@@ -482,7 +510,7 @@ def run_drag_scroll(tmp):
     t.out = b""
     t.send("\x1b[<69;20;2M")                       # Shift+wheel down = right
     t.read(timeout=0.4); assert "1  6789012345" in plain(t), "Shift+wheel did not scroll sideways"
-    t.send("\x11")
+    t.send(QUIT)
     assert t.wait_exit() == 0
     assert b"\x1b[?1007r" in t.out[-300:], "alternate scroll not restored"
     assert re.search(r'^\d+ "\\u001b\[<69;20;2M"$', open(log).read(), re.M), "VSEDIT_LOG_INPUT did not log the wheel"
@@ -506,7 +534,7 @@ def run_minified(tmp):
     t.out = b""
     t.send("x")
     assert t.read("Ln 1, Col 2", timeout=1), "typing is stuck"
-    t.send("\x11"); t.send("d")
+    t.send(QUIT); t.send("d")
     assert t.wait_exit() == 0
     print("minified line colors: ok")
 
@@ -537,7 +565,7 @@ def run_scrollbars(tmp):
     t.out = b""
     t.send("\x1b[<0;100;29M"); t.send("\x1b[<0;100;29m", wait=0.3)   # the end of the track: jump
     assert "row 499" in plain(t) and "Ln 1, Col 1" in plain(t), "track click did not jump to the end"
-    t.send("\x11")
+    t.send(QUIT)
     assert t.wait_exit() == 0
     assert b"\x1b[?1003l" in t.out[-300:], "hover reports not turned off on exit"
 
@@ -551,7 +579,7 @@ def run_scrollbars(tmp):
     m = re.findall(r"1  (\d{10})", plain(t))
     assert m and m[-1] != "0123456789", "dragging the horizontal thumb did not scroll: " + repr(m[-1:])
     assert "Ln 1, Col 1" in plain(t), "the drag moved the cursor"
-    t.send("\x11")
+    t.send(QUIT)
     assert t.wait_exit() == 0
 
     blob = os.path.join(tmp, "rows.bin")
@@ -564,7 +592,7 @@ def run_scrollbars(tmp):
     offs = [int(o, 16) for o in re.findall(r"([0-9a-f]{8})  00", plain(t))]
     assert offs and max(offs) > 0x1000, "dragging the hex bar did not scroll"
     assert "Offset 0x0 (0)" in plain(t), "the drag moved the hex cursor"
-    t.send("\x11")
+    t.send(QUIT)
     assert t.wait_exit() == 0
     print("scrollbars: ok")
 
@@ -596,7 +624,7 @@ def run_decorations(tmp):
     t.send("3:7\r")                              # on `main` of func main
     t.read(timeout=0.5)
     assert screen_of(t).count(bg("#474d59") + "main") >= 2, "occurrences of main not on wordHighlightBackground"
-    t.send("\x11")
+    t.send(QUIT)
     assert t.wait_exit() == 0
     print("decorations: ok")
 
@@ -617,7 +645,7 @@ def run_autoclose(tmp):
     t.send("{")                                    # wraps it
     t.send("\x13")
     assert t.read("Saved", timeout=2)
-    t.send("\x11")
+    t.send(QUIT)
     assert t.wait_exit() == 0
     got = open(file).read()
     assert got == 'f("a") {;}\n', repr(got)
@@ -632,7 +660,7 @@ def status_col(t, text):
 
 
 def run_find_and_status(tmp):
-    """The find widget: Kitty ⌥⌘C / ⌥⌘W narrow the matches (N of M in the widget), ⌥⌘↩ replaces all. Status bar clicks:
+    """The find widget (Linux keys): Alt+C / Alt+W narrow the matches (N of M in the widget), Ctrl+Alt+Enter replaces all. Status bar clicks:
     Ln/Col opens Go to Line, LF picks CRLF and the save writes it."""
     file = os.path.join(tmp, "words.txt")
     open(file, "w").write("Foo foo food\nbar foo\n")
@@ -640,12 +668,12 @@ def run_find_and_status(tmp):
     assert t.read("Ln 1, Col 1")
     t.send("\x06"); t.send("foo", wait=0.3)               # Ctrl+F foo
     assert "1 of 4" in plain(t) and "Aa ab .*" in plain(t), "no count in the widget:\n" + plain(t)[-300:]
-    t.send("\x1b[99;11u", wait=0.3)                       # ⌥⌘C Match Case
+    t.send("\x1bc", wait=0.3)                             # Alt+C Match Case
     assert t.read("1 of 3", timeout=2), "Match Case did not narrow:\n" + plain(t)[-300:]
-    t.send("\x1b[119;11u", wait=0.3)                      # ⌥⌘W Match Whole Word
+    t.send("\x1bw", wait=0.3)                             # Alt+W Match Whole Word
     assert t.read("1 of 2", timeout=2), "Whole Word did not narrow"
     t.send("\x08", wait=0.2)                              # Ctrl+H: the Replace row
-    t.send("baz"); t.send("\x1b[13;11u", wait=0.3)        # ⌥⌘↩ Replace All
+    t.send("baz"); t.send("\x1b[13;7u", wait=0.3)         # Ctrl+Alt+Enter Replace All
     assert t.read("No results", timeout=2) and "baz food" in plain(t), "no Replace All:\n" + plain(t)[-300:]
     t.send("\x1b[27u"); t.send("\x13")
     assert t.read("Saved", timeout=2)
@@ -660,7 +688,7 @@ def run_find_and_status(tmp):
     t.send("\x1b[B"); t.send("\r", wait=0.3); t.send("\x13")
     assert t.read("CRLF", timeout=2) and t.read("Saved", timeout=2)
     assert open(file, "rb").read() == b"Foo baz food\r\nbar baz\r\n", open(file, "rb").read()
-    t.send("\x11")
+    t.send(QUIT)
     assert t.wait_exit() == 0
     print("find toggles + status bar items: ok")
 
@@ -670,7 +698,7 @@ SHOP = 'export class Shop {\n  buy(n: number) {\n    return n;\n  }\n}\nconst s:
 
 def run_symbols_and_problems(tmp):
     """Through tsserver: the breadcrumbs follow the cursor into Shop › buy, F8 goes to the type error (a curly
-    underline, its message in the status bar), ⇧⌘O lists the symbols from the TypeScript server and jumps."""
+    underline, its message in the status bar), Ctrl+Shift+O lists the symbols from the TypeScript server and jumps."""
     proj = os.path.join(tmp, "shopproj")
     os.makedirs(proj)
     subprocess.run(["git", "init", "-q"], cwd=proj, check=True)
@@ -685,12 +713,12 @@ def run_symbols_and_problems(tmp):
     t.out = b""
     t.send("\x1b[19~", wait=0.3)                          # F8
     assert t.read("Ln 6, Col 7", timeout=5) and t.read("not assignable", timeout=2), "F8 did not reach the error:\n" + plain(t)[-300:]
-    t.send("\x1b[111;10u", wait=0.5)                      # ⇧⌘O
+    t.send("\x1b[111;6u", wait=0.5)                       # Ctrl+Shift+O
     assert t.read("from TypeScript server", timeout=10), "no symbol picker:\n" + plain(t)[-300:]
     assert "Shop" in plain(t) and "method" in plain(t)
     t.send("buy"); t.send("\r", wait=0.3)
     assert t.read("Ln 2, Col 3", timeout=2), "the picker did not jump to buy"
-    t.send("\x11")
+    t.send(QUIT)
     assert t.wait_exit() == 0
     print("symbols + diagnostics (tsserver): ok")
 
@@ -723,14 +751,15 @@ def run_git_gutter(tmp):
     time.sleep(3.5); t.read()                            # the 3 s poll sees the new HEAD and repaints
     last = plain(t).split("\x1b[1;1H")[-1]               # the last frame
     assert "Ln 9" in last and "▎" not in last, "bars still there after the commit"
-    t.send("\x11")
+    t.send(QUIT)
     assert t.wait_exit() == 0
     print("git gutter: ok")
 
 
 def run_folding(tmp):
-    """Kitty ⌃⇧[ folds the block at the cursor (⋯ after the header, its lines gone, ↓ skips them), ⌃⇧] unfolds it;
-    chevrons show with the pointer on the gutter and a click on one folds; Unfold All from the palette."""
+    """Linux keys. Kitty Ctrl+Shift+[ folds the block at the cursor (⋯ after the header, its lines gone, ↓ skips them),
+    Ctrl+Shift+] unfolds it; chevrons show with the pointer on the gutter and a click on one folds; Unfold All from the
+    palette; the two-step chords Ctrl+K Ctrl+0 / Ctrl+L / Ctrl+J with the status hint after Ctrl+K."""
     file = os.path.join(tmp, "fold.ts")
     open(file, "w").write("function a() {\n  if (x) {\n    one();\n    two();\n  }\n}\nconst z = 1;\n")
     t = Term(file)
@@ -749,11 +778,15 @@ def run_folding(tmp):
     assert "›function a() { ⋯" in last() and "const z" in last() and "if (x)" not in last(), "the chevron click did not fold:\n" + last()[-600:]
     t.send("\x1bOP"); t.send("Unfold All", wait=0.3); t.send("\r", wait=0.3)
     assert "one();" in last(), "Unfold All from the palette"
-    t.send("\x1b[91;7u", wait=0.3)                      # ⌃⌥[ Fold All
-    assert "›function a() { ⋯" in last() and "if (x)" not in last(), "Fold All"
-    t.send("\x1b[93;7u", wait=0.3)                      # ⌃⌥] Unfold All
-    assert "one();" in last(), "Unfold All"
-    t.send("\x11")
+    t.send("\x1b[107;5u")                               # Ctrl+K: the chord's first key
+    assert "(Ctrl+K) was pressed. Waiting for second key o" in last(), "no chord hint: " + repr(last()[-500:])
+    t.send("\x1b[48;5u", wait=0.3)                      # Ctrl+0: Fold All
+    assert "›function a() { ⋯" in last() and "if (x)" not in last(), "Ctrl+K Ctrl+0 Fold All"
+    t.send("\x0b\x0c", wait=0.3)                         # legacy Ctrl+K Ctrl+L: Toggle Fold (the cursor's fold opens)
+    assert "x) { ⋯" in last() and "5  │ }" in last(), "Ctrl+K Ctrl+L Toggle Fold: the outer fold opens, the inner stays"
+    t.send("\x1b[107;5u\x1b[106;5u", wait=0.3)          # Ctrl+K Ctrl+J: Unfold All
+    assert "one();" in last(), "Ctrl+K Ctrl+J Unfold All"
+    t.send(QUIT)
     assert t.wait_exit() == 0
     print("folding: ok")
 
@@ -761,10 +794,10 @@ def run_folding(tmp):
 def main():
     tmp = tempfile.mkdtemp(prefix="vsedit-e2e-")
     ISOLATED.update(VSEDIT_SETTINGS=os.path.join(tmp, "settings", "vscode-settings.json"), VSEDIT_BACKUPS=os.path.join(tmp, "backups"),
-                    VSEDIT_KEYBINDINGS=os.path.join(tmp, "settings", "vscode-keybindings.json"))
+                    VSEDIT_KEYBINDINGS=os.path.join(tmp, "settings", "vscode-keybindings.json"), VSEDIT_OS="linux")
     try:
         run_tsx(tmp); run_go(tmp); run_crlf(tmp); run_hex(tmp); run_error_page(tmp); run_drag_scroll(tmp); run_minified(tmp); run_scrollbars(tmp); run_decorations(tmp); run_autoclose(tmp); run_git_gutter(tmp); run_folding(tmp)
-        run_menu_and_cmd_save(tmp); run_save_dialog(tmp); run_auto_save(tmp); run_hot_exit(tmp); run_keybindings(tmp)
+        run_menu_and_cmd_save(tmp); run_save_dialog(tmp); run_auto_save(tmp); run_hot_exit(tmp); run_keybindings(tmp); run_mac_keys(tmp)
         run_format(tmp); run_typescript(tmp); run_find_and_status(tmp); run_symbols_and_problems(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

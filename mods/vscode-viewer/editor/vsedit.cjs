@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// A VS Code-like terminal editor: VS Code's own tokenizer and One Dark colors, VS Code's macOS keys (⌘ through the Kitty
-// keyboard protocol, Ctrl as fallback), its editor context menu and command palette, language intelligence (lang/),
+// A VS Code-like terminal editor: VS Code's own tokenizer and One Dark colors, VS Code's default keys for the OS it runs on
+// (keymap.json; ⌘ through the Kitty keyboard protocol), its editor context menu and command palette, language intelligence (lang/),
 // mouse, IME-friendly cursor, auto save and hot exit.
 // usage: node vsedit.cjs <file>
 const fs = require("fs");
@@ -82,7 +82,7 @@ class Editor {
     this.colorMap = this.colorsOf(colorMap);
     this.docs = new Map(); this.loading = new Map(); this.fileLines = new Map();
     Object.assign(this, this.makeState(file, doc, grammar, scope));
-    this.prompt = null; this.message = null;
+    this.prompt = null; this.message = null; this.chordPrefix = null;
     this.find = { query: "", replace: "", field: "query", matches: [], version: -1, caseSensitive: false, wholeWord: false, regex: false };
     this.popup = null; this.panel = null; this.peek = null; // overlays (popup: menu, picker, input or dialog)
     this.back = []; this.forward = [];                       // navigation history: { file, pos, top }
@@ -181,6 +181,14 @@ class Editor {
     const { line, col } = this.head, first = this.lines[line].search(/\S|$/);
     this.moveTo({ line, col: col === first ? 0 : first }, extend);
   }
+  lineEdge(end, extend) { this.moveTo({ line: this.head.line, col: end ? this.lines[this.head.line].length : 0 }, extend); }
+  docEdge(end, extend) { const last = this.lines.length - 1; this.moveTo(end ? { line: last, col: this.lines[last].length } : { line: 0, col: 0 }, extend); }
+  page(dir, extend) {
+    const d = dir * this.height;
+    this.top = this.scrolled(d, this.viewCount - this.height);
+    this.vertical(d, extend);
+  }
+  scrollLine(dir) { this.top = this.scrolled(dir); }
 
   // ----- editing -----
   // Replaces the selection (or the given range) with text, as one undo step.
@@ -244,6 +252,13 @@ class Editor {
     this.deleteRange({ line, col: to }, this.head);
     this.setClosers(shiftClosers(closers, line, col, to - col));
   }
+  // ⌘⌫ / ⌘⌦: the selection, else to the line's start / end.
+  deleteAll(dir) {
+    if (!this.empty) return this.deleteRange(...this.range());
+    const { line } = this.head;
+    if (dir < 0) this.deleteRange({ line, col: 0 }, this.head);
+    else this.deleteRange(this.head, { line, col: this.lines[line].length });
+  }
   deleteForward(word) {
     if (!this.empty) return this.deleteRange(...this.range());
     const { line, col } = this.head, text = this.lines[line];
@@ -300,14 +315,18 @@ class Editor {
     if (shift || s.line !== e.line) return this.indentLines(shift);
     this.insert(this.unit(W.displayCol(this.lines[s.line], s.col, this.tab)));
   }
-  toggleComment() {
+  // mode: undefined toggles; "add" comments the lines, "remove" uncomments the commented ones (⌘K ⌘C / ⌘K ⌘U).
+  toggleComment(mode) {
     if (!this.comment) return this.say(`No comment syntax known for ${this.language}`, this.colors.warn);
-    const [a, b] = this.selectedLines(), rows = [];
-    for (let l = a; l <= b; l++) if (this.lines[l].trim()) rows.push(l);
-    if (!rows.length) return;
+    const [a, b] = this.selectedLines();
     const [open, close] = this.comment.block ?? [this.comment.line, null];
     const lead = (t) => t.match(/^[\t ]*/)[0].length;
-    const commented = rows.every(l => this.lines[l].slice(lead(this.lines[l])).startsWith(open) && (!close || this.lines[l].trimEnd().endsWith(close)));
+    const isCommented = (l) => this.lines[l].slice(lead(this.lines[l])).startsWith(open) && (!close || this.lines[l].trimEnd().endsWith(close));
+    let rows = [];
+    for (let l = a; l <= b; l++) if (this.lines[l].trim()) rows.push(l);
+    if (mode === "remove") rows = rows.filter(isCommented);
+    if (!rows.length) return;
+    const commented = mode ? mode === "remove" : rows.every(isCommented);
     const edits = [];
     if (commented) {
       for (const l of rows) {
@@ -594,7 +613,7 @@ class Editor {
   }
   pickItems(text) {
     if (text.startsWith(">")) {
-      return C.filter(C.COMMANDS, text.slice(1).trim(), c => c.title).map(({ item, hits }) => ({ label: item.title, hits, key: this.keymap.label(item.id),
+      return C.filter(C.COMMANDS.filter(c => c.title), text.slice(1).trim(), c => c.title).map(({ item, hits }) => ({ label: item.title, hits, key: this.keymap.label(item.id),
         detail: item.run === "toggleAutoSave" || item.run === "askAutoSaveDelay" ? S.autoSaveLabel(this.settings) : "", run: () => this.runCommand(item.id) }));
     }
     if (text.startsWith("@")) return this.symbolItems(text.slice(1).trim());
@@ -703,20 +722,19 @@ class Editor {
     const set = (v) => { f[f.field] = v; if (f.field === "query") this.findNext(1, ordered(p.origin.anchor, p.origin.head)[0]); };
     if (ev.type === "text" || ev.type === "paste") return set(f[f.field] + ev.text.split(/\r?\n|\r/)[0]);
     if (ev.type !== "key") return;
-    const { name, shift, ctrl, alt, cmd } = ev, chord = C.chordOf(ev);
+    const { name, shift, alt, cmd } = ev, chord = C.chordOf(ev);
     if (name === "escape") { this.prompt = null; return; }
     const id = this.keymap.byChord.get(chord); // the widget's own commands, through the user's keys
     if (WIDGET_COMMANDS.has(id)) return this.runCommand(id);
     if (name === "backspace") return set([...f[f.field]].slice(0, -1).join(""));
     if (name === "tab" && p.replace) { f.field = f.field === "query" ? "replace" : "query"; return; }
-    if (chord === "ctrl+h" || chord === "cmd+alt+f") { p.replace = true; f.field = "replace"; return; }
-    if (chord === "ctrl+f" || chord === "cmd+f") { p.replace = false; f.field = "query"; return; }
+    if (id === "editor.action.startFindReplaceAction") { p.replace = true; f.field = "replace"; return; }
+    if (id === "actions.find") { p.replace = false; f.field = "query"; return; }
     if (name === "enter" && (alt || cmd) && p.replace) return this.replaceAllMatches();
     if (name === "enter" && f.field === "replace") return this.replaceOne();
-    if (name === "g" && cmd) return this.findNext(shift ? -1 : 1);
-    if (name === "enter" || name === "f3" || name === "down") return this.findNext(shift ? -1 : 1);
+    if (id === "editor.action.nextMatchFindAction" || id === "editor.action.previousMatchFindAction") return this.findNext(id.includes("next") ? 1 : -1);
+    if (name === "enter" || name === "down") return this.findNext(shift ? -1 : 1);
     if (name === "up") return this.findNext(-1);
-    void ctrl;
   }
 
   // ----- commands -----
@@ -970,55 +988,38 @@ class Editor {
   handle(ev) {
     if (ev.type === "focus") return this.focusChanged(ev.focused);
     if (ev.type === "mouse") return this.mouse(ev);
+    if (this.chordPrefix) return this.chordKey(ev);
     if (this.popup) return void this.popup.key(ev, this);
     if (this.prompt) return this.promptKey(ev);
     if (this.peek && this.peek.key(ev, this)) return;
     if (this.panel?.focused && this.panel.key(ev, this)) return;
     if (ev.type === "text") return this.typed(ev.text);
     if (ev.type === "paste") return this.paste(ev.text);
-    const id = this.keymap.byChord.get(C.chordOf(ev));
+    const chord = C.chordOf(ev);
+    if (this.keymap.prefixes.has(chord)) { // the first key of a two-step chord (VS Code's ⌘K …)
+      this.chordPrefix = chord;
+      return this.say(`(${this.keymap.keyLabel(chord)}) was pressed. Waiting for second key of chord...`, this.colors.barFg, 60000);
+    }
+    const id = this.keymap.byChord.get(chord);
     if (C.BY_ID.has(id)) return this.runCommand(id);
-    const { name, ctrl, shift, alt } = ev, last = this.lines.length - 1;
-    if (ev.cmd) {
-      switch (name) {
-        case "left": return this.home(shift);
-        case "right": return this.moveTo({ line: this.head.line, col: this.lines[this.head.line].length }, shift);
-        case "up": return this.moveTo({ line: 0, col: 0 }, shift);
-        case "down": return this.moveTo({ line: last, col: this.lines[last].length }, shift);
-        case "backspace": return this.empty ? this.deleteRange({ line: this.head.line, col: 0 }, this.head) : this.backspace(false);
-        case "delete": return this.empty ? this.deleteRange(this.head, { line: this.head.line, col: this.lines[this.head.line].length }) : this.deleteForward(false);
-      }
-      return;
-    }
-    if (ctrl) {
-      switch (name) {
-        case "home": return this.moveTo({ line: 0, col: 0 }, shift);
-        case "end": return this.moveTo({ line: last, col: this.lines[last].length }, shift);
-        case "left": case "right": return this.horizontal(name === "left" ? -1 : 1, shift, true);
-        case "up": case "down": this.top = this.scrolled(name === "up" ? -1 : 1); return;
-        case "backspace": case "w": return this.backspace(true);   // ctrl+w: what Herdr sends for ⌥⌫
-        case "delete": return this.deleteForward(true);
-        case "u": return this.empty ? this.deleteRange({ line: this.head.line, col: 0 }, this.head) : this.backspace(false); // Herdr's ⌘⌫
-        case "e": return this.moveTo({ line: this.head.line, col: this.lines[this.head.line].length }, shift);              // Herdr's ⌘→
-      }
-      return;
-    }
+    // Movement and deletion keys are commands (keymap.json); Enter, Tab and Escape are the editor's own.
+    const { name, shift, alt } = ev;
+    if (ev.cmd || ev.ctrl) return;
     switch (name) {
-      case "left": case "right": return this.horizontal(name === "left" ? -1 : 1, shift, alt);
-      case "up": case "down": return this.vertical(name === "up" ? -1 : 1, shift);
-      case "pageup": case "pagedown": {
-        const d = name === "pageup" ? -this.height : this.height;
-        this.top = this.scrolled(d, this.viewCount - this.height);
-        return this.vertical(d, shift);
-      }
-      case "home": return this.home(shift);
-      case "end": return this.moveTo({ line: this.head.line, col: this.lines[this.head.line].length }, shift);
       case "enter": return alt ? undefined : this.enter();
       case "tab": return this.tabKey(shift);
-      case "backspace": return this.backspace(alt);
-      case "delete": return this.deleteForward(alt);
       case "escape": if (!this.empty) this.moveTo(this.head); else if (this.panel) this.panel = null; return;
     }
+  }
+  // The second key of a chord: its command, else VS Code's "not a command" message. A typed character counts as its key.
+  chordKey(ev) {
+    if (ev.type !== "key" && ev.type !== "text") return;
+    const first = this.chordPrefix, ch = ev.type === "text" ? [...ev.text][0] : null;
+    const second = ch ? (ch !== ch.toLowerCase() ? "shift+" : "") + ch.toLowerCase() : C.chordOf(ev);
+    this.chordPrefix = null; this.message = null;
+    const id = this.keymap.byChord.get(`${first} ${second}`);
+    if (C.BY_ID.has(id)) return this.runCommand(id);
+    this.say(`The key combination (${this.keymap.keyLabel(first)}, ${this.keymap.keyLabel(second)}) is not a command.`, this.colors.warn);
   }
 
   // Terminal cell -> buffer position (rows: 1 breadcrumbs, 2..rows-1 text).

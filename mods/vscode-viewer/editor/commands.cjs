@@ -1,8 +1,13 @@
-// Editor commands: VS Code ids and titles, the default chords that run them (macOS first: its label is the command's
-// `key`); the editor context menu; fuzzy filter. A command is { id, title, key (label of the first chord), chords,
-// run (Editor method name), args?, cap? (language operation it needs) }. User keybindings: keybindings.cjs.
+// Editor commands: VS Code ids and titles with their default keys per OS (keymap.json, shared with the Rust port), the
+// Editor method each runs, the editor context menu, fuzzy filter. A command is { id, title, keys: { mac, win, linux },
+// key (label of its first key on this OS), run (Editor method name), args?, cap? (language operation it needs) }.
+// User keybindings: keybindings.cjs.
 
-const C = (id, title, chords, run, extra = {}) => ({ id, title, key: chords[0] ? label(chords[0]) : "", chords, run, ...extra });
+// The OS whose keys are in effect: VSEDIT_OS (mac | win | linux), else the platform's.
+const OSES = ["mac", "win", "linux"];
+const platform = (env = process.env.VSEDIT_OS, p = process.platform) =>
+  (OSES.includes(env) ? env : p === "darwin" ? "mac" : p === "win32" ? "win" : "linux");
+const OS = platform();
 
 // Key event -> "ctrl+alt+shift+cmd+name".
 const chordOf = (ev) => `${ev.ctrl ? "ctrl+" : ""}${ev.alt ? "alt+" : ""}${ev.shift ? "shift+" : ""}${ev.cmd ? "cmd+" : ""}${ev.name}`;
@@ -11,93 +16,131 @@ const split = (chord) => {
   const i = chord.length > 1 ? chord.lastIndexOf("+", chord.length - 2) : -1;
   return { mods: i < 0 ? [] : chord.slice(0, i).split("+"), name: chord.slice(i + 1) };
 };
-// Chord strings are normalized to the same modifier order as chordOf.
-const normalize = (chord) => {
-  const { mods, name } = split(chord);
+// Keys are normalized to chordOf's modifier order; a two-step chord ("cmd+k cmd+c") step by step.
+const normalize = (key) => key.trim().split(/\s+/).map((step) => {
+  const { mods, name } = split(step);
   return ["ctrl", "alt", "shift", "cmd"].filter(m => mods.includes(m)).map(m => m + "+").join("") + name;
-};
-// Normalized chord -> macOS label in VS Code's glyphs: "shift+cmd+k" -> "⇧⌘K", "alt+up" -> "⌥↑", "f12" -> "F12".
+}).join(" ");
+
+// Normalized key -> its label as VS Code shows it on that OS: macOS glyphs ("⇧⌘K", "⌘K ⌘J", "⌥↑"), elsewhere text in
+// VS Code's order ("Ctrl+Shift+K", "Ctrl+K Ctrl+J", "Alt+UpArrow"; ⌘ is the Windows / Super key).
 const GLYPHS = { ctrl: "⌃", alt: "⌥", shift: "⇧", cmd: "⌘" };
-const KEY_GLYPHS = { up: "↑", down: "↓", left: "←", right: "→", enter: "↩", backspace: "⌫", delete: "⌦", tab: "⇥", escape: "Escape",
-  pageup: "PageUp", pagedown: "PageDown", space: "Space" };
-function label(chord) {
-  const { mods, name } = split(normalize(chord));
-  return mods.map(m => GLYPHS[m]).join("") + (KEY_GLYPHS[name] ?? name.charAt(0).toUpperCase() + name.slice(1));
+const MAC_KEYS = { up: "↑", down: "↓", left: "←", right: "→", enter: "↩", backspace: "⌫", delete: "⌦", tab: "⇥", escape: "Escape",
+  pageup: "PageUp", pagedown: "PageDown", space: "Space", home: "Home", end: "End", insert: "Insert" };
+const TEXT_KEYS = { up: "UpArrow", down: "DownArrow", left: "LeftArrow", right: "RightArrow", enter: "Enter", backspace: "Backspace",
+  delete: "Delete", tab: "Tab", escape: "Escape", pageup: "PageUp", pagedown: "PageDown", space: "Space", home: "Home", end: "End", insert: "Insert" };
+const capital = (name) => name.charAt(0).toUpperCase() + name.slice(1);
+function label(key, os = OS) {
+  return normalize(key).split(" ").map((step) => {
+    const { mods, name } = split(step);
+    if (os === "mac") return mods.map(m => GLYPHS[m]).join("") + (MAC_KEYS[name] ?? capital(name));
+    const text = { ctrl: "Ctrl", shift: "Shift", alt: "Alt", cmd: os === "win" ? "Windows" : "Super" };
+    return [...["ctrl", "shift", "alt", "cmd"].filter(m => mods.includes(m)).map(m => text[m]), TEXT_KEYS[name] ?? capital(name)].join("+");
+  }).join(" ");
 }
 
-const COMMANDS = [
-  C("editor.action.revealDefinition", "Go to Definition", ["f12"], "goTo", { args: ["definition"], cap: "definition" }),
-  C("editor.action.goToTypeDefinition", "Go to Type Definition", [], "goTo", { args: ["typeDefinition"], cap: "typeDefinition" }),
-  C("editor.action.goToImplementation", "Go to Implementations", ["cmd+f12"], "goTo", { args: ["implementation"], cap: "implementation" }),
-  C("editor.action.goToReferences", "Go to References", ["shift+f12"], "goTo", { args: ["references"], cap: "references" }),
-  C("editor.action.peekDefinition", "Peek Definition", ["alt+f12"], "peekAt", { args: ["definition"], cap: "definition" }),
-  C("editor.action.referenceSearch.trigger", "Peek References", [], "peekAt", { args: ["references"], cap: "references" }),
-  C("editor.action.peekImplementation", "Peek Implementations", [], "peekAt", { args: ["implementation"], cap: "implementation" }),
-  C("editor.action.peekTypeDefinition", "Peek Type Definition", [], "peekAt", { args: ["typeDefinition"], cap: "typeDefinition" }),
-  C("references-view.findReferences", "Find All References", ["alt+shift+f12"], "findAll", { args: ["references"], cap: "references" }),
-  C("references-view.findImplementations", "Find All Implementations", [], "findAll", { args: ["implementation"], cap: "implementation" }),
-  C("references-view.showCallHierarchy", "Show Call Hierarchy", ["alt+shift+h"], "callHierarchy", { cap: "callHierarchy" }),
-  C("editor.action.rename", "Rename Symbol", ["f2"], "renameSymbol", { cap: "rename" }),
-  C("editor.action.changeAll", "Change All Occurrences", ["cmd+f2", "ctrl+f2"], "changeAll"),
-  C("editor.action.formatDocument", "Format Document", ["alt+shift+f"], "formatDocument", { cap: "format" }),
-  C("editor.action.refactor", "Refactor...", ["ctrl+shift+r"], "codeActions", { args: ["refactor"], cap: "refactor" }),
-  C("editor.action.sourceAction", "Source Action...", [], "codeActions", { args: ["source"], cap: "source" }),
-  C("editor.action.clipboardCutAction", "Cut", ["cmd+x", "ctrl+x"], "copy", { args: [true] }),
-  C("editor.action.clipboardCopyAction", "Copy", ["cmd+c", "ctrl+c"], "copy", { args: [false] }),
-  C("editor.action.clipboardPasteAction", "Paste", ["cmd+v", "ctrl+v"], "paste", { args: [undefined] }),
-  C("workbench.action.showCommands", "Command Palette...", ["cmd+shift+p", "ctrl+shift+p", "f1"], "openPicker", { args: [">"] }),
-  C("workbench.action.quickOpen", "Go to File...", ["cmd+p", "ctrl+p"], "openPicker", { args: [""] }),
-  C("workbench.action.files.save", "File: Save", ["cmd+s", "ctrl+s"], "saveFile"),
-  C("workbench.action.files.toggleAutoSave", "File: Toggle Auto Save", [], "toggleAutoSave"),
-  C("workbench.action.files.setAutoSaveDelay", "File: Set Auto Save Delay…", [], "askAutoSaveDelay"),
-  C("workbench.action.openSettings", "Preferences: Open Settings", ["cmd+,"], "openSettingsUi"),
-  C("workbench.action.openSettingsJson", "Preferences: Open Settings (JSON)", [], "openSettings"),
-  C("workbench.action.openGlobalKeybindings", "Preferences: Open Keyboard Shortcuts", [], "openSettingsUi", { args: ["keybindings"] }),
-  C("workbench.action.openGlobalKeybindingsFile", "Preferences: Open Keyboard Shortcuts (JSON)", [], "openKeybindings"),
-  C("workbench.action.closeActiveEditor", "View: Close Editor", ["cmd+w", "ctrl+q"], "quit"),
-  C("undo", "Undo", ["cmd+z", "ctrl+z"], "undo"),
-  C("redo", "Redo", ["cmd+shift+z", "ctrl+shift+z", "ctrl+y"], "redo"),
-  C("editor.action.selectAll", "Select All", ["cmd+a", "ctrl+a"], "selectAll"),
-  C("editor.action.commentLine", "Toggle Line Comment", ["cmd+/", "ctrl+/"], "toggleComment"),
-  C("editor.action.addSelectionToNextFindMatch", "Add Selection to Next Find Match", ["cmd+d", "ctrl+d"], "selectNextOccurrence"),
-  C("actions.find", "Find", ["cmd+f", "ctrl+f"], "openFind", { args: [false] }),
-  C("editor.action.startFindReplaceAction", "Replace", ["cmd+alt+f", "ctrl+h"], "openFind", { args: [true] }),
-  C("toggleFindCaseSensitive", "Toggle Match Case", ["cmd+alt+c", "alt+c"], "toggleFind", { args: ["caseSensitive"] }),
-  C("toggleFindWholeWord", "Toggle Match Whole Word", ["cmd+alt+w", "alt+w"], "toggleFind", { args: ["wholeWord"] }),
-  C("toggleFindRegex", "Toggle Use Regular Expression", ["cmd+alt+r", "alt+r"], "toggleFind", { args: ["regex"] }),
-  C("editor.action.replaceOne", "Replace Next Match", ["shift+cmd+1"], "replaceOne"),
-  C("editor.action.replaceAll", "Replace All", ["cmd+alt+enter"], "replaceAllMatches"),
-  C("editor.action.nextMatchFindAction", "Find Next", ["cmd+g", "f3"], "findAgain", { args: [1] }),
-  C("editor.action.previousMatchFindAction", "Find Previous", ["cmd+shift+g", "shift+f3"], "findAgain", { args: [-1] }),
-  C("workbench.action.gotoSymbol", "Go to Symbol in Editor...", ["cmd+shift+o", "ctrl+shift+o"], "goToSymbol"),
-  C("editor.action.marker.next", "Go to Next Problem (Error, Warning, Info)", ["f8", "alt+f8"], "nextProblem", { args: [1] }),
-  C("editor.action.marker.prev", "Go to Previous Problem (Error, Warning, Info)", ["shift+f8", "alt+shift+f8"], "nextProblem", { args: [-1] }),
-  C("workbench.action.gotoLine", "Go to Line/Column...", ["ctrl+g"], "openGoto"),
-  C("editor.action.deleteLines", "Delete Line", ["cmd+shift+k", "ctrl+shift+k"], "deleteLines"),
-  C("editor.action.moveLinesUpAction", "Move Line Up", ["alt+up"], "moveLines", { args: [-1] }),
-  C("editor.action.moveLinesDownAction", "Move Line Down", ["alt+down"], "moveLines", { args: [1] }),
-  C("editor.action.copyLinesUpAction", "Copy Line Up", ["alt+shift+up"], "copyLines", { args: [-1] }),
-  C("editor.action.copyLinesDownAction", "Copy Line Down", ["alt+shift+down"], "copyLines", { args: [1] }),
-  C("editor.action.insertLineAfter", "Insert Line Below", ["cmd+enter", "ctrl+enter"], "insertLine", { args: [1] }),
-  C("editor.action.insertLineBefore", "Insert Line Above", ["cmd+shift+enter", "ctrl+shift+enter"], "insertLine", { args: [0] }),
-  C("editor.action.indentLines", "Indent Line", ["cmd+]", "ctrl+]"], "indentLines", { args: [false] }),
-  C("editor.action.outdentLines", "Outdent Line", ["cmd+[", "ctrl+["], "indentLines", { args: [true] }),
-  C("workbench.action.navigateBack", "Go Back", ["ctrl+-"], "navigate", { args: [-1] }),
-  C("workbench.action.navigateForward", "Go Forward", ["ctrl+shift+-"], "navigate", { args: [1] }),
-  C("editor.action.indentUsingSpaces", "Indent Using Spaces", [], "pickTabSize", { args: [false] }),
-  C("editor.action.indentUsingTabs", "Indent Using Tabs", [], "pickTabSize", { args: [true] }),
-  C("workbench.action.editor.changeEOL", "Change End of Line Sequence", [], "pickEol"),
-  C("workbench.action.editor.changeLanguageMode", "Change Language Mode", [], "pickLanguage"),
-  C("workbench.action.editor.nextChange", "Go to Next Change", ["alt+f5"], "gotoChange", { args: [1] }),
-  C("workbench.action.editor.previousChange", "Go to Previous Change", ["alt+shift+f5"], "gotoChange", { args: [-1] }),
-  // Folding: VS Code's Linux keys (macOS's ⌥⌘[ / ⌥⌘] switch spaces in Herdr; its ⌘K chords are two-step).
-  C("editor.fold", "Fold", ["ctrl+shift+["], "fold"),
-  C("editor.unfold", "Unfold", ["ctrl+shift+]"], "unfold"),
-  C("editor.toggleFold", "Toggle Fold", ["ctrl+alt+l"], "toggleFold"),
-  C("editor.foldAll", "Fold All", ["ctrl+alt+["], "foldAll"),
-  C("editor.unfoldAll", "Unfold All", ["ctrl+alt+]"], "unfoldAll"),
-  C("editor.action.showContextMenu", "Show Editor Context Menu", ["shift+f10", "menu"], "openMenuAtCursor"),
-];
+// What each command runs: id -> [Editor method, args?, cap?]. Titles and keys are keymap.json's.
+const RUNS = {
+  "editor.action.revealDefinition": ["goTo", ["definition"], "definition"],
+  "editor.action.goToTypeDefinition": ["goTo", ["typeDefinition"], "typeDefinition"],
+  "editor.action.goToImplementation": ["goTo", ["implementation"], "implementation"],
+  "editor.action.goToReferences": ["goTo", ["references"], "references"],
+  "editor.action.peekDefinition": ["peekAt", ["definition"], "definition"],
+  "editor.action.referenceSearch.trigger": ["peekAt", ["references"], "references"],
+  "editor.action.peekImplementation": ["peekAt", ["implementation"], "implementation"],
+  "editor.action.peekTypeDefinition": ["peekAt", ["typeDefinition"], "typeDefinition"],
+  "references-view.findReferences": ["findAll", ["references"], "references"],
+  "references-view.findImplementations": ["findAll", ["implementation"], "implementation"],
+  "references-view.showCallHierarchy": ["callHierarchy", [], "callHierarchy"],
+  "editor.action.rename": ["renameSymbol", [], "rename"],
+  "editor.action.changeAll": ["changeAll"],
+  "editor.action.formatDocument": ["formatDocument", [], "format"],
+  "editor.action.refactor": ["codeActions", ["refactor"], "refactor"],
+  "editor.action.sourceAction": ["codeActions", ["source"], "source"],
+  "editor.action.clipboardCutAction": ["copy", [true]],
+  "editor.action.clipboardCopyAction": ["copy", [false]],
+  "editor.action.clipboardPasteAction": ["paste", [undefined]],
+  "workbench.action.showCommands": ["openPicker", [">"]],
+  "workbench.action.quickOpen": ["openPicker", [""]],
+  "workbench.action.files.save": ["saveFile"],
+  "workbench.action.files.toggleAutoSave": ["toggleAutoSave"],
+  "workbench.action.files.setAutoSaveDelay": ["askAutoSaveDelay"],
+  "workbench.action.openSettings": ["openSettingsUi"],
+  "workbench.action.openSettingsJson": ["openSettings"],
+  "workbench.action.openGlobalKeybindings": ["openSettingsUi", ["keybindings"]],
+  "workbench.action.openGlobalKeybindingsFile": ["openKeybindings"],
+  "workbench.action.closeActiveEditor": ["quit"],
+  "undo": ["undo"],
+  "redo": ["redo"],
+  "editor.action.selectAll": ["selectAll"],
+  "editor.action.commentLine": ["toggleComment"],
+  "editor.action.addCommentLine": ["toggleComment", ["add"]],
+  "editor.action.removeCommentLine": ["toggleComment", ["remove"]],
+  "editor.action.trimTrailingWhitespace": ["trimTrailing"],
+  "editor.action.addSelectionToNextFindMatch": ["selectNextOccurrence"],
+  "actions.find": ["openFind", [false]],
+  "editor.action.startFindReplaceAction": ["openFind", [true]],
+  "toggleFindCaseSensitive": ["toggleFind", ["caseSensitive"]],
+  "toggleFindWholeWord": ["toggleFind", ["wholeWord"]],
+  "toggleFindRegex": ["toggleFind", ["regex"]],
+  "editor.action.replaceOne": ["replaceOne"],
+  "editor.action.replaceAll": ["replaceAllMatches"],
+  "editor.action.nextMatchFindAction": ["findAgain", [1]],
+  "editor.action.previousMatchFindAction": ["findAgain", [-1]],
+  "workbench.action.gotoSymbol": ["goToSymbol"],
+  "editor.action.marker.next": ["nextProblem", [1]],
+  "editor.action.marker.prev": ["nextProblem", [-1]],
+  "workbench.action.gotoLine": ["openGoto"],
+  "editor.action.deleteLines": ["deleteLines"],
+  "editor.action.moveLinesUpAction": ["moveLines", [-1]],
+  "editor.action.moveLinesDownAction": ["moveLines", [1]],
+  "editor.action.copyLinesUpAction": ["copyLines", [-1]],
+  "editor.action.copyLinesDownAction": ["copyLines", [1]],
+  "editor.action.insertLineAfter": ["insertLine", [1]],
+  "editor.action.insertLineBefore": ["insertLine", [0]],
+  "editor.action.indentLines": ["indentLines", [false]],
+  "editor.action.outdentLines": ["indentLines", [true]],
+  "workbench.action.navigateBack": ["navigate", [-1]],
+  "workbench.action.navigateForward": ["navigate", [1]],
+  "editor.action.indentUsingSpaces": ["pickTabSize", [false]],
+  "editor.action.indentUsingTabs": ["pickTabSize", [true]],
+  "workbench.action.editor.changeEOL": ["pickEol"],
+  "workbench.action.editor.changeLanguageMode": ["pickLanguage"],
+  "workbench.action.editor.nextChange": ["gotoChange", [1]],
+  "workbench.action.editor.previousChange": ["gotoChange", [-1]],
+  "editor.fold": ["fold"],
+  "editor.unfold": ["unfold"],
+  "editor.toggleFold": ["toggleFold"],
+  "editor.foldAll": ["foldAll"],
+  "editor.unfoldAll": ["unfoldAll"],
+  "editor.action.showContextMenu": ["openMenuAtCursor"],
+  // horizontal(dir, extend, word), vertical(rows, extend), home(extend), lineEdge(end, extend), docEdge(end, extend), page(dir, extend)
+  "cursorLeft": ["horizontal", [-1, false, false]], "cursorLeftSelect": ["horizontal", [-1, true, false]],
+  "cursorRight": ["horizontal", [1, false, false]], "cursorRightSelect": ["horizontal", [1, true, false]],
+  "cursorUp": ["vertical", [-1, false]], "cursorUpSelect": ["vertical", [-1, true]],
+  "cursorDown": ["vertical", [1, false]], "cursorDownSelect": ["vertical", [1, true]],
+  "cursorWordLeft": ["horizontal", [-1, false, true]], "cursorWordLeftSelect": ["horizontal", [-1, true, true]],
+  "cursorWordEndRight": ["horizontal", [1, false, true]], "cursorWordEndRightSelect": ["horizontal", [1, true, true]],
+  "cursorHome": ["home", [false]], "cursorHomeSelect": ["home", [true]],
+  "cursorEnd": ["lineEdge", [true, false]], "cursorEndSelect": ["lineEdge", [true, true]],
+  "cursorLineStart": ["lineEdge", [false, false]], "cursorLineStartSelect": ["lineEdge", [false, true]],
+  "cursorLineEnd": ["lineEdge", [true, false]], "cursorLineEndSelect": ["lineEdge", [true, true]],
+  "cursorTop": ["docEdge", [false, false]], "cursorTopSelect": ["docEdge", [false, true]],
+  "cursorBottom": ["docEdge", [true, false]], "cursorBottomSelect": ["docEdge", [true, true]],
+  "cursorPageUp": ["page", [-1, false]], "cursorPageUpSelect": ["page", [-1, true]],
+  "cursorPageDown": ["page", [1, false]], "cursorPageDownSelect": ["page", [1, true]],
+  "scrollLineUp": ["scrollLine", [-1]], "scrollLineDown": ["scrollLine", [1]],
+  "deleteLeft": ["backspace", [false]], "deleteRight": ["deleteForward", [false]],
+  "deleteWordLeft": ["backspace", [true]], "deleteWordRight": ["deleteForward", [true]],
+  "deleteAllLeft": ["deleteAll", [-1]], "deleteAllRight": ["deleteAll", [1]],
+};
+
+const COMMANDS = require("./keymap.json").commands.map(({ id, title, keys }) => {
+  const r = RUNS[id];
+  if (!r) throw new Error(`keymap.json: no Editor method for ${id}`);
+  const [run, args = [], cap] = r;
+  return { id, title, keys, key: keys[OS][0] ? label(keys[OS][0]) : "", run, args, ...(cap ? { cap } : {}) };
+});
 const BY_ID = new Map(COMMANDS.map(c => [c.id, c]));
 
 // VS Code's default editor context menu: groups, with Peek as a submenu.
@@ -134,8 +177,10 @@ function stepMenu(rows, i, dir) {
   return -1;
 }
 
-// The default keymap (no user keybindings): chord -> command.
-const KEYMAP = new Map(COMMANDS.flatMap(c => c.chords.map(ch => [normalize(ch), c])));
+// The default bindings of an OS, in order: [{ key (normalized), command (id) }].
+const defaults = (os = OS) => COMMANDS.flatMap(c => c.keys[os].map(k => ({ key: normalize(k), command: c.id })));
+// This OS's default keymap (no user keybindings): key -> command.
+const KEYMAP = new Map(defaults().map(b => [b.key, BY_ID.get(b.command)]));
 
 // Subsequence match with VS Code-like bonuses (start, word starts, consecutive). Returns { score, hits } or null.
 function fuzzy(query, text) {
@@ -160,4 +205,4 @@ function filter(items, query, key) {
   return out.sort((a, b) => b.m.score - a.m.score || a.i - b.i).map(o => ({ item: o.it, hits: o.m.hits }));
 }
 
-module.exports = { COMMANDS, BY_ID, MENU, KEYMAP, menuRows, stepMenu, chordOf, split, normalize, label, fuzzy, filter };
+module.exports = { OS, OSES, platform, COMMANDS, RUNS, BY_ID, MENU, KEYMAP, defaults, menuRows, stepMenu, chordOf, split, normalize, label, fuzzy, filter };

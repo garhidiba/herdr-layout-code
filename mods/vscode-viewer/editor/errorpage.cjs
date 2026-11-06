@@ -3,7 +3,7 @@
 const path = require("path");
 const { spawn } = require("child_process");
 const { Painter, fit, themePalette } = require("./paint.cjs");
-const { chordOf } = require("./commands.cjs");
+const { chordOf, KEYMAP } = require("./commands.cjs");
 const { env, which } = require("./lang/proc.cjs");
 const T = require("./terminal.cjs");
 
@@ -41,7 +41,7 @@ class ErrorPage {
     if (ev.type === "text") { const b = this.buttons.find(b => b.key === ev.text.toLowerCase()); return b?.run(); }
     if (ev.type !== "key") return;
     const chord = chordOf(ev);
-    if (chord === "escape" || chord === "ctrl+q" || chord === "cmd+w") return this.done("close");
+    if (chord === "escape" || KEYMAP.get(chord)?.id === "workbench.action.closeActiveEditor") return this.done("close");
     if (ev.name === "enter" || ev.name === "space") return this.buttons[this.focus].run();
     if (ev.name === "right" || chord === "tab") this.focus = (this.focus + 1) % n;
     if (ev.name === "left" || chord === "shift+tab") this.focus = (this.focus - 1 + n) % n;

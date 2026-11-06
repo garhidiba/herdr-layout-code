@@ -272,6 +272,7 @@ const sizeText = (n) => (n < 1024 ? `${n} B` : `${(n / 1024 ** (n < 1048576 ? 1 
 // ---------- "binary file" prompt ----------
 class BinaryPrompt {
   constructor(env, onHex, onText, onQuit) {
+    this.keys = { keymap: K.resolve() };
     Object.assign(this, env);
     this.onQuit = onQuit;
     this.popup = new Dialog({
@@ -283,7 +284,7 @@ class BinaryPrompt {
   closePopup() {}
   handle(ev) {
     const chord = ev.type === "key" ? chordOf(ev) : "";
-    if (chord === "escape" || chord === "ctrl+q" || chord === "cmd+w") return this.onQuit();
+    if (chord === "escape" || this.keys.keymap.byChord.get(chord) === "workbench.action.closeActiveEditor") return this.onQuit();
     if (ev.type === "mouse") this.popup.mouse(ev, this); else this.popup.key(ev, this);
   }
   render(rows, cols) {

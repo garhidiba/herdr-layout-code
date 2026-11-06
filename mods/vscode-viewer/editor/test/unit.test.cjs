@@ -1,4 +1,5 @@
 // node --test mods/vscode-viewer/editor/test
+process.env.VSEDIT_OS = "mac"; // the keys are macOS's unless a test resolves another OS's
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("fs");
@@ -227,10 +228,11 @@ test("items without a provider are disabled, and keyboard steps skip them and se
   assert.equal(Cmd.stepMenu([{ sep: true }], 0, 1), -1);
 });
 
-test("⌘ chords and their Ctrl fallbacks run the same commands", () => {
+test("macOS keys are ⌘ keys only: no Ctrl fallbacks", () => {
   const id = (chord) => Cmd.KEYMAP.get(chord)?.id;
+  assert.equal(Cmd.OS, "mac");
   assert.equal(id("cmd+s"), "workbench.action.files.save");
-  assert.equal(id("ctrl+s"), "workbench.action.files.save");
+  assert.equal(id("ctrl+s"), undefined);
   assert.equal(id("shift+cmd+p"), "workbench.action.showCommands");
   assert.equal(id("alt+shift+f12"), "references-view.findReferences");
   assert.equal(id("f12"), "editor.action.revealDefinition");
@@ -399,7 +401,7 @@ test("closing with unsaved changes asks Save / Don't Save / Cancel; hot exit kee
   delete process.env.VSEDIT_BACKUPS;
 });
 
-test("the error page names fs errors in words and maps Esc/⌘W/Ctrl+Q to Close, Enter to Try Again", () => {
+test("the error page names fs errors in words and maps Esc/⌘W (this OS's Close Editor) to Close, Enter to Try Again", () => {
   const E = require("../errorpage.cjs");
   assert.equal(E.reasonOf(Object.assign(new Error("x"), { code: "ENOENT" })), "File not found");
   assert.equal(E.reasonOf(Object.assign(new Error("x"), { code: "EACCES" })), "Permission denied");
@@ -409,9 +411,9 @@ test("the error page names fs errors in words and maps Esc/⌘W/Ctrl+Q to Close,
   page.handle(key("enter"));
   page.handle(key("escape"));
   page.handle(key("w", { cmd: true }));
-  page.handle(key("q", { ctrl: true }));
+  page.handle(key("q", { ctrl: true })); // not a macOS key
   page.handle(key("left")); page.handle(key("enter")); // focus wraps to Close
-  assert.deepEqual(picked, ["retry", "close", "close", "close", "close"]);
+  assert.deepEqual(picked, ["retry", "close", "close", "close"]);
   assert.match(page.render(30, 100), /The editor could not be opened/);
 });
 
@@ -447,14 +449,17 @@ test("a 200 KB minified line is colored piece by piece, the visible window first
 const K = require("../keybindings.cjs");
 const press = (ed, name, m = {}) => ed.handle({ type: "key", name, ctrl: !!m.ctrl, shift: !!m.shift, alt: !!m.alt, cmd: !!m.cmd });
 
-test("VS Code key spellings become the editor's chords; two-step chords and unknown modifiers are not keys", () => {
+test("VS Code key spellings become the editor's keys, two-step chords included; three steps and unknown modifiers are not keys", () => {
   assert.equal(K.canon("Cmd+Shift+K"), "shift+cmd+k");
   assert.equal(K.canon("shift+cmd+k"), "shift+cmd+k");
   assert.equal(K.canon("meta+alt+up"), "alt+cmd+up");
   assert.equal(K.canon("ctrl+-"), "ctrl+-");
   assert.equal(K.canon("ctrl++"), "ctrl++");
   assert.equal(K.canon("f12"), "f12");
-  assert.equal(K.canon("cmd+k cmd+s"), null);
+  assert.equal(K.canon("Cmd+K  Cmd+S"), "cmd+k cmd+s");
+  assert.equal(K.canon("ctrl+k shift+alt+x"), "ctrl+k alt+shift+x");
+  assert.equal(K.canon("ctrl+k ctrl+c ctrl+d"), null);
+  assert.equal(K.canon("ctrl+k hyper+c"), null);
   assert.equal(K.canon("hyper+x"), null);
   assert.equal(K.canon(""), null);
 });
@@ -468,28 +473,28 @@ test("a user binding adds a key; the default keys of the command keep working", 
 
 test("a user binding on a default's key overrides it, and the last binding of a key wins", () => {
   const km = K.resolve([
-    { key: "cmd+d", command: "editor.action.deleteLines" },
+    { key: "cmd+g", command: "editor.action.deleteLines" },
     { key: "cmd+e", command: "editor.action.commentLine" },
     { key: "cmd+e", command: "editor.action.selectAll" },
   ]);
-  assert.equal(km.byChord.get("cmd+d"), "editor.action.deleteLines");
+  assert.equal(km.byChord.get("cmd+g"), "editor.action.deleteLines");
   assert.equal(km.byChord.get("cmd+e"), "editor.action.selectAll");
-  assert.equal(km.label("editor.action.addSelectionToNextFindMatch"), "⌃D"); // ⌘D is taken; its Ctrl fallback is left
+  assert.equal(km.label("editor.action.nextMatchFindAction"), "F3"); // ⌘G is taken; its other default is left
 });
 
 test("\"-command\" removes that command's default for the key, or all its defaults without a key", () => {
-  const one = K.resolve([{ key: "cmd+shift+k", command: "-editor.action.deleteLines" }]);
-  assert.equal(one.byChord.get("shift+cmd+k"), undefined);
-  assert.equal(one.byChord.get("ctrl+shift+k"), "editor.action.deleteLines");
-  const all = K.resolve([{ command: "-editor.action.deleteLines" }]);
-  assert.equal(all.byChord.get("ctrl+shift+k"), undefined);
-  assert.equal(all.label("editor.action.deleteLines"), "");
+  const one = K.resolve([{ key: "cmd+g", command: "-editor.action.nextMatchFindAction" }]);
+  assert.equal(one.byChord.get("cmd+g"), undefined);
+  assert.equal(one.byChord.get("f3"), "editor.action.nextMatchFindAction");
+  const all = K.resolve([{ command: "-editor.action.nextMatchFindAction" }]);
+  assert.equal(all.byChord.get("f3"), undefined);
+  assert.equal(all.label("editor.action.nextMatchFindAction"), "");
   const other = K.resolve([{ key: "cmd+shift+k", command: "-undo" }]); // not that command's key: nothing removed
   assert.equal(other.byChord.get("shift+cmd+k"), "editor.action.deleteLines");
 });
 
 test("entries that aren't keybindings are skipped and an invalid file falls back to the defaults", () => {
-  const km = K.resolve([null, 3, { key: "cmd+k cmd+s", command: "-undo" }, { key: "cmd+y" }, { key: "cmd+y", command: "" }]);
+  const km = K.resolve([null, 3, { key: "cmd+k cmd+s cmd+x", command: "-undo" }, { key: "cmd+y" }, { key: "cmd+y", command: "" }]);
   assert.equal(km.byChord.get("cmd+z"), "undo");
   assert.equal(km.byChord.has("cmd+y"), false);
   assert.match(K.parseText("{ \"key\": 1 }").error, /not a JSON array/);
@@ -500,7 +505,8 @@ test("entries that aren't keybindings are skipped and an invalid file falls back
 test("the table has one row per binding in effect with its source, and commands without a key", () => {
   const rows = K.table(K.resolve([{ key: "cmd+shift+k", command: "-editor.action.deleteLines" }, { key: "cmd+shift+d", command: "editor.action.deleteLines" },
     { key: "cmd+9", command: "my.extension" }]));
-  assert.deepEqual(rows.filter(r => r.id === "editor.action.deleteLines").map(r => [r.key, r.source]), [["ctrl+shift+k", "Default"], ["shift+cmd+d", "User"]]);
+  assert.deepEqual(rows.filter(r => r.id === "editor.action.deleteLines").map(r => [r.key, r.source]), [["shift+cmd+d", "User"]]);
+  assert.deepEqual(rows.filter(r => r.id === "editor.action.nextMatchFindAction").map(r => [r.key, r.source]), [["cmd+g", "Default"], ["f3", "Default"]]);
   assert.deepEqual(rows.find(r => r.id === "editor.action.goToTypeDefinition"), { id: "editor.action.goToTypeDefinition", title: "Go to Type Definition", key: "", source: "" });
   assert.deepEqual(rows.at(-1), { id: "my.extension", title: "", key: "cmd+9", source: "User" });
 });
@@ -522,6 +528,150 @@ test("live() reads the file again when it changes", () => {
   fs.writeFileSync(file, JSON.stringify([{ key: "cmd+e", command: "undo" }]));
   assert.equal(kb.poll(), true);
   assert.equal(kb.keymap.byChord.get("cmd+e"), "undo");
+});
+
+// ---------- per-OS default keys (keymap.json), labels and two-step chords ----------
+test("the OS comes from VSEDIT_OS, else the platform", () => {
+  assert.equal(Cmd.platform("win", "darwin"), "win");
+  assert.equal(Cmd.platform(null, "darwin"), "mac");
+  assert.equal(Cmd.platform(null, "win32"), "win");
+  assert.equal(Cmd.platform(null, "linux"), "linux");
+  assert.equal(Cmd.platform("bogus", "freebsd"), "linux");
+});
+
+test("keymap.json: every command has mac/win/linux keys in normalized form and an Editor method", () => {
+  const data = require("../keymap.json").commands;
+  assert.deepEqual(data.map(c => c.id).sort(), Object.keys(Cmd.RUNS).sort(), "keymap.json and RUNS name the same commands");
+  for (const c of data) {
+    for (const os of Cmd.OSES) {
+      assert.ok(Array.isArray(c.keys[os]), `${c.id}: keys.${os}`);
+      for (const k of c.keys[os]) assert.equal(Cmd.normalize(k), k, `${c.id}: ${k} is normalized`);
+    }
+  }
+  for (const c of Cmd.COMMANDS) assert.equal(typeof Editor.prototype[c.run], "function", `${c.id} runs ${c.run}`);
+});
+
+test("each OS gets VS Code's own defaults, without the other OSes' keys", () => {
+  const on = (os) => { const km = K.resolve([], os); return (key) => km.byChord.get(key); };
+  const mac = on("mac"), win = on("win"), linux = on("linux");
+  // macOS: ⌘ keys and the emacs keys; Select All is ⌘A only
+  assert.equal(mac("cmd+a"), "editor.action.selectAll");
+  assert.equal(mac("ctrl+a"), "cursorLineStart");
+  assert.equal(mac("ctrl+e"), "cursorLineEnd");
+  assert.equal(mac("ctrl+shift+a"), "cursorLineStartSelect");
+  assert.equal(mac("ctrl+k"), "deleteAllRight");
+  assert.equal(mac("ctrl+f"), "cursorRight");
+  assert.equal(mac("ctrl+p"), "cursorUp");
+  assert.equal(mac("ctrl+u"), "deleteAllLeft"); // what Herdr sends for ⌘⌫
+  assert.equal(mac("ctrl+w"), "deleteWordLeft"); // what Herdr sends for ⌥⌫
+  assert.equal(mac("ctrl+s"), undefined);
+  assert.equal(mac("ctrl+shift+["), "editor.fold"); // ⌥⌘[ is Herdr's
+  // Windows / Linux: Ctrl keys
+  for (const k of [win, linux]) {
+    assert.equal(k("ctrl+a"), "editor.action.selectAll");
+    assert.equal(k("ctrl+w"), "workbench.action.closeActiveEditor");
+    assert.equal(k("ctrl+u"), undefined); // VS Code's Cursor Undo, not here yet
+    assert.equal(k("ctrl+e"), "workbench.action.quickOpen");
+    assert.equal(k("ctrl+h"), "editor.action.startFindReplaceAction");
+    assert.equal(k("ctrl+left"), "cursorWordLeft");
+    assert.equal(k("ctrl+home"), "cursorTop");
+    assert.equal(k("ctrl+shift+1"), "editor.action.replaceOne");
+    assert.equal(k("cmd+s"), undefined);
+  }
+  assert.equal(win("ctrl+f4"), "workbench.action.closeActiveEditor");
+  assert.equal(win("alt+left"), "workbench.action.navigateBack");
+  assert.equal(win("alt+shift+up"), "editor.action.copyLinesUpAction");
+  assert.equal(win("alt+shift+f"), "editor.action.formatDocument");
+  assert.equal(linux("alt+left"), undefined);
+  assert.equal(linux("ctrl+alt+-"), "workbench.action.navigateBack");
+  assert.equal(linux("alt+shift+up"), undefined); // VS Code's Add Cursor Above
+  assert.equal(linux("ctrl+alt+shift+up"), "editor.action.copyLinesUpAction");
+  assert.equal(linux("ctrl+shift+i"), "editor.action.formatDocument");
+  assert.equal(linux("ctrl+shift+f10"), "editor.action.peekDefinition");
+});
+
+test("labels follow the OS: macOS glyphs, else VS Code's Ctrl+Shift+K text", () => {
+  assert.equal(Cmd.label("shift+cmd+k", "mac"), "⇧⌘K");
+  assert.equal(Cmd.label("ctrl+alt+shift+up", "mac"), "⌃⌥⇧↑");
+  assert.equal(Cmd.label("cmd+k cmd+j", "mac"), "⌘K ⌘J");
+  assert.equal(Cmd.label("ctrl+shift+k", "win"), "Ctrl+Shift+K");
+  assert.equal(Cmd.label("ctrl+alt+shift+up", "linux"), "Ctrl+Shift+Alt+UpArrow");
+  assert.equal(Cmd.label("ctrl+k ctrl+0", "linux"), "Ctrl+K Ctrl+0");
+  assert.equal(Cmd.label("shift+cmd+k", "win"), "Shift+Windows+K");
+  assert.equal(Cmd.label("cmd+a", "linux"), "Super+A");
+  assert.equal(K.resolve([], "win").label("workbench.action.closeActiveEditor"), "Ctrl+F4");
+  assert.equal(K.resolve([], "linux").label("editor.foldAll"), "Ctrl+K Ctrl+0");
+});
+
+test("two-step chords: the first steps are prefixes; the user file adds and removes chords for this OS", () => {
+  const km = K.resolve([{ key: "ctrl+k ctrl+d", command: "editor.action.deleteLines" }, { key: "ctrl+k ctrl+j", command: "-editor.unfoldAll" }], "linux");
+  assert.ok(km.prefixes.has("ctrl+k"));
+  assert.equal(km.byChord.get("ctrl+k ctrl+0"), "editor.foldAll");
+  assert.equal(km.byChord.get("ctrl+k ctrl+d"), "editor.action.deleteLines");
+  assert.equal(km.byChord.get("ctrl+k ctrl+j"), undefined);
+  assert.equal(km.label("editor.action.deleteLines"), "Ctrl+K Ctrl+D");
+  const none = K.resolve(["cmd+k cmd+0", "cmd+k cmd+j", "cmd+k cmd+l", "cmd+k cmd+s", "cmd+k cmd+c", "cmd+k cmd+u", "cmd+k cmd+x", "cmd+k m"]
+    .map(key => ({ key, command: "-x" })).concat(Cmd.COMMANDS.filter(c => c.keys.mac.some(k => k.includes(" "))).map(c => ({ command: `-${c.id}` }))), "mac");
+  assert.equal(none.prefixes.size, 0, "no chord left, no prefix");
+});
+
+test("a chord runs after its second key, with VS Code's status hint after the first", async () => {
+  const ed = await plainEditor(["  a", "b"]);
+  const fold = [];
+  ed.unfoldAll = () => fold.push("unfold");
+  press(ed, "k", { cmd: true });
+  assert.equal(ed.message.text, "(⌘K) was pressed. Waiting for second key of chord...");
+  press(ed, "j", { cmd: true });
+  assert.deepEqual(fold, ["unfold"]);
+  assert.equal(ed.message, null);
+  press(ed, "k", { cmd: true });
+  press(ed, "q", { cmd: true });
+  assert.equal(ed.message.text, "The key combination (⌘K, ⌘Q) is not a command.");
+  press(ed, "a", { ctrl: true }); // not part of a chord any more: line start
+  assert.equal(ed.head.col, 0);
+  press(ed, "k", { cmd: true });
+  ed.handle({ type: "text", text: "m" }); // ⌘K M: a typed character is the second key
+  assert.ok(ed.popup, "Change Language Mode opened");
+});
+
+test("⌘K ⌘C / ⌘K ⌘U add and remove line comments", async () => {
+  const ed = await plainEditor(["a", "// b"], "/tmp/x.js");
+  ed.comment = { line: "//" };
+  ed.sel = { anchor: { line: 0, col: 0 }, head: { line: 1, col: 1 } };
+  press(ed, "k", { cmd: true }); press(ed, "c", { cmd: true });
+  assert.deepEqual(ed.lines, ["// a", "// // b"]);
+  press(ed, "k", { cmd: true }); press(ed, "u", { cmd: true });
+  assert.deepEqual(ed.lines, ["a", "// b"]);
+});
+
+test("macOS emacs keys: ⌃A / ⌃E line start and end, ⌃K and ⌃U (Herdr's ⌘⌫) delete to the end and start", async () => {
+  const ed = await plainEditor(["  hello world"]);
+  ed.moveTo({ line: 0, col: 7 });
+  press(ed, "a", { ctrl: true });
+  assert.equal(ed.head.col, 0);
+  assert.ok(ed.empty, "not Select All");
+  press(ed, "e", { ctrl: true });
+  assert.equal(ed.head.col, 13);
+  press(ed, "a", { ctrl: true, shift: true });
+  assert.deepEqual([ed.sel.anchor.col, ed.head.col], [13, 0]);
+  ed.moveTo({ line: 0, col: 8 });
+  press(ed, "k", { ctrl: true });
+  assert.deepEqual(ed.lines, ["  hello "]);
+  press(ed, "u", { ctrl: true });
+  assert.deepEqual(ed.lines, [""]);
+});
+
+test("Windows/Linux: Ctrl+W closes the editor and Ctrl+K Ctrl+0 folds all", async () => {
+  const ed = await plainEditor(["a"]);
+  ed.keymap = K.resolve([], "linux");
+  const did = [];
+  ed.foldAll = () => did.push("foldAll");
+  ed.onExit = () => did.push("exit");
+  press(ed, "k", { ctrl: true });
+  assert.equal(ed.message.text, "(Ctrl+K) was pressed. Waiting for second key of chord...");
+  press(ed, "0", { ctrl: true });
+  press(ed, "w", { ctrl: true });
+  assert.deepEqual(did, ["foldAll", "exit"]);
 });
 
 test("Find: Alt+Enter in Replace replaces every match as one undo step", async () => {

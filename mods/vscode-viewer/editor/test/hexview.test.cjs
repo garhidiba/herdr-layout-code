@@ -1,4 +1,5 @@
 // node --test mods/vscode-viewer/editor/test
+process.env.VSEDIT_OS = "mac"; // the keys are macOS's
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("fs");
@@ -102,7 +103,7 @@ test("the viewer moves by bytes and rows, extends a selection with Shift and cop
   v.handle({ type: "key", name: "right", ctrl: false, shift: true, alt: false, cmd: false });
   assert.equal(v.cursor, 18);
   assert.deepEqual(v.range(), [16, 19]);
-  v.handle({ type: "key", name: "c", ctrl: true, shift: false, alt: false, cmd: false });
+  v.handle({ type: "key", name: "c", ctrl: false, shift: false, alt: false, cmd: true }); // ⌘C (macOS keys)
   assert.equal(copied, "10 11 12");
   v.handle({ type: "key", name: "end", ctrl: false, shift: false, alt: false, cmd: false });
   assert.equal(v.cursor, 63);
