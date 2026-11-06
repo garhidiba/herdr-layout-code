@@ -5,6 +5,8 @@ import { View, div, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, v_virtual_list } from "gpui-base";
 import { props, exec, readTextFile, theme, settings, appHome, run } from "herdr";
 import { splitLines, diffLines, visibleRows } from "./diff.js";
+// Herdr starts with PATH=/usr/bin:/bin, so Homebrew/user tools (node, code, codex, trash) are looked up here too.
+const userExec = (cmd, args, opts) => exec("sh", ["-c", 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; exec "$0" "$@"', cmd, ...args], opts);
 
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false"];
 const MAX_LINES = 20000, MAX_OUTPUT = 8 * 1024 * 1024 - 1024, ROW = 20, GUTTER = 44, SIGN = 18, CHAR = 8, MAX_LINE = 4000;
@@ -84,8 +86,8 @@ export default class Diff extends View {
       cx.spawn(async (cx) => {
         try {
           const r = rev
-            ? await exec("sh", ["-c", 'git --no-optional-locks -C "$1" cat-file blob "$2" | node "$3" "$4" "$5" "" "$6"', "diff", this.repo, rev, helper, engine, name, String(MAX_LINES)])
-            : await exec("node", [helper, engine, name, `${this.repo}/${this.path}`, String(MAX_LINES)]);
+            ? await exec("sh", ["-c", 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; git --no-optional-locks -C "$1" cat-file blob "$2" | node "$3" "$4" "$5" "" "$6"', "diff", this.repo, rev, helper, engine, name, String(MAX_LINES)])
+            : await userExec("node", [helper, engine, name, `${this.repo}/${this.path}`, String(MAX_LINES)]);
           if (r.code === 0 && this.texts === texts) { this.tokens[i] = JSON.parse(r.stdout); cx.notify(); }
         } catch {}
       });
@@ -149,7 +151,7 @@ export default class Diff extends View {
       .child(h_flex().h(30).flex_none().pl(16).pr(10).gap(6).items_center()
         .child(crumbs)
         .child(button("open-file", "Open File", () => run("tab.new", { name, mod: "vscode-viewer", props: { file, on: this.on } })))
-        .when(!this.on, (el) => el.child(button("vscode", "Open in VS Code", () => exec("code", [file]).catch(() => {})))))
+        .when(!this.on, (el) => el.child(button("vscode", "Open in VS Code", () => userExec("code", [file]).catch(() => {})))))
       .child(this.body(t));
   }
 }

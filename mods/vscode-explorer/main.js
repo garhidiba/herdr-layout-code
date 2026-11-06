@@ -7,6 +7,8 @@ import { v_flex, h_flex } from "gpui-base";
 import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, window, run, appHome, props, shared } from "herdr";
 import { openArgs } from "./paths.js";
 import { ExplorerMenu, ExplorerDialog, openMenu, refreshKey } from "./menu.js";
+// Herdr starts with PATH=/usr/bin:/bin, so Homebrew/user tools (node, code, codex, trash) are looked up here too.
+const userExec = (cmd, args, opts) => exec("sh", ["-c", 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; exec "$0" "$@"', cmd, ...args], opts);
 
 // The project you work in: the focused terminal's folder. Editor and diff tabs have no folder, so focusing
 // them keeps this space's last project instead of reloading; a fresh space starts at its first terminal's folder.
@@ -203,7 +205,7 @@ export default class Files extends View {
         .on_mouse_down("right", (_e, cx) => this.menu(abs, entry.dir, cx))
         .on_click((e, cx) => {
           if (entry.dir) return this.toggle(path, cx);
-          if (e.modifiers.platform && !this.on) exec("code", [abs]).catch(() => {});
+          if (e.modifiers.platform && !this.on) userExec("code", [abs]).catch(() => {});
           else this.open(path);
         })
         .child(entry.dir ? svg(`mods/vscode-explorer/chevron-${open ? "down" : "right"}.svg`).size(12).flex_none().text_color(t.dim) : div().w(12).flex_none())

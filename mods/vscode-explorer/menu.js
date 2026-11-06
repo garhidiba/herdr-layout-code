@@ -8,7 +8,8 @@ import { menuItems, menuHeight, OPEN_WITH, openArgs, baseName, parentOf, relativ
 const CLIPBOARD = "vscode-explorer.clipboard", REFRESH = "vscode-explorer.refresh";
 export const refreshKey = REFRESH;
 
-const sh = (script, ...args) => exec("sh", ["-c", script, "explorer", ...args]);
+// Herdr starts with PATH=/usr/bin:/bin; Homebrew/user tools (code, trash) live elsewhere.
+const sh = (script, ...args) => exec("sh", ["-c", 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; ' + script, "explorer", ...args]);
 const exists = async (p) => (await exec("test", ["-e", p])).code === 0;
 const refresh = () => setShared(REFRESH, Date.now());
 const copyText = (text) => sh('printf %s "$1" | pbcopy', text).catch(() => {});
@@ -60,7 +61,7 @@ export class ExplorerMenu {
     switch (action) {
       case "open": return run("tab.new", openArgs(t.path, { on: t.on, appHome: appHome(), folder: t.root }));
       case "editor": case "viewer": return run("tab.new", openArgs(t.path, { appHome: appHome(), how: action, folder: t.root }));
-      case "code": return exec("code", [t.path]).catch(fail);
+      case "code": return sh('exec code "$1"', t.path).catch(fail);
       case "system": return exec("open", [t.path]).catch(fail);
       case "reveal": return exec("open", ["-R", t.path]).catch(fail);
       case "terminal": return run("terminal.open", { folder, place: "tab" });

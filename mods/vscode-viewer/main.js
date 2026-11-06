@@ -5,6 +5,8 @@
 import { View, div, image, PathBuilder, Background } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState, TextView } from "gpui-base";
 import { props, readTextFile, writeTextFile, exec, theme, appHome, nextCommand } from "herdr";
+// Herdr starts with PATH=/usr/bin:/bin, so Homebrew/user tools (node, code, codex, trash) are looked up here too.
+const userExec = (cmd, args, opts) => exec("sh", ["-c", 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; exec "$0" "$@"', cmd, ...args], opts);
 
 const ONE_DARK = {
   keyword: "#c678dd", string: "#98c379", comment: "#5c6370", function: "#61afef", type: "#e5c07b",
@@ -197,7 +199,7 @@ export default class Viewer extends View {
         .when(this.kind === "markdown", el => el.child(button("preview", this.preview ? "Edit" : "Preview", cx => { this.preview = !this.preview; cx.notify(); })))
         .when(text && !this.preview, el => el.child(button("wrap", "Wrap", cx => this.toggleWrap(cx), this.wrap)))
         .when(this.dirty, el => el.child(button("revert", "Revert", cx => this.revert(cx))))
-        .when(!this.on, el => el.child(button("vscode", "Open in VS Code", () => exec("code", [this.file]).catch(() => {}))))
+        .when(!this.on, el => el.child(button("vscode", "Open in VS Code", () => userExec("code", [this.file]).catch(() => {}))))
         .when(text && !this.on, el => el.child(button("save", this.dirty ? "Save ⌘S" : "Saved", cx => this.save(cx), this.dirty))))
       .when(this.conflict, el => el.child(h_flex().flex_none().px(14).py(6).gap(10).items_center().bg(t.chrome).border_b(1).border_color(t.border).text_size(12)
         .child(div().flex_1().text_color("#e5c07b").child("This file changed on disk."))

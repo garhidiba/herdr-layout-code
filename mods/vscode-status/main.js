@@ -1,6 +1,8 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, v_flex, HoverCard } from "gpui-base";
 import { spaces, agents, theme, run, window, keys, exec, readTextFile, appHome, nextCommand, openOverlay, notify } from "herdr";
+// Herdr starts with PATH=/usr/bin:/bin, so Homebrew/user tools (node, code, codex, trash) are looked up here too.
+const userExec = (cmd, args, opts) => exec("sh", ["-c", 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; exec "$0" "$@"', cmd, ...args], opts);
 
 // Newest Codex rollout log that has a rate_limits event (local file, no network or token).
 const CODEX_SCRIPT = 'for f in $(ls -t "$HOME"/.codex/sessions/*/*/*/rollout-*.jsonl 2>/dev/null | head -8); do l=$(grep \'"rate_limits"\' "$f" | tail -1); [ -n "$l" ] && { echo "$l"; break; }; done';
@@ -95,7 +97,7 @@ export default class WorkspaceStatus extends View {
     cx.spawn(async cx => {
       let out = null, missing = false;
       try {
-        const r = await exec("node", [limitsHelper(), "read"]);
+        const r = await userExec("node", [limitsHelper(), "read"]);
         missing = r.code === 3;
         if (r.code === 0) out = JSON.parse(r.stdout.trim());
       } catch {}
@@ -124,7 +126,7 @@ export default class WorkspaceStatus extends View {
     cx.notify();
     cx.spawn(async cx => {
       try {
-        const r = await exec("node", [limitsHelper(), "consume", id, this.attempt.key]);
+        const r = await userExec("node", [limitsHelper(), "consume", id, this.attempt.key]);
         if (r.code !== 0) throw new Error(r.stderr.trim().replace(/^codex-limits: /, "") || `exit ${r.code}`);
         const outcome = JSON.parse(r.stdout.trim()).outcome;
         this.attempt = null;
