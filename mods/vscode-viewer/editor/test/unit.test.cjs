@@ -587,3 +587,49 @@ test("Find widget: ⌥⌘C/⌥⌘W/⌥⌘R toggle through the keymap, the count 
   assert.ok(ed.prompt.replace);
   assert.equal(ed.find.field, "replace");
 });
+
+const click = (ed, x, y) => ed.handle({ type: "mouse", button: 0, x, y, release: false, motion: false });
+
+test("status bar: Ln/Col opens Go to Line, Spaces picks tabs and a size for this file, LF switches to CRLF on save", async () => {
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "vsedit-status-")), "a.txt");
+  fs.writeFileSync(file, "a\nb\n");
+  const ed = new Editor(file, F.load(file), await H.loadGrammar(null), H.loadTheme(), null);
+  ed.rows = 10; ed.cols = 100;
+  ed.render(0);
+  click(ed, ed.statusHits[0].x, ed.rows);
+  assert.match(ed.popup.label, /^Go to line/);
+  ed.closePopup();
+  click(ed, ed.statusHits[1].x, ed.rows);
+  assert.deepEqual(ed.popup.items.map(i => i.label), ["Indent Using Spaces", "Indent Using Tabs"]);
+  press(ed, "down"); press(ed, "enter");
+  assert.equal(ed.popup.items.length, 8);
+  assert.equal(ed.popup.index, ed.tab - 1);
+  ed.handle({ type: "text", text: "2" }); press(ed, "enter");
+  assert.deepEqual(ed.indent, { useTabs: true, size: 2 });
+  ed.render(0);
+  assert.equal(ed.statusHits.length, 4); // Ln/Col, indentation, EOL, language: the encoding is display only
+  click(ed, ed.statusHits[2].x, ed.rows);
+  assert.deepEqual(ed.popup.items.map(i => i.label), ["LF", "CRLF"]);
+  press(ed, "down"); press(ed, "enter");
+  assert.ok(ed.buf.dirty);
+  await ed.saveFile();
+  assert.equal(fs.readFileSync(file, "utf8"), "a\r\nb\r\n");
+  assert.ok(!ed.buf.dirty);
+});
+
+test("Change Language Mode lists the grammars and re-tokenizes with the chosen one", async () => {
+  const ed = await plainEditor(["const x = 1; // hi"]);
+  ed.rows = 10; ed.cols = 100;
+  ed.runCommand("workbench.action.editor.changeLanguageMode");
+  const labels = ed.popup.items.map(i => i.label);
+  assert.equal(labels[ed.popup.index], "Plain Text");
+  assert.ok(labels.includes("TypeScript") && labels.includes("Python") && labels.includes("Go"));
+  ed.handle({ type: "text", text: "TypeScript" });
+  assert.equal(ed.popup.items[0].label, "TypeScript");
+  press(ed, "enter");
+  for (let i = 0; i < 50 && ed.language !== "TypeScript"; i++) await new Promise(r => setTimeout(r, 20));
+  assert.equal(ed.language, "TypeScript");
+  assert.deepEqual(ed.comment, { line: "//" });
+  ed.hl.ensure(0);
+  assert.ok(ed.hl.tokens[0].length > 2, "not tokenized with the grammar");
+});

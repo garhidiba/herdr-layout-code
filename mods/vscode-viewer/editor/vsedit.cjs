@@ -525,6 +525,43 @@ class Editor {
     this.moveTo({ line, col: col ? col - 1 : 0 });
     this.top = Math.max(0, line - Math.floor(this.height / 2));
   }
+  // ----- status bar pickers (indentation, end of line, language mode); they change the current file only -----
+  // A quick pick of fixed choices [{ label, detail?, run }], filtered as typed, starting on `current`.
+  choose(placeholder, choices, current = 0) {
+    this.popup = new O.Picker("", (t) => C.filter(choices, t, ch => ch.label).map(({ item, hits }) => ({ ...item, hits })), placeholder);
+    this.popup.index = Math.max(0, current);
+  }
+  pickIndent() {
+    this.choose("Select Action", [
+      { label: "Indent Using Spaces", run: () => this.pickTabSize(false) },
+      { label: "Indent Using Tabs", run: () => this.pickTabSize(true) }]);
+  }
+  pickTabSize(useTabs) {
+    const sizes = [1, 2, 3, 4, 5, 6, 7, 8].map(size => ({ label: String(size), detail: size === this.tab ? "Configured Tab Size" : "",
+      run: () => { this.indent = { useTabs, size }; this.reveal(); } }));
+    this.choose("Select Tab Size for the Current File", sizes, this.tab - 1);
+  }
+  // The file is written with the chosen line ending on the next save (it counts as a change until then).
+  pickEol() {
+    const set = (eol) => { if (this.doc.eol !== eol) { this.doc.eol = eol; this.buf.savedVersion = -1; } };
+    this.choose("Select End of Line Sequence", [{ label: "LF", run: () => set("\n") }, { label: "CRLF", run: () => set("\r\n") }], this.doc.eol === "\r\n" ? 1 : 0);
+  }
+  // Plain Text and every language a grammar ships for (the scopes file names map to).
+  pickLanguage() {
+    const ix = this.index, roots = [...new Set([...Object.values(ix.ext), ...Object.values(ix.files), ...Object.values(ix.prefixes)])].filter(s => ix.scopes[s]);
+    const langs = [{ scope: null, label: "Plain Text" }, ...roots.map(scope => ({ scope, label: L.languageName(scope) }))
+      .sort((a, b) => a.label.localeCompare(b.label) || a.scope.localeCompare(b.scope))];
+    const current = this.hl.grammar ? this.scope : null;
+    this.choose("Select Language Mode", langs.map(l => ({ label: l.label, detail: l.scope ? `(${l.scope})` : "", run: () => this.track(this.setLanguage(l.scope)) })),
+      langs.findIndex(l => l.scope === current));
+  }
+  // Re-tokenizes with the scope's grammar; comments and the language server follow the new language.
+  async setLanguage(scope) {
+    const buf = this.buf, g = await H.loadGrammar(scope, this.index, this.theme);
+    if (buf !== this.buf) return; // another file is showing by now
+    this.scope = scope; this.comment = L.commentOf(scope); this.session = null;
+    this.useGrammar(g);
+  }
   // Screen cell under a buffer position (row, col), for popups placed at the cursor.
   screenOf(p) { return { row: p.line - this.top + 2, col: this.gutter + W.displayCol(this.lines[p.line], p.col, this.tab) - this.left + 1 }; }
   openMenu(x, y) { this.popup = new O.Menu(C.menuRows(C.MENU, cap => this.lang.can(cap), this.keymap.label), x, y); }
@@ -948,6 +985,10 @@ class Editor {
       else this.dragTimer ??= setInterval(() => { if (!this.dragging || !this.dragStep()) this.stopDragScroll(); this.redraw?.(); }, 40);
       return;
     }
+    if (ev.y === this.rows) { // the status bar's items
+      if (ev.button === 0 && !ev.motion) this.statusHits?.find(h => ev.x >= h.x && ev.x < h.x + h.w)?.run();
+      return;
+    }
     if (ev.y < 2 || ev.y > this.height + 1) return;
     const p = this.cellToPos(ev.x, ev.y);
     if (ev.button === 2 && !ev.motion) { // right click: the context menu, at a click outside the selection the caret moves there first
@@ -1152,13 +1193,16 @@ class Editor {
     const c = this.colors, { line, col } = this.head;
     const [s, e] = this.range();
     const selected = this.empty ? 0 : this.buf.getText(s, e).length;
+    // VS Code's items, clickable like its status bar (the encoding is shown only)
     const parts = [
-      `Ln ${line + 1}, Col ${visibleColumn(this.lines[line], col, this.tab) + 1}` + (selected ? ` (${selected} selected)` : ""),
-      this.indent.useTabs ? `Tab Size: ${this.tab}` : `Spaces: ${this.tab}`, this.doc.bom ? "UTF-8 with BOM" : "UTF-8",
-      this.doc.eol === "\r\n" ? "CRLF" : "LF", this.language,
+      { text: `Ln ${line + 1}, Col ${visibleColumn(this.lines[line], col, this.tab) + 1}` + (selected ? ` (${selected} selected)` : ""), run: () => this.openGoto() },
+      { text: this.indent.useTabs ? `Tab Size: ${this.tab}` : `Spaces: ${this.tab}`, run: () => this.pickIndent() },
+      { text: this.doc.bom ? "UTF-8 with BOM" : "UTF-8" },
+      { text: this.doc.eol === "\r\n" ? "CRLF" : "LF", run: () => this.pickEol() },
+      { text: this.language, run: () => this.pickLanguage() },
     ];
-    if (this.settings["files.autoSave"] !== "off") parts.unshift("Auto Save");
-    const rightText = parts.join("   ") + "  ";
+    if (this.settings["files.autoSave"] !== "off") parts.unshift({ text: "Auto Save" });
+    const rightText = parts.map(p => p.text).join("   ") + "  ";
     let leftText = "", leftColor = c.barFg;
     if (this.message && this.message.until > Date.now()) { leftText = this.message.text; leftColor = this.message.color; }
     else this.message = null;
@@ -1170,7 +1214,11 @@ class Editor {
     const rw = W.textWidth(rightText, 8);
     P.move(this.rows, 1);
     P.text(fit("  " + leftText, Math.max(0, this.cols - rw)), leftColor, c.bar);
-    if (rw <= this.cols) P.text(rightText, c.barFg, c.bar);
+    this.statusHits = [];
+    if (rw > this.cols) return;
+    P.text(rightText, c.barFg, c.bar);
+    let x = this.cols - rw + 1;
+    for (const p of parts) { const w = W.textWidth(p.text, 8); if (p.run) this.statusHits.push({ x, w, run: p.run }); x += w + 3; }
   }
 
   // Draws the active prompt; returns [row, col] for the terminal cursor when it should sit in the prompt.
