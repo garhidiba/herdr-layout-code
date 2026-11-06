@@ -25,8 +25,9 @@ log() { if [ -n "${VSEDIT_ENGINE_LOG:-}" ]; then echo "$1" >> "$VSEDIT_ENGINE_LO
 
 # Herdr starts programs with PATH=/usr/bin:/bin; node usually lives in Homebrew or ~/.local. The Explorer starts this
 # script straight from `sh -c` (launch.js), so no login shell runs unless node is nowhere else (nvm): then, as
-# launch.js does, the login shell finds it.
-PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; export PATH
+# launch.js does, the login shell finds it. The caller's PATH stays first (as lang/proc.cjs env() keeps it), so what
+# it puts there (the tests' herdr-app stub) wins over the tool folders.
+PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin"; export PATH
 if [ "$engine" = rust ] && [ -x "$bin" ] && [ "$("$bin" --api 2>/dev/null)" = "$API" ]; then
   log rust
   exec "$bin" --vscode "$here/../vscode" --fallback "$here/vsedit.cjs" "$@"
