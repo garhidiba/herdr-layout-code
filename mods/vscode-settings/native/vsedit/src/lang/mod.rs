@@ -96,6 +96,28 @@ pub enum Resolve {
     TsRequest(&'static str, Value),
 }
 
+/// A CodeLens: where it goes (its declaration's name), its title and what a click peeks ("references" |
+/// "implementation").
+#[derive(Clone, Debug, PartialEq)]
+pub struct Lens {
+    pub at: P16,
+    pub title: String,
+    pub kind: &'static str,
+}
+
+/// A documentHighlight: a reference to the symbol at the cursor, `write` when it writes it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Reference {
+    pub start: P16,
+    pub end: P16,
+    pub write: bool,
+}
+
+/// "N references" as VS Code counts them.
+pub fn references_title(n: usize) -> String {
+    format!("{n} reference{}", if n == 1 { "" } else { "s" })
+}
+
 /// Workspace symbol: a name and where it is.
 #[derive(Clone, Debug)]
 pub struct WsSymbol {
@@ -621,6 +643,26 @@ impl Session {
     /// How to install this file's missing server, if it has one.
     pub fn install_hint(&self) -> Option<InstallHint> {
         install_hint(self.kind?, &|tool| crate::term::which(tool).is_some())
+    }
+    /// documentHighlight from the running server (nothing is started); None without one.
+    pub fn references_at(&self, ctx: &Ctx) -> Option<Result<Vec<Reference>, String>> {
+        let s = self.live().filter(|s| s.can("documentHighlight"))?;
+        Some(s.sync(&ctx.file, &ctx.text()).and_then(|_| match s {
+            Server::Ts(t) => t.highlights(ctx),
+            Server::Lsp(l) => l.highlights(ctx),
+        }))
+    }
+    /// CodeLens from the running server (nothing is started); None without one.
+    pub fn lenses(&self, ctx: &Ctx) -> Option<Result<Vec<Lens>, String>> {
+        let s = self.live().filter(|s| s.can("codeLens"))?;
+        Some(s.sync(&ctx.file, &ctx.text()).and_then(|_| match s {
+            Server::Ts(t) => t.lenses(ctx),
+            Server::Lsp(l) => l.lenses(ctx),
+        }))
+    }
+    /// True when a server runs that offers `op`.
+    pub fn live_can(&self, op: &str) -> bool {
+        self.live().is_some_and(|s| s.can(op))
     }
     /// What the running server last reported for this file.
     pub fn diagnostics(&self) -> Option<Arc<Vec<Diag>>> {

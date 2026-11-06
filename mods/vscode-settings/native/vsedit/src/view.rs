@@ -22,14 +22,26 @@ const WORD_DELAY: Duration = Duration::from_millis(250);
 /// Occurrences to highlight and their colors.
 struct Hits {
     list: Vec<Hit>,
+    /// documentHighlight: which of `list` write (their colors are the strong ones); empty for plain occurrences.
+    writes: Vec<bool>,
     bg: String,
     ruler: String,
+}
+
+/// A text row: a line (None past the end) or, on the row above it, that line's CodeLens.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Row {
+    pub line: Option<usize>,
+    pub lens: bool,
+    /// k > 0: line k of a multi-line ghost text (inline suggestion), below its line.
+    pub ghost: usize,
 }
 
 struct Deco<'a> {
     guide: Guide,
     brackets: Vec<usize>,
     hits: &'a [Hit],
+    writes: &'a [bool],
     hit_bg: &'a str,
     folded: bool,
     /// On the cursor line while a suggestion shows: (byte col, its lines).
@@ -53,27 +65,12 @@ impl Editor {
         self.layout_bars();
         let mut p = Painter::default();
         let (height, width, gw) = (self.height(), self.text_width(), self.gutter());
-        let mut rows: Vec<Option<usize>> = vec![];
-        let mut l = self.top;
-        for _ in 0..height {
-            rows.push((l < self.buf.lines.len()).then_some(l));
-            l = self.folds.next(l);
-        }
-        let end = rows.iter().flatten().max().copied().unwrap_or(self.top) + 1;
-        // A multi-line ghost text pushes the rows below the cursor line down: slot r shows rows[src(r)], or ghost line k.
+        // each text row: a line (folded lines skipped), its lenses above it, or a line of a multi-line ghost text below
+        // the cursor line
         let ghost = self.ghost_view();
-        let r0 = ghost.as_ref().and_then(|g| rows.iter().position(|l| *l == Some(g.0)));
-        let gn = match (&ghost, r0) {
-            (Some(g), Some(r0)) => (g.2.len() - 1).min(height - 1 - r0),
-            _ => 0,
-        };
-        self.inline.area = (gn > 0).then(|| (r0.unwrap_or(0) as i32 + 2, gn as i32));
-        let src = |r: usize| -> Option<usize> {
-            match r0 {
-                Some(r0) if gn > 0 && r > r0 => (r > r0 + gn).then(|| r - gn),
-                _ => Some(r),
-            }
-        };
+        let layout = self.layout_rows(height);
+        let rows: Vec<Option<usize>> = layout.iter().filter(|r| !r.lens && r.ghost == 0).map(|r| r.line).collect();
+        let end = rows.iter().flatten().max().copied().unwrap_or(self.top) + 1;
         let (ss, se) = self.range();
         let empty = self.empty();
         let show_matches = self.prompt.is_some() && !self.find.query.is_empty();
@@ -106,21 +103,27 @@ impl Editor {
         }
 
         let no_hits: Vec<Hit> = vec![];
-        let (mut mi, mut hi) = (0, 0);
-        for r in 0..height {
+        let (mut mi, mut hi, mut k_row) = (0, 0, 0);
+        for (r, row) in layout.iter().enumerate() {
             p.move_to(r as i32 + 2, 1);
-            let Some(sr) = src(r) else {
+            if row.lens {
+                self.paint_lens(&mut p, row.line.unwrap_or(0));
+                continue;
+            }
+            if row.ghost > 0 {
                 // a ghost text line below the cursor line
-                let (g, r0) = (ghost.as_ref().unwrap(), r0.unwrap());
+                let g = ghost.as_ref().unwrap();
                 p.text(&" ".repeat(gw), &self.c.fg, &self.c.bg);
                 let bg = self.c.bg.clone();
-                let x = self.paint_ghost_tail(&mut p, g.0, g.1, &g.2, r - r0, 0, 0, width, &bg, &|_| None, None);
+                let x = self.paint_ghost_tail(&mut p, g.0, g.1, &g.2, row.ghost, 0, 0, width, &bg, &|_| None, None);
                 if x < width {
                     p.text(&" ".repeat(width - x), &self.c.fg, &self.c.bg);
                 }
                 continue;
-            };
-            let Some(l) = rows[sr] else {
+            }
+            let g_row = k_row; // the line's index in rows (guides)
+            k_row += 1;
+            let Some(l) = row.line else {
                 p.text(&" ".repeat(self.cols as usize), &self.c.fg, &self.c.bg);
                 continue;
             };
@@ -148,6 +151,7 @@ impl Editor {
                 k += 1;
             }
             let occ = hits.as_ref().map_or(&no_hits, |h| &h.list);
+            let writes = hits.as_ref().map_or(&[][..], |h| &h.writes[..]);
             while hi < occ.len() && occ[hi].0 < l {
                 hi += 1;
             }
@@ -156,10 +160,11 @@ impl Editor {
                 kh += 1;
             }
             let deco = Deco {
-                ghost: ghost.as_ref().filter(|_| Some(r) == r0).map(|g| (g.1, g.2.as_slice())),
-                guide: guides.get(sr).copied().unwrap_or_default(),
+                ghost: ghost.as_ref().filter(|g| g.0 == l).map(|g| (g.1, g.2.as_slice())),
+                guide: guides.get(g_row).copied().unwrap_or_default(),
                 brackets: brackets.iter().filter(|b| b.line == l).map(|b| b.col).collect(),
                 hits: &occ[hi..kh],
+                writes: writes.get(hi..kh).unwrap_or(&[]),
                 hit_bg: hits.as_ref().map_or("", |h| h.bg.as_str()),
                 folded,
                 problems: spans.into_iter().map(|s| (s.0, s.1, s.2)).collect(),
@@ -174,7 +179,7 @@ impl Editor {
             self.hbar.paint(&mut p, &self.c, None);
         }
         if self.ls.peek.is_some() {
-            let v = self.row_of(self.head().line) as i32 - self.row_of(self.top) as i32 + 3;
+            let v = self.rows_to(self.head().line) as i32 + 3;
             self.ls.peek_row = v.min(height as i32 + 2 - crate::overlays::Peek::HEIGHT).max(2);
             self.render_peek(&mut p);
         }
@@ -217,7 +222,7 @@ impl Editor {
             None => {
                 let Pos { line, col } = self.head();
                 let x = display_col(&self.buf.lines[line], col, self.tab()) as i64 - self.left as i64;
-                let row = self.row_of(line) as i64 - self.row_of(self.top) as i64;
+                let row = self.rows_to(line);
                 let hidden = self.folds.is_hidden(line);
                 if !hidden && row >= 0 && row < height as i64 && x >= 0 && x < width as i64 {
                     p.out.push_str(&format!("\x1b[{};{}H\x1b[?25h", row + 2, gw as i64 + x + 1));
@@ -275,7 +280,7 @@ impl Editor {
             let from = crate::lang::edits::byte_of(text, it.col);
             let to = it.end.filter(|e| e.line == l).map_or(from, |e| crate::lang::edits::byte_of(text, e.col));
             let bg_at = |i: usize| -> Option<&str> { (target && i >= from && i < to).then_some(c.find_match.as_str()) };
-            let (x, _) = self.paint_text(p, None, text, hl.line(l), (w as usize).saturating_sub(gw), 0, bg, &bg_at, tab, None, None);
+            let (x, _) = self.paint_text(p, None, text, hl.line(l), (w as usize).saturating_sub(gw), 0, bg, &bg_at, tab, None, None, None);
             if x < (w as usize).saturating_sub(gw) {
                 p.text(&" ".repeat(w as usize - gw - x), &c.fg, bg);
             }
@@ -343,9 +348,9 @@ impl Editor {
             marks[k] = Some(self.c.ruler_find.clone());
         }
         if let Some(h) = hits {
-            for m in &h.list {
+            for (i, m) in h.list.iter().enumerate() {
                 let k = cell(self, m.0);
-                marks[k] = Some(h.ruler.clone());
+                marks[k] = Some(if h.writes.get(i) == Some(&true) { self.c.ruler_word_strong.clone() } else { h.ruler.clone() });
             }
         }
         if !self.empty() {
@@ -407,6 +412,12 @@ impl Editor {
         if sel.is_none() && word.is_none() {
             return None;
         }
+        if sel.is_none() {
+            let key = self.word.as_ref().map(|w| format!("{}:{}", self.file.display(), w.0)).unwrap_or_default();
+            if let Some((list, writes)) = self.reference_hits(&key) {
+                return Some(Hits { list, writes, bg: self.c.word_highlight.clone(), ruler: self.c.ruler_word.clone() });
+            }
+        }
         let whole = self.buf.lines.len() <= 20000;
         let (a, b) = if whole { (0, self.buf.lines.len() - 1) } else { (self.top, self.top + height - 1) };
         let key = format!("{}:{a}:{b}:{}", self.buf.version, sel.as_ref().map_or(format!("w{}", word.as_deref().unwrap_or("")), |t| format!("s{t}")));
@@ -419,9 +430,9 @@ impl Editor {
         }
         let list = self.hits_cache.as_ref().unwrap().1.clone();
         Some(if sel.is_some() {
-            Hits { list, bg: self.c.selection_highlight.clone(), ruler: self.c.ruler_selection.clone() }
+            Hits { list, writes: vec![], bg: self.c.selection_highlight.clone(), ruler: self.c.ruler_selection.clone() }
         } else {
-            Hits { list, bg: self.c.word_highlight.clone(), ruler: self.c.ruler_word.clone() }
+            Hits { list, writes: vec![], bg: self.c.word_highlight.clone(), ruler: self.c.ruler_word.clone() }
         })
     }
 
@@ -452,6 +463,9 @@ impl Editor {
         let size = self.tab();
         let sel_from = if l < ss.line || l > se.line { None } else { Some(if l == ss.line { ss.col } else { 0 }) };
         let sel_to = if l == se.line { se.col } else { usize::MAX };
+        let scope = self.find.scope.filter(|_| self.prompt.is_some());
+        let scope_from = scope.and_then(|(s, e)| (l >= s.line && l <= e.line).then_some(if l == s.line { s.col } else { 0 }));
+        let scope_to = scope.map_or(usize::MAX, |(_, e)| if l == e.line { e.col } else { usize::MAX });
         let bg_at = |i: usize| -> Option<&str> {
             if let Some(m) = matches.iter().find(|m| i >= m.1 && i < m.1 + m.2) {
                 return Some(if current.is_some_and(|cm| cm.0 == l && cm.1 == m.1) { &c.find_match } else { &c.match_other });
@@ -462,7 +476,10 @@ impl Editor {
             if deco.brackets.contains(&i) {
                 return Some(&c.bracket_match);
             }
-            deco.hits.iter().any(|h| i >= h.1 && i < h.1 + h.2).then_some(deco.hit_bg)
+            if let Some(k) = deco.hits.iter().position(|h| i >= h.1 && i < h.1 + h.2) {
+                return Some(if deco.writes.get(k) == Some(&true) { &c.word_highlight_strong } else { deco.hit_bg });
+            }
+            scope_from.is_some_and(|f| i >= f && i < scope_to).then_some(c.find_range.as_str())
         };
         let g = deco.guide;
         let guide_at = |k: usize| -> Option<&str> {
@@ -473,14 +490,15 @@ impl Editor {
         if let Some((gc, lines)) = deco.ghost {
             // the line up to the cursor, the ghost text, then the rest of the line
             let cx = display_col(text, gc, size);
-            let mut x = if cx > self.left { self.paint_text(p, Some(l), text, self.hl.line(l), width.min(cx - self.left), self.left, line_bg, &bg_at, size, Some(&guide_at), curly).0 } else { 0 };
+            let mut x = if cx > self.left { self.paint_text(p, Some(l), text, self.hl.line(l), width.min(cx - self.left), self.left, line_bg, &bg_at, size, Some(&guide_at), curly, None).0 } else { 0 };
             x = self.paint_ghost_tail(p, l, gc, lines, 0, cx, x, width, line_bg, &bg_at, curly);
             if x < width {
                 p.text(&" ".repeat(width - x), &c.fg, line_bg);
             }
             return;
         }
-        let (mut x, col) = self.paint_text(p, Some(l), text, self.hl.line(l), width, self.left, line_bg, &bg_at, size, Some(&guide_at), curly);
+        let link = self.ls.link.filter(|k| k.0 == l).map(|k| (k.1, k.2));
+        let (mut x, col) = self.paint_text(p, Some(l), text, self.hl.line(l), width, self.left, line_bg, &bg_at, size, Some(&guide_at), curly, link);
         if x < width && sel_from.is_some() && sel_to > text.len() && col >= self.left {
             p.text(" ", &c.fg, &c.selection);
             x += 1;
@@ -530,6 +548,7 @@ impl Editor {
         tab: usize,
         guide_at: Option<&dyn Fn(usize) -> Option<&'a str>>,
         curly_at: Option<&dyn Fn(usize) -> Option<&'a str>>,
+        link: Option<(usize, usize)>,
     ) -> (usize, usize) {
         let c = &self.c;
         let (mut col, mut ti, mut x, mut start) = (0usize, 0usize, 0usize, 0usize);
@@ -560,6 +579,9 @@ impl Editor {
             }
             if let Some(span) = line.and_then(|l| self.semantic.at(l, i)) {
                 (fg, style) = (span.fg.as_str(), span.style);
+            }
+            if link.is_some_and(|(a, b)| i >= a && i < b) {
+                (fg, style) = (c.link.as_str(), style | 4); // a Ctrl (⌘) hovered word: underlined like a link
             }
             let bg = bg_at(i).unwrap_or(line_bg);
             let curly = curly_at.and_then(|f| f(i));
@@ -639,7 +661,7 @@ impl Editor {
         if k + 1 == lines.len() && x < width {
             let text = &self.buf.lines[l];
             let cx = display_col(text, gc, tab);
-            x += self.paint_text(p, Some(l), text, self.hl.line(l), width - x, cx + self.left.saturating_sub(col), line_bg, bg_at, tab, None, curly).0;
+            x += self.paint_text(p, Some(l), text, self.hl.line(l), width - x, cx + self.left.saturating_sub(col), line_bg, bg_at, tab, None, curly, None).0;
         }
         x
     }
@@ -718,7 +740,7 @@ impl Editor {
         let w = self.cols.min(60);
         let x = self.cols - w + 1;
         let compact = w < 40;
-        let fw = w - 3 - if compact { 0 } else { 26 };
+        let fw = w - 3 - if compact { 0 } else { 28 };
         self.find_box = Some((x, 2, w, if replace { 2 } else { 1 }));
         let mut hits: Vec<(i32, i32, i32, FindAct)> = vec![];
         let mut cursor = None;
@@ -746,7 +768,8 @@ impl Editor {
         cells(p, row, &mut col, if replace { " ▾" } else { " ▸" }, &c.bar_fg, &c.widget, Some(FindAct::ToggleReplace));
         let (q, cur) = field(Field::Query, &self.find.query, "Find", row, col);
         cursor = cursor.or(cur);
-        cells(p, row, &mut col, &q, if self.find.query.is_empty() { &c.line_number } else { &c.fg }, &c.input, Some(FindAct::Field(Field::Query)));
+        let selected = self.find.fresh && self.find.field == Field::Query && !self.find.query.is_empty(); // typing replaces it
+        cells(p, row, &mut col, &q, if self.find.query.is_empty() { &c.line_number } else { &c.fg }, if selected { &c.selection } else { &c.input }, Some(FindAct::Field(Field::Query)));
         if !compact {
             let n = self.find.matches.len();
             let count = if self.find.query.is_empty() {
@@ -762,6 +785,9 @@ impl Editor {
                 cells(p, row, &mut col, " ", &c.fg, &c.widget, None);
                 cells(p, row, &mut col, label, if on { &c.toggle_fg } else { &c.bar_fg }, if on { &c.toggle_on } else { &c.widget }, Some(FindAct::Toggle(opt)));
             }
+            cells(p, row, &mut col, " ", &c.fg, &c.widget, None);
+            let on = self.find.scope.is_some();
+            cells(p, row, &mut col, "≡", if on { &c.toggle_fg } else { &c.bar_fg }, if on { &c.toggle_on } else { &c.widget }, Some(FindAct::InSelection));
             cells(p, row, &mut col, " ", &c.fg, &c.widget, None);
             cells(p, row, &mut col, &fit(&count, 10), if !self.find.query.is_empty() && n == 0 { &c.error } else { &c.fg }, &c.widget, None);
             cells(p, row, &mut col, " ↑", &c.bar_fg, &c.widget, Some(FindAct::Prev));
@@ -834,14 +860,20 @@ impl Editor {
         Some(out)
     }
 
-    /// Terminal cell -> buffer position (rows: 1 breadcrumbs, 2.. text).
-    pub fn cell_to_pos(&mut self, x: i32, mut y: i32) -> Pos {
-        if let Some((row, n)) = self.inline.area.filter(|a| y > a.0) {
-            y = row.max(y - n); // rows the ghost text pushed down
-        }
+    /// Terminal cell -> buffer position (rows: 1 breadcrumbs, 2.. text); a lens row gives its line's start, a ghost text
+    /// row its line, a row past the end the last line.
+    pub fn cell_to_pos(&mut self, x: i32, y: i32) -> Pos {
         let max = self.view_count() as i64 - 1;
-        let v = (self.row_of(self.top) as i64 + y as i64 - 2).clamp(0, max.max(0)) as usize;
-        let line = self.line_at_row(v);
+        let row = if y >= 2 && y <= self.height() as i32 + 1 { self.layout_rows(y as usize - 1).get(y as usize - 2).copied() } else { None };
+        let line = match row {
+            Some(Row { line: Some(l), lens: true, .. }) => return pos(l, 0),
+            Some(Row { line: Some(l), .. }) => l,
+            Some(Row { line: None, .. }) => self.line_at_row(max.max(0) as usize),
+            None => {
+                let v = (self.row_of(self.top) as i64 + y as i64 - 2).clamp(0, max.max(0)) as usize;
+                self.line_at_row(v)
+            }
+        };
         let col = (self.left as i64 + x as i64 - 1 - self.gutter() as i64).max(0) as usize;
         pos(line, index_at_col(&self.buf.lines[line], col, self.tab()))
     }
@@ -998,6 +1030,13 @@ impl Editor {
         if m.y < 2 || m.y > self.height() as i32 + 1 {
             return;
         }
+        if let Some(line) = self.lens_row_at(m.y) {
+            if m.press() && !self.dragging {
+                self.ls.peek = None;
+                self.click_lens(line, m.x);
+            }
+            return;
+        }
         let p = self.cell_to_pos(m.x, m.y);
         if m.button == 2 && !m.motion {
             let (s, e) = self.range();
@@ -1024,6 +1063,12 @@ impl Editor {
         if m.x == self.gutter() as i32 && self.click_fold(p.line) {
             return;
         }
+        if m.ctrl && !m.shift && m.x > self.gutter() as i32 {
+            // VS Code's ⌘-click / Ctrl+click: Go to Definition
+            self.ls.link = None;
+            self.move_to(p, false);
+            return self.run_act(crate::commands::Act::GoTo("definition"), None);
+        }
         let now = Instant::now();
         let double = now.duration_since(self.last_click.0) < Duration::from_millis(400) && self.last_click.1 == p;
         self.last_click = (now, p);
@@ -1037,5 +1082,90 @@ impl Editor {
             return;
         }
         self.move_to(p, m.shift);
+    }
+}
+
+// ----- CodeLens rows -----
+impl Editor {
+    fn has_lens(&self, line: usize) -> bool {
+        self.lens_items().iter().any(|l| l.at.line == line)
+    }
+    /// Text rows from the top line to `line`'s row: view rows plus the lens rows above the lines in between (and
+    /// `line`).
+    pub fn rows_to(&mut self, line: usize) -> i64 {
+        let mut n = self.row_of(line) as i64 - self.row_of(self.top) as i64;
+        if n >= 0 {
+            let mut lines: Vec<usize> = self.lens_items().iter().map(|l| l.at.line).filter(|&l| l >= self.top && l <= line).collect();
+            lines.dedup();
+            n += lines.into_iter().filter(|&l| !self.folds.is_hidden(l)).count() as i64;
+            if let Some(g) = self.ghost_view().filter(|g| g.0 >= self.top && g.0 < line) {
+                n += g.2.len() as i64 - 1; // a multi-line ghost text's rows below its line
+            }
+        }
+        n
+    }
+    /// The first `count` text rows from the top line.
+    pub fn layout_rows(&mut self, count: usize) -> Vec<Row> {
+        let ghost = self.ghost_view().map(|g| (g.0, g.2.len()));
+        let mut rows = Vec::with_capacity(count);
+        let mut l = self.top;
+        let row = |line, lens, ghost| Row { line, lens, ghost };
+        while rows.len() < count {
+            if l >= self.buf.lines.len() {
+                rows.push(row(None, false, 0));
+                continue;
+            }
+            if self.has_lens(l) {
+                rows.push(row(Some(l), true, 0));
+            }
+            if rows.len() < count {
+                rows.push(row(Some(l), false, 0));
+            }
+            if let Some((_, n)) = ghost.filter(|g| g.0 == l) {
+                for k in 1..n {
+                    if rows.len() < count {
+                        rows.push(row(Some(l), false, k));
+                    }
+                }
+            }
+            l = self.folds.next(l);
+        }
+        rows
+    }
+    /// The line whose lens row is at screen row y.
+    pub fn lens_row_at(&mut self, y: i32) -> Option<usize> {
+        if y < 2 || y > self.height() as i32 + 1 || self.lens_items().is_empty() {
+            return None;
+        }
+        self.layout_rows(y as usize - 1).get(y as usize - 2).filter(|r| r.lens).and_then(|r| r.line)
+    }
+    /// A lens row's text: the titles joined by " | " from the line's indentation, and each lens's display columns.
+    fn lens_text(&self, line: usize) -> (String, Vec<(usize, usize, crate::editor::LensItem)>) {
+        let t = &self.buf.lines[line];
+        let indent = display_col(t, t.len() - t.trim_start().len(), self.tab());
+        let mut text = " ".repeat(indent);
+        let mut parts = vec![];
+        for it in self.lens_items().iter().filter(|l| l.at.line == line) {
+            if !parts.is_empty() {
+                text += " | ";
+            }
+            let from = text_width(&text, self.tab());
+            text += &it.title;
+            parts.push((from, text_width(&text, self.tab()), it.clone()));
+        }
+        (text, parts)
+    }
+    fn paint_lens(&self, p: &mut Painter, line: usize) {
+        let (text, _) = self.lens_text(line);
+        p.text(&" ".repeat(self.gutter()), &self.c.fg, &self.c.bg);
+        let shown: String = text.chars().skip(self.left).collect();
+        p.text(&fit(&shown, self.text_width()), &self.c.code_lens, &self.c.bg);
+    }
+    /// A click on a lens row: that lens's peek.
+    fn click_lens(&mut self, line: usize, x: i32) {
+        let col = (self.left as i64 + x as i64 - 1 - self.gutter() as i64).max(0) as usize;
+        if let Some((_, _, it)) = self.lens_text(line).1.into_iter().find(|(a, b, _)| col >= *a && col < *b) {
+            self.run_lens(&it);
+        }
     }
 }

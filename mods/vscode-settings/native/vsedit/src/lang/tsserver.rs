@@ -3,8 +3,8 @@
 
 use super::edits::{add, p16, TextEdit, WorkspaceEdit, P16};
 use super::rpc::{read_frames, Child, Reply};
-use super::{diagnosed, semantic, Action, Ctx, Diag, Loc, Resolve, WsSymbol};
-use crate::symbols::{from_navtree, ts_pos};
+use super::{diagnosed, references_title, semantic, Action, Ctx, Diag, Lens, Loc, Reference, Resolve, WsSymbol};
+use crate::symbols::{from_navtree, lenses_from_navtree, ts_pos};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -94,9 +94,9 @@ pub struct TsServer {
 }
 
 impl TsServer {
-    pub const CAPS: [&'static str; 15] = [
+    pub const CAPS: [&'static str; 17] = [
         "definition", "typeDefinition", "implementation", "references", "rename", "format", "refactor", "source", "callHierarchy", "symbols", "quickFix", "hover", "selectionRange",
-        "formatRange", "workspaceSymbols",
+        "formatRange", "workspaceSymbols", "documentHighlight", "codeLens",
     ];
     pub const LABEL: &'static str = "TypeScript server";
 
@@ -331,6 +331,26 @@ impl TsServer {
     }
     pub fn symbols(&self, ctx: &Ctx) -> Result<Vec<crate::symbols::Symbol>, String> {
         Ok(from_navtree(&self.request("navtree", json!({ "file": ctx.file }))?))
+    }
+    /// The references of the symbol at the cursor in this file (writtenReference: a write).
+    pub fn highlights(&self, ctx: &Ctx) -> Result<Vec<Reference>, String> {
+        let mut args = at(ctx);
+        args["filesToSearch"] = json!([ctx.file]);
+        let body = self.list("documentHighlights", args)?;
+        let spans = body.as_array().into_iter().flatten().flat_map(|f| f["highlightSpans"].as_array().into_iter().flatten());
+        Ok(spans.map(|h| Reference { start: ts_pos(&h["start"]), end: ts_pos(&h["end"]), write: h["kind"] == "writtenReference" }).collect())
+    }
+    /// CodeLens as VS Code's TypeScript extension shows them: "N references" (definitions not counted) at each name
+    /// lenses_from_navtree picks.
+    pub fn lenses(&self, ctx: &Ctx) -> Result<Vec<Lens>, String> {
+        let tree = self.request("navtree", json!({ "file": ctx.file }))?;
+        let mut out = vec![];
+        for p in lenses_from_navtree(&tree).into_iter().take(200) {
+            let body = self.list("references", json!({ "file": ctx.file, "line": p.line + 1, "offset": p.col + 1 }))?;
+            let n = body["refs"].as_array().into_iter().flatten().filter(|r| r["isDefinition"] != true).count();
+            out.push(Lens { at: p, title: references_title(n), kind: "references" });
+        }
+        Ok(out)
     }
     pub fn calls(&self, ctx: &Ctx, dir: &str) -> Result<Vec<Loc>, String> {
         let items = self.list("prepareCallHierarchy", at(ctx))?;

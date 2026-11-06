@@ -1,6 +1,7 @@
 // Find rules of VS Code's find widget: the matches of a query on each line with Match Case, Match Whole Word and Use
 // Regular Expression, and a match's replacement (with a regex: $1, $&, $<name>, \n and \t, as VS Code).
 // opts: { caseSensitive, wholeWord, regex } (all false by default). Matches never span lines; empty matches are skipped.
+// Also how the widget opens: the search the selection seeds and Find in Selection's scope.
 
 const escape = (s) => s.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
 
@@ -47,4 +48,20 @@ function replacementOf(line, m, query, opts, replace) {
   return out.slice(m.col, out.length - (line.length - m.col - m.len));
 }
 
-module.exports = { searchRegex, findMatches, replacementOf };
+// Find in Selection: the matches lying wholly inside scope ({ start, end }; null keeps them all).
+function inScope(matches, scope) {
+  if (!scope) return matches;
+  const { start: s, end: e } = scope;
+  return matches.filter(m => (m.line > s.line || (m.line === s.line && m.col >= s.col)) && (m.line < e.line || (m.line === e.line && m.col + m.len <= e.col)));
+}
+
+// The search a selection seeds the find widget with (VS Code's getSelectionSearchString): a one-line selection, else
+// (empty, with mode "always") the word at the cursor; a multi-line selection seeds nothing. mode: the
+// editor.find.seedSearchStringFromSelection setting; word() gives the word at the cursor.
+function seedOf(mode, { empty, oneLine, text, word }) {
+  if (mode === "never" || !oneLine) return null;
+  if (!empty) return text;
+  return mode === "always" ? word() : null;
+}
+
+module.exports = { searchRegex, findMatches, replacementOf, inScope, seedOf, escape };

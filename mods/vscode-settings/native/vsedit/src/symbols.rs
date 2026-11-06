@@ -99,6 +99,47 @@ pub fn from_navtree(tree: &Value) -> Vec<Symbol> {
     out
 }
 
+/// Where VS Code's TypeScript reference CodeLens go (typescript.referencesCodeLens with showOnAllFunctions): named
+/// functions, classes, interfaces, types and enums, enum members, members of classes / interfaces / types (not one
+/// starting where its parent does), exported variables. The names' positions in order, from tsserver's navtree.
+pub fn lenses_from_navtree(tree: &Value) -> Vec<P16> {
+    fn want(it: &Value, parent: Option<&Value>) -> bool {
+        let pk = parent.and_then(|p| p["kind"].as_str()).unwrap_or("");
+        if pk == "enum" {
+            return true;
+        }
+        match it["kind"].as_str().unwrap_or("") {
+            "function" => it["nameSpan"].is_object(),
+            "const" | "let" | "var" => it["kindModifiers"].as_str().unwrap_or("").split([',', ' ']).any(|m| m == "export"),
+            "class" => it["text"] != "<class>",
+            "interface" | "type" | "enum" => true,
+            "method" | "getter" | "setter" | "constructor" | "property" => {
+                let same = parent.is_some_and(|p| p["spans"][0]["start"].is_object() && p["spans"][0]["start"] == it["spans"][0]["start"]);
+                matches!(pk, "class" | "interface" | "type") && !same
+            }
+            _ => false,
+        }
+    }
+    fn walk(it: &Value, parent: Option<&Value>, out: &mut Vec<P16>) {
+        let start = if it["nameSpan"].is_object() { &it["nameSpan"]["start"] } else { &it["spans"][0]["start"] };
+        if start.is_object() && want(it, parent) {
+            let p = ts_pos(start);
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
+        for child in it["childItems"].as_array().into_iter().flatten() {
+            walk(child, Some(it), out);
+        }
+    }
+    let mut out = vec![];
+    for it in tree["childItems"].as_array().into_iter().flatten() {
+        walk(it, None, &mut out);
+    }
+    out.sort();
+    out
+}
+
 const MODIFIERS: &str = r"(?:(?:export|default|public|private|protected|internal|static|async|abstract|final|override|open|pub(?:\([^)]*\))?|unsafe|extern|inline|virtual|sealed|partial|data|suspend)\s+)*";
 const KEYWORDS: &str = r"(class|struct|interface|trait|enum|impl|module|namespace|protocol|extension|object|type|function|func|fn|def|fun|sub|proc|macro_rules!)";
 const NAME: &str = r"([\p{L}_$][\p{L}\p{N}_$]*(?:(?:\.|::)[\p{L}_$][\p{L}\p{N}_$]*)*)";
@@ -204,6 +245,19 @@ mod tests {
 
     fn lines(text: &str) -> Vec<String> {
         text.split('\n').map(str::to_string).collect()
+    }
+
+    #[test]
+    fn code_lens_positions_follow_the_typescript_rules() {
+        let sp = |line: u64, offset: u64| json!({ "start": { "line": line, "offset": offset } });
+        let tree = json!({ "kind": "script", "childItems": [
+            { "text": "Shop", "kind": "class", "spans": [sp(1, 1)], "nameSpan": sp(1, 14), "childItems": [
+                { "text": "constructor", "kind": "constructor", "spans": [sp(2, 3)] }, { "text": "buy", "kind": "method", "spans": [sp(3, 3)], "nameSpan": sp(3, 3) }] },
+            { "text": "greet", "kind": "function", "spans": [sp(5, 1)], "nameSpan": sp(5, 17) },
+            { "text": "x", "kind": "const", "kindModifiers": "", "spans": [sp(7, 1)], "nameSpan": sp(7, 7) },
+            { "text": "y", "kind": "const", "kindModifiers": "export", "spans": [sp(8, 1)], "nameSpan": sp(8, 14) },
+            { "text": "o", "kind": "const", "kindModifiers": "", "spans": [sp(9, 1)], "nameSpan": sp(9, 7), "childItems": [{ "text": "m", "kind": "method", "spans": [sp(9, 12)] }] }] });
+        assert_eq!(lenses_from_navtree(&tree), vec![p16(0, 13), p16(1, 2), p16(2, 2), p16(4, 16), p16(7, 13)]);
     }
 
     #[test]

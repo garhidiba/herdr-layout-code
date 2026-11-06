@@ -4,7 +4,7 @@ const fs = require("fs");
 const path = require("path");
 const { Child } = require("./rpc.cjs");
 const { which } = require("./proc.cjs");
-const { fromNavtree } = require("../symbols.cjs");
+const { fromNavtree, lensesFromNavtree } = require("../symbols.cjs");
 
 // The project's typescript first (walking up to the root), then the one behind `tsserver` on PATH.
 function findTsserver(file, root) {
@@ -39,7 +39,7 @@ const EMPTY = /no content|could not find|cannot|not found/i;
 
 class TsServer {
   static CAPS = ["definition", "typeDefinition", "implementation", "references", "rename", "format", "refactor", "source", "callHierarchy", "symbols",
-    "quickFix", "hover", "selectionRange", "formatRange", "workspaceSymbols"];
+    "quickFix", "hover", "selectionRange", "formatRange", "workspaceSymbols", "documentHighlight", "codeLens"];
   label = "TypeScript server";
 
   constructor(file, root) {
@@ -155,6 +155,21 @@ class TsServer {
     return out;
   }
   async symbols(ctx) { return fromNavtree(await this.request("navtree", { file: ctx.file })); }
+  // The references of the symbol at the cursor in this file: [{ line, col, end, kind }] (kind 3 a write, else 2 a read).
+  async highlights(ctx) {
+    const body = await this.list("documentHighlights", { ...at(ctx), filesToSearch: [ctx.file] });
+    return body.flatMap(f => (f.highlightSpans ?? []).map(h => ({ ...toPos(h.start), end: toPos(h.end), kind: h.kind === "writtenReference" ? 3 : 2 })));
+  }
+  // CodeLens as VS Code's TypeScript extension shows them: "N references" (the definitions not counted) at each name
+  // lensesFromNavtree picks: [{ line, col, title, kind: "references" }].
+  async lenses(ctx) {
+    const out = [];
+    for (const p of lensesFromNavtree(await this.request("navtree", { file: ctx.file })).slice(0, 200)) {
+      const n = ((await this.list("references", { file: ctx.file, line: p.line + 1, offset: p.col + 1 })).refs ?? []).filter(r => !r.isDefinition).length;
+      out.push({ ...p, title: `${n} reference${n === 1 ? "" : "s"}`, kind: "references" });
+    }
+    return out;
+  }
   // dir "incoming" | "outgoing": [{ name, detail, file, line, col }]
   async calls(ctx, dir) {
     let items = await this.list("prepareCallHierarchy", at(ctx));

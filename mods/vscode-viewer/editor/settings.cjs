@@ -18,7 +18,11 @@ const DEFAULTS = {
   "breadcrumbs.enabled": true,       // the top line's folders and the symbols at the cursor
   "editor.hover.enabled": true,      // the hover after the pointer rests 300 ms on a word
   "extensions.ignoreRecommendations": false, // true: no status bar offer to install a missing language server
+  "editor.codeLens": true,           // "N references" above declarations while a language server runs
+  "editor.find.seedSearchStringFromSelection": "always", // "never" | "always" (the word at the cursor too) | "selection"
+  "editor.find.autoFindInSelection": "never",            // "never" | "always" | "multiline"
 };
+const SEED = ["never", "always", "selection"], AUTO_IN_SELECTION = ["never", "always", "multiline"];
 const AUTO_SAVE = ["off", "afterDelay", "onFocusChange"];
 
 const settingsFile = () => process.env.VSEDIT_SETTINGS
@@ -34,8 +38,10 @@ function normalize(raw = {}) {
   if (raw["files.autoSaveDelay"] != null && Number.isFinite(d)) v["files.autoSaveDelay"] = clamp(d, 0.1, 3600);
   const t = Number(raw["editor.tabSize"]);
   if (Number.isInteger(t)) v["editor.tabSize"] = clamp(t, 1, 16);
-  for (const k of ["editor.insertSpaces", "editor.formatOnSave", "files.trimTrailingWhitespace", "files.insertFinalNewline", "breadcrumbs.enabled", "editor.hover.enabled", "extensions.ignoreRecommendations"])
+  for (const k of ["editor.insertSpaces", "editor.formatOnSave", "files.trimTrailingWhitespace", "files.insertFinalNewline", "breadcrumbs.enabled", "editor.hover.enabled", "extensions.ignoreRecommendations", "editor.codeLens"])
     if (typeof raw[k] === "boolean") v[k] = raw[k];
+  if (SEED.includes(raw["editor.find.seedSearchStringFromSelection"])) v["editor.find.seedSearchStringFromSelection"] = raw["editor.find.seedSearchStringFromSelection"];
+  if (AUTO_IN_SELECTION.includes(raw["editor.find.autoFindInSelection"])) v["editor.find.autoFindInSelection"] = raw["editor.find.autoFindInSelection"];
   return v;
 }
 

@@ -4,7 +4,7 @@
 mod inline_ui;
 mod lang_ui;
 
-pub use lang_ui::{LangDoc, LangState, MAct, Problem};
+pub use lang_ui::{LangDoc, LangState, LensItem, MAct, Problem};
 
 use crate::autoclose::{self, Typed};
 use crate::backup;
@@ -123,6 +123,8 @@ pub enum PAct {
     Jump(PathBuf, usize, usize),
     /// A code action of the last list.
     Action(usize),
+    /// A CodeLens of Show CodeLens Commands.
+    Lens(usize),
     /// An information row ("Loading symbols…").
     Nothing,
 }
@@ -147,8 +149,15 @@ pub struct Find {
     pub opts: Opts,
     pub matches: Vec<Hit>,
     pub error: Option<String>,
-    searched: Option<(u64, Opts, String)>,
+    /// Find in Selection's range (start, end).
+    pub scope: Option<(Pos, Pos)>,
+    /// The field's text is selected: typing replaces it.
+    pub fresh: bool,
+    searched: Option<Searched>,
 }
+
+/// What the matches were found for: text version, options, scope, query.
+type Searched = (u64, Opts, Option<(Pos, Pos)>, String);
 
 /// The open find widget.
 pub struct Prompt {
@@ -302,6 +311,7 @@ pub enum FindAct {
     ToggleReplace,
     Field(Field),
     Toggle(FindOption),
+    InSelection,
     Prev,
     Next,
     Close,
@@ -342,7 +352,7 @@ impl Editor {
             popup: None,
             prompt: None,
             chord_prefix: None,
-            find: Find { query: String::new(), replace: String::new(), field: Field::Query, opts: Opts::default(), matches: vec![], error: None, searched: None },
+            find: Find { query: String::new(), replace: String::new(), field: Field::Query, opts: Opts::default(), matches: vec![], error: None, scope: None, fresh: false, searched: None },
             clip: (String::new(), false),
             closers: st.closers,
             folds: st.folds,
@@ -468,6 +478,7 @@ impl Editor {
         self.semantic.edited(&changes);
         for c in &changes {
             self.folds.edited(*c);
+            lang_ui::shift_lenses(&mut self.lang.lenses, *c);
         }
         self.git.changed();
     }
@@ -500,6 +511,9 @@ impl Editor {
         if row >= h as i64 {
             let v = self.row_of(line) + 1 - h;
             self.top = self.line_at_row(v);
+        }
+        while self.top < line && self.rows_to(line) >= h as i64 {
+            self.top = self.folds.next(self.top); // CodeLens rows take room too
         }
         let x = display_col(&self.buf.lines[line], col, self.tab());
         if x < self.left {
@@ -1125,14 +1139,25 @@ impl Editor {
     }
 
     // ----- find / replace -----
+    /// The find matches, inside Find in Selection's scope while the widget is open.
     pub fn matches(&mut self) -> &[Hit] {
-        let key = (self.buf.version, self.find.opts, self.find.query.clone());
+        let scope = self.find.scope.filter(|_| self.prompt.is_some());
+        let key = (self.buf.version, self.find.opts, scope, self.find.query.clone());
         if self.find.searched.as_ref() != Some(&key) {
             let (m, e) = find::find_matches(&self.buf.lines, &self.find.query, self.find.opts, find::LIMIT);
-            (self.find.matches, self.find.error) = (m, e);
+            (self.find.matches, self.find.error) = (find::in_scope(m, scope), e);
             self.find.searched = Some(key);
         }
         &self.find.matches
+    }
+    /// With the widget open, the search again from where it opened.
+    fn restart_find(&mut self) {
+        if let Some(p) = &self.prompt {
+            if !self.find.query.is_empty() {
+                let from = p.origin.range().0;
+                self.find_next(1, Some(from));
+            }
+        }
     }
     fn toggle_find(&mut self, o: FindOption) {
         let opts = &mut self.find.opts;
@@ -1141,10 +1166,35 @@ impl Editor {
             FindOption::Word => opts.word = !opts.word,
             FindOption::Regex => opts.regex = !opts.regex,
         }
-        if let Some(p) = &self.prompt {
-            if !self.find.query.is_empty() {
-                let from = p.origin.range().0;
-                self.find_next(1, Some(from));
+        self.restart_find();
+    }
+    /// Find in Selection (⌥⌘L / Alt+L): the search keeps to the selection the widget opened with (else the current
+    /// one); again turns it off. Outside the widget it opens it.
+    fn toggle_find_in_selection(&mut self) {
+        let open = self.prompt.as_ref().map(|p| p.origin);
+        if open.is_some() && self.find.scope.is_some() {
+            self.find.scope = None;
+            return self.restart_find();
+        }
+        let sel = open.filter(|o| !o.is_empty()).unwrap_or(self.sel);
+        let (s, mut e) = sel.range();
+        if s == e {
+            return self.warn("Select the text to find in first");
+        }
+        if e.col == 0 && e.line > s.line {
+            e = pos(e.line - 1, self.buf.lines[e.line - 1].len()); // VS Code drops the last line's start
+        }
+        if open.is_none() {
+            self.open_find(false);
+        }
+        self.find.scope = Some((s, e));
+        self.restart_find();
+    }
+    /// A replacement on the scope's last line moves its end along.
+    fn shift_scope(&mut self, m: Hit, text: &str) {
+        if let Some((_, e)) = self.find.scope.as_mut() {
+            if m.0 == e.line && m.1 < e.col && !text.contains('\n') {
+                e.col = e.col + text.len() - m.2;
             }
         }
     }
@@ -1170,8 +1220,10 @@ impl Editor {
     fn replace_one(&mut self) {
         let Some(i) = self.current_match() else { return self.find_next(1, None) };
         let s = self.range().0;
-        let text = self.replacement(self.find.matches[i]);
+        let m = self.find.matches[i];
+        let text = self.replacement(m);
         self.insert(&text, false);
+        self.shift_scope(m, &text);
         self.find_next(1, Some(end_of(s, &text)));
     }
     fn replace_all(&mut self) {
@@ -1179,20 +1231,33 @@ impl Editor {
         if ms.is_empty() {
             return;
         }
-        let edits = ms.iter().rev().map(|m| edit(pos(m.0, m.1), pos(m.0, m.1 + m.2), self.replacement(*m))).collect();
+        let texts: Vec<(Hit, String)> = ms.iter().rev().map(|m| (*m, self.replacement(*m))).collect();
+        let edits = texts.iter().map(|(m, t)| edit(pos(m.0, m.1), pos(m.0, m.1 + m.2), t.clone())).collect();
         let before = self.sel;
         self.buf.edit(edits, Some(before), None, false);
         self.sync();
+        for (m, t) in &texts {
+            self.shift_scope(*m, t);
+        }
         let h = self.buf.clamp(self.head());
         self.move_to(h, false);
         self.say(format!("Replaced {} occurrence{}", ms.len(), if ms.len() == 1 { "" } else { "s" }), None, 3000);
     }
+    /// Find / Replace (⌘F / ⌥⌘F): the search seeded from the selection or (Find only) the word at the cursor
+    /// (editor.find.seedSearchStringFromSelection) and selected, so typing replaces it; the selection as the scope per
+    /// editor.find.autoFindInSelection.
     fn open_find(&mut self, replace: bool) {
         let (s, e) = self.range();
-        if !self.empty() && s.line == e.line {
-            self.find.query = self.buf.text(s, e);
+        let (one_line, empty, seed) = (s.line == e.line, self.empty(), self.settings.find_seed);
+        let mode = if replace && seed != "never" { "selection" } else { seed };
+        let q = find::seed_of(mode, empty, one_line, || self.buf.text(s, e), || self.word_at(self.head()).map(|w| w.0));
+        if let Some(q) = &q {
+            self.find.query = if self.find.opts.regex { find::escape(q) } else { q.clone() };
         }
-        self.find.field = if replace && !self.find.query.is_empty() { Field::Replace } else { Field::Query };
+        let auto = self.settings.find_in_selection;
+        self.find.scope = (!empty && (auto == "always" || (auto == "multiline" && !one_line))).then_some((s, e));
+        self.find.field = if replace && q.is_some() { Field::Replace } else { Field::Query };
+        self.find.fresh = self.find.field == Field::Query;
         self.prompt = Some(Prompt { replace, origin: self.sel });
     }
     /// The search a selection seeds (VS Code's getSelectionSearchString): a one-line selection, else the word at the
@@ -1247,8 +1312,13 @@ impl Editor {
             Field::Query => self.find.query.clone(),
             Field::Replace => self.find.replace.clone(),
         };
+        let fresh = self.find.fresh; // typing replaces a selected field's text
         let k = match ev {
-            Ev::Text(t) | Ev::Paste(t) => return self.set_field(field + t.split(['\r', '\n']).next().unwrap_or("")),
+            Ev::Text(t) | Ev::Paste(t) => {
+                self.find.fresh = false;
+                let typed = t.split(['\r', '\n']).next().unwrap_or("");
+                return self.set_field(if fresh { typed.to_string() } else { field + typed });
+            }
             Ev::Key(k) => k,
             _ => return,
         };
@@ -1258,13 +1328,14 @@ impl Editor {
             return;
         }
         let act = self.keys.keymap.command(&chord).map(|c| c.act);
-        if let Some(a @ (Act::ToggleFind(_) | Act::ReplaceOne | Act::ReplaceAll)) = act {
+        if let Some(a @ (Act::ToggleFind(_) | Act::ToggleFindInSelection | Act::ReplaceOne | Act::ReplaceAll)) = act {
             return self.run_act(a, None);
         }
+        self.find.fresh = false;
         let replace = self.prompt.as_ref().is_some_and(|p| p.replace);
         match k.name.as_str() {
             "backspace" => {
-                let mut f = field;
+                let mut f = if fresh { String::new() } else { field };
                 f.pop();
                 return self.set_field(f);
             }
@@ -1297,8 +1368,12 @@ impl Editor {
                     self.find.field = if p.replace { Field::Replace } else { Field::Query };
                 }
             }
-            FindAct::Field(f) => self.find.field = f,
+            FindAct::Field(f) => {
+                self.find.field = f;
+                self.find.fresh = false;
+            }
             FindAct::Toggle(o) => self.toggle_find(o),
+            FindAct::InSelection => self.toggle_find_in_selection(),
             FindAct::Prev => self.find_next(-1, None),
             FindAct::Next => self.find_next(1, None),
             FindAct::Close => self.prompt = None,
@@ -1833,6 +1908,7 @@ impl Editor {
             }
             PAct::Jump(file, line, col) => self.jump_to(&crate::lang::Loc::at(file, crate::lang::edits::p16(line, col), None)),
             PAct::Action(i) => self.apply_action(i),
+            PAct::Lens(i) => self.pick_lens(i),
             PAct::Nothing => {}
         }
     }
@@ -2107,6 +2183,7 @@ impl Editor {
             | Act::ShowCommands
             | Act::GotoSymbol
             | Act::NextProblem(_)
+            | Act::ShowLenses
             | Act::ContextMenu => self.run_lang(act),
             Act::QuickOpen => self.open_picker(""),
             Act::InlineTrigger => self.inline_trigger(),
@@ -2186,6 +2263,7 @@ impl Editor {
             Act::SelectNextOccurrence => self.select_next_occurrence(),
             Act::OpenFind(r) => self.open_find(r),
             Act::ToggleFind(o) => self.toggle_find(o),
+            Act::ToggleFindInSelection => self.toggle_find_in_selection(),
             Act::ReplaceOne => self.replace_one(),
             Act::ReplaceAll => self.replace_all(),
             Act::FindAgain(d) => self.find_again(d),
@@ -2455,6 +2533,149 @@ mod tests {
         assert_eq!((ed.find.query.as_str(), sel(&ed)), ("foo", [0, 0, 0, 3]));
         ed.find_selection(-1); // wraps
         assert_eq!(sel(&ed), [0, 8, 0, 11]);
+    }
+
+    fn typed(ed: &mut Editor, t: &str) {
+        ed.prompt_key(&Ev::Text(t.into()));
+    }
+
+    #[test]
+    fn find_seeds_the_word_at_the_cursor_selected_so_typing_replaces_it_and_several_lines_seed_nothing() {
+        let mut ed = editor("/tmp/x.txt", &["foo bar foo", "a.b", "x"]);
+        ed.move_to(pos(0, 9), false);
+        run(&mut ed, "actions.find");
+        let n = ed.matches().len();
+        assert_eq!((ed.find.query.as_str(), n), ("foo", 2));
+        typed(&mut ed, "b");
+        typed(&mut ed, "ar");
+        assert_eq!(ed.find.query, "bar", "typing replaced the selected seed");
+        ed.prompt = None;
+        ed.sel = Sel { anchor: pos(1, 0), head: pos(1, 3) };
+        ed.find.opts.regex = true;
+        run(&mut ed, "actions.find");
+        assert_eq!(ed.find.query, "a\\.b", "escaped for a regex search");
+        ed.prompt = None;
+        ed.find.opts.regex = false;
+        ed.sel = Sel { anchor: pos(0, 0), head: pos(1, 1) };
+        run(&mut ed, "actions.find");
+        assert_eq!((ed.find.query.as_str(), ed.find.scope), ("a\\.b", None), "several lines keep the last search");
+        ed.prompt = None;
+        ed.move_to(pos(0, 1), false);
+        ed.find.query.clear();
+        run(&mut ed, "editor.action.startFindReplaceAction");
+        assert_eq!((ed.find.query.as_str(), ed.find.field), ("", Field::Query), "Replace: only a selection seeds");
+        ed.prompt = None;
+        ed.settings.find_seed = "never";
+        run(&mut ed, "actions.find");
+        assert_eq!(ed.find.query, "");
+    }
+
+    #[test]
+    fn find_in_selection_searches_the_selection_the_widget_opened_with() {
+        let mut ed = editor("/tmp/x.txt", &["ab", "ab ab", "ab", "ab"]);
+        ed.sel = Sel { anchor: pos(1, 0), head: pos(3, 0) };
+        run(&mut ed, "actions.find");
+        typed(&mut ed, "ab");
+        assert_eq!(ed.matches().len(), 5);
+        run(&mut ed, "toggleFindInSelection");
+        assert_eq!(ed.find.scope, Some((pos(1, 0), pos(2, 2))), "the last line's start is left out");
+        assert_eq!(ed.matches().to_vec(), vec![(1, 0, 2), (1, 3, 2), (2, 0, 2)]);
+        assert_eq!(sel(&ed), [1, 0, 1, 2]);
+        ed.prompt.as_mut().unwrap().replace = true;
+        ed.find.field = Field::Replace;
+        typed(&mut ed, "xyz");
+        ed.replace_all();
+        assert_eq!(text(&ed), ["ab", "xyz xyz", "xyz", "ab"]);
+        assert_eq!(ed.find.scope, Some((pos(1, 0), pos(2, 3))), "the scope's end moved along");
+        ed.find_act(FindAct::InSelection);
+        assert_eq!(ed.find.scope, None);
+        ed.prompt = None;
+        ed.settings.find_in_selection = "multiline";
+        ed.sel = Sel { anchor: pos(0, 0), head: pos(1, 3) };
+        run(&mut ed, "actions.find");
+        assert_eq!(ed.find.scope, Some((pos(0, 0), pos(1, 3))));
+    }
+
+    fn lens(line: usize, col: usize, title: &str) -> LensItem {
+        LensItem { at: pos(line, col), title: title.into(), kind: "references" }
+    }
+
+    #[test]
+    fn code_lens_rows_come_above_their_lines_and_count_for_mouse_rows_and_reveal() {
+        let mut ed = editor("/tmp/x.txt", &["const a = 1;", "function greet() {", "  return a;", "}", "greet();"]);
+        ed.rows = 14;
+        ed.lang.lenses = vec![lens(1, 9, "1 reference")];
+        let rows: Vec<(Option<usize>, bool)> = ed.layout_rows(4).iter().map(|r| (r.line, r.lens)).collect();
+        assert_eq!(rows, [(Some(0), false), (Some(1), true), (Some(1), false), (Some(2), false)]);
+        let gw = ed.gutter() as i32;
+        assert_eq!(ed.cell_to_pos(gw + 3, 5), pos(2, 2), "rows below the lens map past it");
+        assert_eq!(ed.lens_row_at(3), Some(1));
+        assert_eq!(ed.screen_of(pos(1, 0)).0, 4);
+        let frame = ed.render();
+        assert!(frame.contains("1 reference"), "no lens row");
+        let it = ed.lang.lenses[0].clone();
+        ed.run_lens(&it);
+        assert_eq!(ed.head(), pos(1, 9));
+        ed.apply(vec![edit(pos(0, 0), pos(0, 0), String::from("// top\n"))], ed.sel, None, false);
+        assert_eq!(ed.lang.lenses[0].at.line, 2, "edits move the lens along");
+        ed.settings.code_lens = false;
+        assert!(!ed.render().contains("1 reference"));
+    }
+
+    #[test]
+    fn code_lens_rows_and_a_multi_line_ghost_text_share_the_screen() {
+        let mut ed = editor("/tmp/x.txt", &["function a() {", "  x", "}", "function b() {}", "y", "z"]);
+        ed.rows = 9; // 7 text rows
+        ed.lang.lenses = vec![lens(0, 9, "1 reference"), lens(3, 9, "0 references")];
+        ed.move_to(pos(1, 3), false);
+        let file = ed.file.clone();
+        ed.inline.ghost = Some(super::inline_ui::Ghost { file, version: ed.buf.version, at: pos(1, 3), items: vec!["foo\nbar\nbaz".into()], index: 0 });
+        let rows: Vec<(Option<usize>, bool, usize)> = ed.layout_rows(7).iter().map(|r| (r.line, r.lens, r.ghost)).collect();
+        assert_eq!(rows, [(Some(0), true, 0), (Some(0), false, 0), (Some(1), false, 0), (Some(1), false, 1), (Some(1), false, 2), (Some(2), false, 0), (Some(3), true, 0)]);
+        let frame = ed.render();
+        for t in ["1 reference", "bar", "baz"] {
+            assert!(frame.contains(t), "{t}");
+        }
+        assert_eq!(ed.rows_to(2), 5, "line 2 sits below the lens and the two ghost rows");
+        assert_eq!(ed.screen_of(pos(2, 0)).0, 7);
+        let gw = ed.gutter() as i32;
+        assert_eq!(ed.cell_to_pos(gw + 1, 7), pos(2, 0), "a click below the ghost text lands on its line");
+        assert_eq!(ed.lens_row_at(8), Some(3), "the second lens row comes after the ghost rows");
+    }
+
+    #[test]
+    fn code_lens_rows_count_when_the_cursor_is_revealed_at_the_bottom() {
+        let lines: Vec<String> = (0..30).map(|i| format!("line {i}")).collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let mut ed = editor("/tmp/x.txt", &refs);
+        ed.rows = 8; // 6 text rows
+        ed.lang.lenses = vec![lens(2, 0, "0 references"), lens(3, 0, "0 references"), lens(4, 0, "0 references")];
+        ed.move_to(pos(4, 0), false);
+        assert!(ed.rows_to(4) < ed.height() as i64);
+        assert_eq!(ed.top, 2);
+    }
+
+    #[test]
+    fn go_to_references_peeks_several_and_ctrl_over_a_word_underlines_it() {
+        let dir = temp_folder("references");
+        fs::write(dir.join("a.go"), "package main\n\nfunc greet() {}\n\nfunc main() { greet(); greet() }\n").unwrap();
+        let mut ed = on_disk(&dir.join("a.go"));
+        ed.move_to(pos(2, 6), false);
+        run(&mut ed, "editor.action.goToReferences");
+        assert!(ed.wait_jobs(5000), "no answer");
+        assert!(ed.ls.peek.as_ref().is_some_and(|p| p.items.len() == 2) && ed.ls.panel.is_none(), "several references (one per line): a peek");
+        ed.ls.peek = None;
+        ed.rows = 10;
+        ed.render();
+        let gw = ed.gutter() as i32;
+        let m = crate::keys::Mouse { button: 3, x: gw + 7, y: 4, release: false, motion: true, shift: false, alt: false, ctrl: true };
+        assert!(ed.mouse_hover(&m));
+        assert_eq!(ed.ls.link, Some((2, 5, 10)));
+        assert!(ed.render().contains("\x1b[4m"), "not underlined");
+        assert!(ed.mouse_hover(&crate::keys::Mouse { ctrl: false, ..m }));
+        assert_eq!(ed.ls.link, None);
+        assert_eq!(act_of("toggleFindInSelection"), Some(Act::ToggleFindInSelection));
+        assert_eq!(act_of("codelens.showLensesInCurrentLine"), Some(Act::ShowLenses));
     }
 
     fn temp_folder(name: &str) -> PathBuf {

@@ -14,7 +14,7 @@ pub struct Opts {
     pub regex: bool,
 }
 
-fn escape(s: &str) -> String {
+pub fn escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 2);
     for c in s.chars() {
         if ".*+?^${}()|[]\\/".contains(c) {
@@ -65,6 +65,28 @@ pub fn find_matches(lines: &[String], query: &str, o: Opts, limit: usize) -> (Ve
         }
     }
     (out, None)
+}
+
+/// Find in Selection: the matches lying wholly inside `scope` (start, end); None keeps them all.
+pub fn in_scope(matches: Vec<Hit>, scope: Option<(crate::buffer::Pos, crate::buffer::Pos)>) -> Vec<Hit> {
+    let Some((s, e)) = scope else { return matches };
+    use crate::buffer::pos;
+    matches.into_iter().filter(|m| pos(m.0, m.1) >= s && pos(m.0, m.1 + m.2) <= e).collect()
+}
+
+/// The search a selection seeds the find widget with (VS Code's getSelectionSearchString): a one-line selection, else
+/// (empty, with mode "always") the word at the cursor; several lines seed nothing. `mode`:
+/// editor.find.seedSearchStringFromSelection.
+pub fn seed_of(mode: &str, empty: bool, one_line: bool, text: impl FnOnce() -> String, word: impl FnOnce() -> Option<String>) -> Option<String> {
+    if mode == "never" || !one_line {
+        None
+    } else if !empty {
+        Some(text())
+    } else if mode == "always" {
+        word()
+    } else {
+        None
+    }
 }
 
 /// The text that replaces match `m` on `line`: the replace string as is, or with a regex its groups substituted.
@@ -173,6 +195,24 @@ mod tests {
 
     fn lines(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn the_seed_is_a_one_line_selection_else_the_word_with_always_and_nothing_for_several_lines() {
+        let word = || Some("foo".to_string());
+        assert_eq!(seed_of("always", true, true, String::new, word), Some("foo".into()));
+        assert_eq!(seed_of("always", false, true, || "o b".into(), word), Some("o b".into()));
+        assert_eq!(seed_of("always", false, false, String::new, word), None);
+        assert_eq!(seed_of("selection", true, true, String::new, word), None);
+        assert_eq!(seed_of("never", false, true, || "o b".into(), word), None);
+    }
+
+    #[test]
+    fn find_in_selection_keeps_the_matches_wholly_inside_the_scope() {
+        use crate::buffer::pos;
+        let ms = find_matches(&lines(&["ab ab", "ab ab", "ab"]), "ab", Opts::default(), LIMIT).0;
+        assert_eq!(in_scope(ms.clone(), Some((pos(0, 1), pos(1, 4)))), vec![(0, 3, 2), (1, 0, 2)]);
+        assert_eq!(in_scope(ms, None).len(), 5);
     }
 
     #[test]

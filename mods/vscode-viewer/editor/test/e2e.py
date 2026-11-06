@@ -935,13 +935,21 @@ def run_git_gutter(tmp):
     print("git gutter: ok")
 
 
+def no_lenses(tmp):
+    """Settings with CodeLens off, for scenarios that click rows of TypeScript (the lens rows would move them)."""
+    file = os.path.join(tmp, "settings", "no-lenses.json")
+    os.makedirs(os.path.dirname(file), exist_ok=True)
+    open(file, "w").write('{"editor.codeLens": false}')
+    return {"VSEDIT_SETTINGS": file}
+
+
 def run_folding(tmp):
     """Linux keys. Kitty Ctrl+Shift+[ folds the block at the cursor (⋯ after the header, its lines gone, ↓ skips them),
     Ctrl+Shift+] unfolds it; chevrons show with the pointer on the gutter and a click on one folds; Unfold All from the
     palette; the two-step chords Ctrl+K Ctrl+0 / Ctrl+L / Ctrl+J with the status hint after Ctrl+K."""
     file = os.path.join(tmp, "fold.ts")
     open(file, "w").write("function a() {\n  if (x) {\n    one();\n    two();\n  }\n}\nconst z = 1;\n")
-    t = Term(file)
+    t = Term(file, env=no_lenses(tmp))
     assert colored_frame(t), "no colored frame"
     last = lambda: plain(t).split("\x1b[1;1H")[-1]
     t.send("\x07"); t.send("3\r")
@@ -989,7 +997,7 @@ def run_medium_language(tmp):
     file = os.path.join(proj, "m.ts")
     open(file, "w").write(MED)
     open(os.path.join(proj, "other.ts"), "w").write(OTHER)
-    t = Term(file)
+    t = Term(file, env=no_lenses(tmp))
     assert t.read("Ln 1, Col 1")
     t.send("\x07"); t.send("1:18\r")                     # on greet
     t.send("\x0b"); t.send("\x1b[105;5u", wait=0.3)      # Ctrl+K Ctrl+I (Kitty: Ctrl+I is Tab in legacy bytes)
@@ -1031,6 +1039,80 @@ def run_medium_language(tmp):
     t.send(QUIT)
     assert t.wait_exit() == 0
     print("hover, quick fix, smart select, format selection, workspace symbols (tsserver): ok")
+
+
+REF_A = 'export function greet(name: string) {\n  return "hi " + name;\n}\nlet count = 0;\ncount = count + 1;\ngreet("c");\n'
+REF_B = 'import { greet } from "./a";\ngreet("a");\ngreet("b");\n'
+
+
+def row_text(t, r):
+    """The text last painted on screen row r (from its cursor move to the next escape)."""
+    sc = plain(t)
+    at = sc.rfind(f"\x1b[{r};1H")
+    assert at >= 0, f"row {r} never painted"
+    return re.split(r"\x1b", sc[at + len(f"\x1b[{r};1H"):], maxsplit=1)[0]
+
+
+def palette():
+    return json.loads(subprocess.check_output(["node", "-e", f"console.log(JSON.stringify(require({json.dumps(os.path.join(HERE, '..', 'paint.cjs'))}).themePalette()))"]))
+
+
+def run_references_and_lenses(tmp):
+    """Through tsserver: an "N references" CodeLens row above greet (a click peeks them), Shift+F12 peeks several
+    references, resting on `count` paints its write and its reads in their own colors (documentHighlight), Ctrl+F seeds
+    the word at the cursor (typing replaces it), Alt+L keeps the search to the selection, Ctrl+click goes to the definition."""
+    proj = os.path.join(tmp, "refproj")
+    os.makedirs(proj)
+    subprocess.run(["git", "init", "-q"], cwd=proj, check=True)
+    open(os.path.join(proj, "tsconfig.json"), "w").write('{"compilerOptions":{"strict":true}}')
+    open(os.path.join(proj, "a.ts"), "w").write(REF_A)
+    open(os.path.join(proj, "b.ts"), "w").write(REF_B)
+    colors = palette()
+    t = Term(os.path.join(proj, "a.ts"))
+    assert t.read("Ln 1, Col 1")
+    assert t.read(" reference", timeout=30), "no CodeLens:\n" + plain(t)[-600:]
+    t.read(timeout=0.3)
+    lens, line1 = row_text(t, 2), row_text(t, 3)
+    m = re.search(r"(\d+) references?", lens)
+    assert m and int(m.group(1)) >= 2, "the lens row: " + repr(lens)
+    assert "export function greet" in line1, "the declaration is not below its lens: " + repr(line1)
+    assert sgr(colors["codeLens"]) in screen_of(t), "the lens is not in editorCodeLens.foreground"
+    t.out = b""
+    t.send("\x1b[<0;8;2M\x1b[<0;8;2m", wait=0.5)        # a click on the lens
+    assert t.read("— References", timeout=20), "the lens click did not peek:\n" + plain(t)[-600:]
+    assert "Ln 1, Col 17" in plain(t)
+    t.send("\x1b[27u")
+    t.out = b""
+    t.send("\x1b[24;2~", wait=0.5)                        # Shift+F12 Go to References: several -> peek
+    assert t.read("— References", timeout=20) and re.search(r"1 of \d", plain(t)), "Shift+F12 did not peek:\n" + plain(t)[-600:]
+    t.send("\x1b[27u")
+    t.out = b""
+    t.send("\x07"); t.send("5:1\r")                       # on the written `count`
+    t.read(timeout=1.5)
+    sc = screen_of(t)
+    assert bg(colors["wordHighlightStrong"]) + "count" in sc, "no write highlight (wordHighlightStrongBackground):\n" + sc[-600:]
+    assert bg(colors["wordHighlight"]) + "count" in sc, "no read highlight (wordHighlightBackground)"
+    t.out = b""
+    t.send("\x06", wait=0.3)                             # Ctrl+F: the word at the cursor
+    assert t.read("of 3", timeout=2) and "count" in plain(t), "Ctrl+F did not seed `count`:\n" + plain(t)[-400:]
+    t.send("greet", wait=0.3)                             # typing replaces the seed
+    assert t.read("2 of 2", timeout=2), "typing did not replace the seed:\n" + plain(t)[-400:]
+    t.send("\x1b[27u")
+    t.send("\x07"); t.send("5:1\r")
+    t.send("\x1b[1;2B"); t.send("\x1b[1;2B")              # Shift+Down x2: lines 5-6
+    t.send("\x06"); t.send("greet", wait=0.3)
+    assert t.read("of 2", timeout=2)
+    t.out = b""
+    t.send("\x1bl", wait=0.3)                            # Alt+L Find in Selection
+    assert t.read("1 of 1", timeout=2), "Alt+L did not keep to the selection:\n" + plain(t)[-400:]
+    t.send("\x1b[27u")
+    t.send("\x07"); t.send("4:1\r")
+    t.out = b""
+    t.send("\x1b[<16;8;8M\x1b[<16;8;8m", wait=0.5)      # Ctrl+click on greet("c") (row 8: the lens row comes first)
+    assert t.read("Ln 1, Col 17", timeout=20), "Ctrl+click did not go to the definition:\n" + plain(t)[-400:]
+    t.send(QUIT)
+    assert t.wait_exit() == 0
+    print("references, CodeLens, reference highlights, find seeding (tsserver): ok")
 
 
 def run_medium_editing(tmp):
@@ -1179,7 +1261,7 @@ def main():
     scenarios = [run_tsx, run_go, run_crlf, run_hex, run_error_page, run_drag_scroll, run_minified, run_scrollbars, run_decorations,
                  run_autoclose, run_git_gutter, run_folding, run_menu_and_cmd_save, run_save_dialog, run_auto_save, run_hot_exit,
                  run_keybindings, run_mac_keys, run_format, run_typescript, run_find_and_status, run_symbols_and_problems, run_install_prompt, run_small_batch,
-                 run_files_and_navigation, run_medium_language, run_medium_editing, run_inline_suggest]
+                 run_files_and_navigation, run_medium_language, run_medium_editing, run_inline_suggest, run_references_and_lenses]
     only = set(sys.argv[1:])
     results = []
     try:

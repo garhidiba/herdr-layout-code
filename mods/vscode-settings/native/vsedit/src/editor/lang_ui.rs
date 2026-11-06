@@ -74,6 +74,14 @@ pub struct Outline {
     pub items: Vec<Symbol>,
 }
 
+/// A CodeLens in the buffer: at its declaration's name, its title, what a click peeks.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LensItem {
+    pub at: Pos,
+    pub title: String,
+    pub kind: &'static str,
+}
+
 /// Per open file (swapped with the file like DocState's other fields).
 #[derive(Default)]
 pub struct LangDoc {
@@ -81,6 +89,18 @@ pub struct LangDoc {
     pub outline: Option<Outline>,
     /// The text version the semantic tokens were last asked for.
     pub sem_version: Option<u64>,
+    /// CodeLens as of a text version, moved along with edits until new ones come.
+    pub lenses: Vec<LensItem>,
+    pub lens_version: Option<u64>,
+}
+
+/// Line decorations after an edit replaced lines [start, start+removed) with `inserted` lines: the ones below move
+/// along, one on the edited first line stays, the ones on the other replaced lines go.
+pub fn shift_lenses(items: &mut Vec<LensItem>, c: crate::buffer::Change) {
+    items.retain(|it| it.at.line <= c.start || it.at.line >= c.start + c.removed);
+    for it in items.iter_mut().filter(|it| it.at.line >= c.start + c.removed && it.at.line > c.start) {
+        it.at.line = it.at.line + c.inserted - c.removed;
+    }
 }
 
 /// A diagnostic in the buffer's byte positions.
@@ -146,10 +166,17 @@ pub struct LangState {
     file_lines: HashMap<PathBuf, Vec<String>>,
     pub sem_theme: Option<SemanticTheme>,
     actions: Vec<Action>,
+    /// Show CodeLens Commands' choices.
+    lens_pick: Vec<LensItem>,
     rename: Option<Ctx>,
     change_all: Option<ChangeAll>,
     /// After an install was started: (kind, label, next look for the server, when to stop looking).
     installing: Option<(&'static str, &'static str, Instant, Instant)>,
+    lens_busy: bool,
+    /// documentHighlight for a resting word's key: None while the server answers, Some(None) when it failed.
+    refs: Option<(String, Option<Option<Vec<lang::Reference>>>)>,
+    /// The word a Ctrl (⌘) hover underlines: line, bytes [from, to).
+    pub link: Option<(usize, usize, usize)>,
 }
 
 impl LangState {
@@ -175,9 +202,13 @@ impl LangState {
             file_lines: HashMap::new(),
             sem_theme: SemanticTheme::of(theme),
             actions: vec![],
+            lens_pick: vec![],
             rename: None,
             change_all: None,
             installing: None,
+            lens_busy: false,
+            refs: None,
+            link: None,
         }
     }
 }
@@ -318,6 +349,7 @@ impl Editor {
             Act::ShowCommands => self.open_picker(">"),
             Act::GotoSymbol => self.go_to_symbol(),
             Act::NextProblem(d) => self.next_problem(d),
+            Act::ShowLenses => self.show_lenses(),
             Act::ContextMenu => self.open_menu_at_cursor(),
             _ => {}
         }
@@ -336,10 +368,11 @@ impl Editor {
                 }
                 match mode {
                     0 if locs.len() == 1 => ed.jump_to(&locs[0]),
-                    1 => {
+                    // several: editor.gotoLocation.multiple*'s default, "peek"
+                    0 | 1 => {
                         ed.ls.peek = Some(Peek { title: peek_title(kind).into(), items: locs, index: 0 });
                         // keep the box on screen below the cursor line
-                        let (row, h) = (ed.row_of(ed.head().line) as i64 - ed.row_of(ed.top) as i64, ed.height() as i64);
+                        let (row, h) = (ed.rows_to(ed.head().line), ed.height() as i64);
                         if row + Peek::HEIGHT as i64 >= h {
                             let v = (ed.row_of(ed.head().line) as i64 - (h - Peek::HEIGHT as i64 - 1).max(0)).max(0);
                             ed.top = ed.line_at_row(v as usize);
@@ -425,7 +458,7 @@ impl Editor {
         ((self.rows - 3).min(row + 1), (col - 1).max(1))
     }
     pub fn screen_of(&mut self, p: Pos) -> (i32, i32) {
-        let row = self.row_of(p.line) as i32 - self.row_of(self.top) as i32 + 2;
+        let row = self.rows_to(p.line) as i32 + 2;
         (row, self.gutter() as i32 + display_col(&self.buf.lines[p.line], p.col, self.tab()) as i32 - self.left as i32 + 1)
     }
     fn rename_symbol(&mut self) {
@@ -764,7 +797,7 @@ impl Editor {
             return false;
         }
         let gw = self.gutter() as i32;
-        let over_text = self.prompt.is_none() && self.ls.peek.is_none() && m.x > gw && m.y >= 2 && m.y <= self.height() as i32 + 1;
+        let over_text = self.prompt.is_none() && self.ls.peek.is_none() && m.x > gw && m.y >= 2 && m.y <= self.height() as i32 + 1 && self.lens_row_at(m.y).is_none();
         let mut w = None;
         if over_text {
             let p = self.cell_to_pos(m.x, m.y);
@@ -775,13 +808,17 @@ impl Editor {
                 w = if word { self.word_at(p).map(|w| (p, w.1)) } else if !self.problems_at(p).is_empty() { Some((p, p)) } else { None };
             }
         }
+        // Ctrl (⌘ when the terminal reports it) over a word: underlined like a link, a click goes to its definition
+        let on_word = |ed: &Editor, p: Pos| ed.buf.lines[p.line][p.col..].chars().next().is_some_and(crate::decorations::is_word_char);
+        let link = w.filter(|(p, _)| m.ctrl && on_word(self, *p) && self.can("definition")).and_then(|(p, _)| self.word_at(p)).map(|(_, s, e)| (s.line, s.col, e.col));
+        let mut frame = link != self.ls.link;
+        self.ls.link = link;
         let key = w.map(|(p, s)| (p.line, s.col));
         if key == self.ls.hover_key {
-            return false;
+            return frame;
         }
         self.ls.hover_key = key;
         self.ls.hover_at = None;
-        let mut frame = false;
         if self.ls.hover_box.as_ref().is_some_and(|h| h.mouse) {
             self.ls.hover_box = None;
             self.ls.hover_token += 1;
@@ -876,6 +913,7 @@ impl Editor {
             let note = if source == crate::lang::fallback::Fallback::LABEL { "regex outline (no language server)".to_string() } else { format!("from {source}") };
             ed.lang.outline = Some(Outline { version, items });
             ed.ask_semantic();
+            ed.ask_lenses();
             if pick {
                 ed.popup = Some(Popup::Picker(Picker::computed("@", "", &note)));
                 ed.refresh_picker(false);
@@ -1125,6 +1163,91 @@ impl Editor {
                 }
             }
         });
+    }
+
+    // ----- CodeLens (editor.codeLens): "N references" on a row of its own above each declaration, VS Code's -----
+    /// Asked of the running server after each outline (so OUTLINE_DELAY after the text last changed), one request at a
+    /// time, never on the input thread; the last ones stay, moved along with edits, until the new ones come.
+    fn ask_lenses(&mut self) {
+        if !self.settings.code_lens || self.ls.lens_busy || self.lang.lens_version == Some(self.buf.version) || !self.session().live_can("codeLens") {
+            return;
+        }
+        self.ls.lens_busy = true;
+        let (s, ctx, version, file) = (self.session(), self.lang_ctx(self.head()), self.buf.version, self.file.clone());
+        self.spawn(move || s.lenses(&ctx), move |ed, r| {
+            ed.ls.lens_busy = false;
+            if ed.file != file || ed.buf.version != version {
+                return;
+            }
+            ed.lang.lens_version = Some(version);
+            if let Some(Ok(list)) = r {
+                let mut items: Vec<LensItem> = list.into_iter().map(|l| LensItem { at: ed.pos16(l.at), title: l.title, kind: l.kind }).collect();
+                items.sort_by(|a, b| a.at.cmp(&b.at));
+                ed.lang.lenses = items;
+            }
+        });
+    }
+    /// The lenses shown (none while editor.codeLens is off), by position.
+    pub fn lens_items(&self) -> &[LensItem] {
+        if self.settings.code_lens { &self.lang.lenses } else { &[] }
+    }
+    /// A click on a lens (or Show CodeLens Commands): its peek (VS Code's showReferences) at the declaration.
+    pub fn run_lens(&mut self, it: &LensItem) {
+        self.move_to(it.at, false);
+        self.go_to(it.kind, 1);
+    }
+    pub(super) fn pick_lens(&mut self, i: usize) {
+        if let Some(it) = self.ls.lens_pick.get(i).cloned() {
+            self.run_lens(&it);
+        }
+    }
+    /// Show CodeLens Commands for Current Line: the cursor line's lens (a pick of them when there are several).
+    fn show_lenses(&mut self) {
+        let line = self.head().line;
+        let items: Vec<LensItem> = self.lens_items().iter().filter(|l| l.at.line == line).cloned().collect();
+        match items.len() {
+            0 => self.say("No CodeLens on this line", None, 3000),
+            1 => self.run_lens(&items[0]),
+            _ => {
+                self.ls.lens_pick = items.clone();
+                let choices = items.iter().enumerate().map(|(i, l)| (l.title.clone(), String::new(), PAct::Lens(i))).collect();
+                self.choose("Select a command", choices, 0);
+            }
+        }
+    }
+
+    // ----- reference highlights (documentHighlight) -----
+    /// The resting word's references from the running server (reads in editor.wordHighlightBackground, writes in
+    /// editor.wordHighlightStrongBackground), asked once per resting word: (list, write flags); empty while it answers,
+    /// None (the plain word occurrences instead) without a server or when it fails.
+    pub fn reference_hits(&mut self, key: &str) -> Option<(Vec<crate::decorations::Hit>, Vec<bool>)> {
+        if !self.session().live_can("documentHighlight") {
+            return None;
+        }
+        if self.ls.refs.as_ref().is_none_or(|r| r.0 != key) {
+            self.ls.refs = Some((key.to_string(), None));
+            let (s, ctx, k) = (self.session(), self.lang_ctx(self.head()), key.to_string());
+            self.spawn(move || s.references_at(&ctx), move |ed, r| {
+                if let Some(refs) = ed.ls.refs.as_mut().filter(|r| r.0 == k) {
+                    refs.1 = Some(r.and_then(Result::ok));
+                }
+            });
+        }
+        let list = match &self.ls.refs.as_ref()?.1 {
+            None => return Some((vec![], vec![])),
+            Some(None) => return None,
+            Some(Some(list)) => list.clone(),
+        };
+        let mut out: Vec<(crate::decorations::Hit, bool)> = list
+            .iter()
+            .filter(|r| r.start.line == r.end.line && r.end.col > r.start.col && r.start.line < self.buf.lines.len())
+            .map(|r| {
+                let (a, b) = (self.pos16(r.start), self.pos16(r.end));
+                ((a.line, a.col, b.col.saturating_sub(a.col)), r.write)
+            })
+            .collect();
+        out.sort();
+        Some(out.into_iter().unzip())
     }
 
     // ----- timers -----

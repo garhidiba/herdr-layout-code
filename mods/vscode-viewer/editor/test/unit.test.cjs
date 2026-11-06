@@ -862,7 +862,7 @@ test("diagnostics: LSP publishDiagnostics and tsserver's diag events become the 
 const withProblems = async (lines, list) => {
   const ed = await plainEditor(lines);
   ed.rows = 12; ed.cols = 100;
-  ed.session = { diagnostics: () => list, symbols: async () => ({ source: "test", items: [] }), can: () => false };
+  ed.session = { diagnostics: () => list, symbols: async () => ({ source: "test", items: [] }), can: () => false, live: () => null };
   return ed;
 };
 const problem = (l1, c1, l2, c2, severity, message) => ({ start: { line: l1, col: c1 }, end: { line: l2, col: c2 }, severity, message, source: "ts(1)" });
@@ -1216,7 +1216,8 @@ test("Cursor Undo keeps at most 50 states and brings back the scroll position", 
 // ---------- medium batch: Expand / Shrink Selection ----------
 // A language session stub: can(op) from `ops`, the provider methods from `impl`.
 const stubSession = (impl, ops = Object.keys(impl), diags = []) => ({ can: (op) => ops.includes(op), provider: (op) => (ops.includes(op) ? impl : null),
-  run: async (op, method, ctx, ...rest) => impl[method](ctx, ...rest), diagnostics: () => diags, symbols: async () => ({ source: "t", items: [] }), touch() {}, saved() {} });
+  run: async (op, method, ctx, ...rest) => impl[method](ctx, ...rest), diagnostics: () => diags, symbols: async () => ({ source: "t", items: [] }), touch() {}, saved() {},
+  live: (op) => (ops.includes(op) ? impl : null), background: async (op, method, ctx) => (ops.includes(op) ? impl[method](ctx) : null) });
 const SS = require("../smartselect.cjs");
 const rangeOf = (r) => [r.start.line, r.start.col, r.end.line, r.end.col];
 
@@ -1249,7 +1250,7 @@ test("Expand Selection: a block's lines after its brackets; Alt+Shift+→ / ⌃�
 test("Expand Selection takes the language server's ranges with its own; a failing server leaves its own", async () => {
   const ed = await plainEditor(["a.b.c"]);
   let fail = false;
-  ed.session = { can: (op) => op === "selectionRange", diagnostics: () => [], symbols: async () => ({ source: "t", items: [] }),
+  ed.session = { can: (op) => op === "selectionRange", live: () => null, diagnostics: () => [], symbols: async () => ({ source: "t", items: [] }),
     run: async () => { if (fail) throw new Error("server gone"); return [{ start: { line: 0, col: 0 }, end: { line: 0, col: 3 } }]; } };
   ed.moveTo({ line: 0, col: 2 });
   for (const want of [[0, 2, 0, 3], [0, 0, 0, 3], [0, 0, 0, 5]]) { await ed.runCommand("editor.action.smartSelect.expand"); assert.deepEqual(sel(ed), want); }
@@ -1544,4 +1545,217 @@ test("right-click routing gives up after `until`, and --to menu stops a retry in
     assert.equal(h.calls().length, n, "still asking after --to menu");
     assert.equal(h.calls().at(-1), "do terminal.right_click --to menu --terminal term-7");
   } finally { h.restore(); }
+});
+
+// ---------- conveniences batch 1: find seeding, Find in Selection, references, CodeLens, reference highlights ----------
+const D = require("../decorations.cjs");
+const strip = (s) => s.replace(/\x1b\[[\d;:]*[mHhl]/g, "");
+
+test("the find widget's seed (seedSearchStringFromSelection): a one-line selection, the word at the cursor with \"always\", nothing for several lines", () => {
+  const word = () => "foo";
+  assert.equal(FIND.seedOf("always", { empty: true, oneLine: true, text: "", word }), "foo");
+  assert.equal(FIND.seedOf("always", { empty: false, oneLine: true, text: "o b", word }), "o b");
+  assert.equal(FIND.seedOf("always", { empty: false, oneLine: false, text: "", word }), null);
+  assert.equal(FIND.seedOf("selection", { empty: true, oneLine: true, text: "", word }), null);
+  assert.equal(FIND.seedOf("selection", { empty: false, oneLine: true, text: "o b", word }), "o b");
+  assert.equal(FIND.seedOf("never", { empty: false, oneLine: true, text: "o b", word }), null);
+});
+
+test("Find in Selection keeps the matches wholly inside the scope", () => {
+  const ms = FIND.findMatches(["ab ab", "ab ab", "ab"], "ab").matches;
+  assert.deepEqual(FIND.inScope(ms, { start: { line: 0, col: 1 }, end: { line: 1, col: 4 } }).map(m => [m.line, m.col]), [[0, 3], [1, 0]]);
+  assert.equal(FIND.inScope(ms, null).length, 5);
+});
+
+test("⌘F seeds the word at the cursor, selected so typing replaces it; a one-line selection seeds itself; several lines seed nothing", async () => {
+  const ed = await plainEditor(["foo bar foo", "a.b", "x"]);
+  ed.moveTo({ line: 0, col: 9 });
+  press(ed, "f", { cmd: true });
+  assert.equal(ed.find.query, "foo");
+  assert.equal(ed.matches().length, 2);
+  ed.handle({ type: "text", text: "b" });
+  assert.equal(ed.find.query, "b", "typing replaced the selected seed");
+  ed.handle({ type: "text", text: "ar" });
+  assert.equal(ed.find.query, "bar");
+  press(ed, "escape");
+  ed.sel = { anchor: { line: 1, col: 0 }, head: { line: 1, col: 3 } };
+  ed.find.regex = true;
+  press(ed, "f", { cmd: true });
+  assert.equal(ed.find.query, "a\\.b", "escaped for a regex search");
+  press(ed, "escape");
+  ed.find.regex = false;
+  ed.sel = { anchor: { line: 0, col: 0 }, head: { line: 1, col: 1 } };
+  press(ed, "f", { cmd: true });
+  assert.equal(ed.find.query, "a\\.b", "a multi-line selection keeps the last search");
+  assert.equal(ed.find.scope, null, "editor.find.autoFindInSelection is never by default");
+  press(ed, "escape");
+  ed.moveTo({ line: 0, col: 1 });
+  ed.find.query = "";
+  press(ed, "f", { cmd: true, alt: true }); // Replace: only a selection seeds
+  assert.equal(ed.find.query, "");
+  assert.equal(ed.find.field, "query");
+  press(ed, "escape");
+  ed.settings = { ...ed.settings, "editor.find.seedSearchStringFromSelection": "never" };
+  press(ed, "f", { cmd: true });
+  assert.equal(ed.find.query, "");
+  assert.equal(S.normalize({ "editor.find.seedSearchStringFromSelection": "bogus" })["editor.find.seedSearchStringFromSelection"], "always");
+});
+
+test("Find in Selection (⌥⌘L / Alt+L, the ≡ button) searches the selection the widget opened with; autoFindInSelection multiline turns it on", async () => {
+  const ed = await plainEditor(["ab", "ab ab", "ab", "ab"]);
+  ed.rows = 12; ed.cols = 80;
+  ed.sel = { anchor: { line: 1, col: 0 }, head: { line: 3, col: 0 } };
+  press(ed, "f", { cmd: true });
+  ed.handle({ type: "text", text: "ab" });
+  assert.equal(ed.matches().length, 5);
+  press(ed, "l", { cmd: true, alt: true });
+  assert.deepEqual(ed.find.scope, { start: { line: 1, col: 0 }, end: { line: 2, col: 2 } }, "the last line's start is left out");
+  assert.deepEqual(ed.matches().map(m => [m.line, m.col]), [[1, 0], [1, 3], [2, 0]]);
+  assert.deepEqual(ed.range(), [{ line: 1, col: 0 }, { line: 1, col: 2 }]);
+  press(ed, "f", { cmd: true, alt: true }); // the Replace row
+  ed.handle({ type: "text", text: "xyz" });
+  press(ed, "enter", { alt: true });
+  assert.deepEqual(ed.lines, ["ab", "xyz xyz", "xyz", "ab"]);
+  const screen = strip(ed.render(0).out);
+  assert.match(screen, /Aa ab \.\* ≡/);
+  const btn = ed.findHits[5]; // ▸, field, Aa, ab, .*, ≡
+  click(ed, btn.x, btn.y);
+  assert.equal(ed.find.scope, null);
+  press(ed, "escape");
+  ed.keymap = K.resolve([], "linux");
+  assert.equal(ed.keymap.byChord.get("alt+l"), "toggleFindInSelection");
+  ed.settings = { ...ed.settings, "editor.find.autoFindInSelection": "multiline" };
+  ed.sel = { anchor: { line: 0, col: 0 }, head: { line: 1, col: 3 } };
+  press(ed, "f", { ctrl: true });
+  assert.deepEqual(ed.find.scope, { start: { line: 0, col: 0 }, end: { line: 1, col: 3 } });
+});
+
+test("CodeLens positions follow VS Code's TypeScript rules: functions, classes and their members, exported variables only", () => {
+  const sp = (line, offset) => ({ start: { line, offset } });
+  const tree = { kind: "script", childItems: [
+    { text: "Shop", kind: "class", spans: [sp(1, 1)], nameSpan: sp(1, 14), childItems: [
+      { text: "constructor", kind: "constructor", spans: [sp(2, 3)] }, { text: "buy", kind: "method", spans: [sp(3, 3)], nameSpan: sp(3, 3) }] },
+    { text: "greet", kind: "function", spans: [sp(5, 1)], nameSpan: sp(5, 17) },
+    { text: "x", kind: "const", kindModifiers: "", spans: [sp(7, 1)], nameSpan: sp(7, 7) },
+    { text: "y", kind: "const", kindModifiers: "export", spans: [sp(8, 1)], nameSpan: sp(8, 14) },
+    { text: "o", kind: "const", kindModifiers: "", spans: [sp(9, 1)], nameSpan: sp(9, 7), childItems: [{ text: "m", kind: "method", spans: [sp(9, 12)] }] }] };
+  assert.deepEqual(SYM.lensesFromNavtree(tree), [{ line: 0, col: 13 }, { line: 1, col: 2 }, { line: 2, col: 2 }, { line: 4, col: 16 }, { line: 7, col: 13 }]);
+  assert.deepEqual(D.shiftLines([{ line: 1 }, { line: 3 }, { line: 4 }, { line: 6 }], 3, 2, 3), [{ line: 1 }, { line: 3 }, { line: 7 }]);
+});
+
+const lensEditor = async (impl) => {
+  const ed = await plainEditor(["const a = 1;", "function greet() {", "  return a;", "}", "greet();"]);
+  ed.rows = 14; ed.cols = 60;
+  ed.session = stubSession(impl, Object.keys(impl).map(k => ({ lenses: "codeLens", highlights: "documentHighlight", locate: "references" })[k] ?? k));
+  return ed;
+};
+
+test("CodeLens: \"N references\" on a dim row of its own above the declaration; a click on it peeks the references; editor.codeLens off hides it", async () => {
+  const refs = [{ file: "/tmp/x.txt", line: 1, col: 9 }, { file: "/tmp/x.txt", line: 4, col: 0 }];
+  const ed = await lensEditor({ lenses: async () => [{ line: 1, col: 9, title: "1 reference", kind: "references" }], references: async () => refs });
+  ed.session.run = async (op, method) => (method === "references" ? refs : []);
+  ed.queueLenses();
+  await tick(); await tick();
+  const out = ed.render(0).out, screen = strip(out);
+  assert.ok(out.includes(`\x1b[38;2;${[1, 3, 5].map(i => parseInt(ed.colors.codeLens.slice(i, i + 2), 16)).join(";")}m`) && screen.includes("1 reference"));
+  const rows = strip(out).split(/\x1b\[\d+;1H/);
+  assert.ok(screen.indexOf("1 reference") < screen.indexOf("function greet"), "above its line");
+  assert.deepEqual(ed.layoutRows(4).map(r => [r.line, !!r.lens]), [[0, false], [1, true], [1, false], [2, false]]);
+  assert.deepEqual(ed.cellToPos(ed.gutter + 3, 5), { line: 2, col: 2 }, "rows below the lens map past it");
+  assert.equal(ed.screenOf({ line: 1, col: 0 }).row, 4);
+  ed.handle({ type: "mouse", button: 0, x: ed.gutter + 3, y: 3, release: false, motion: false });
+  await tick(); await tick();
+  assert.deepEqual(ed.head, { line: 1, col: 9 });
+  assert.equal(ed.peek?.title, "References");
+  assert.equal(ed.peek.items.length, 2);
+  ed.peek = null;
+  ed.moveTo({ line: 1, col: 0 });
+  ed.buf.edit([{ start: { line: 0, col: 0 }, text: "// top\n" }], {}); // edits move the lens along until new ones come
+  assert.deepEqual(ed.lenses.items.map(i => i.line), [2]);
+  ed.settings = { ...ed.settings, "editor.codeLens": false };
+  assert.ok(!strip(ed.render(0).out).includes("1 reference"));
+  assert.ok(rows.length > 0);
+});
+
+test("CodeLens rows count when the cursor is revealed at the bottom of the view", async () => {
+  const ed = await plainEditor(Array.from({ length: 30 }, (_, i) => `line ${i}`));
+  ed.rows = 8; ed.cols = 60; // 6 text rows
+  ed.lenses.items = [2, 3, 4].map(line => ({ line, col: 0, title: "0 references", kind: "references" }));
+  ed.moveTo({ line: 4, col: 0 });
+  assert.ok(ed.rowsTo(4) < ed.height, `cursor row ${ed.rowsTo(4)} on screen`);
+  assert.equal(ed.top, 2);
+});
+
+test("Show CodeLens Commands for Current Line runs the line's lens", async () => {
+  const ed = await lensEditor({ lenses: async () => [{ line: 1, col: 9, title: "2 references", kind: "references" }] });
+  const peeked = [];
+  ed.peekAt = (k) => peeked.push([k, ed.head.line, ed.head.col]);
+  ed.queueLenses(); await tick(); await tick();
+  ed.moveTo({ line: 1, col: 0 });
+  ed.runCommand("codelens.showLensesInCurrentLine");
+  assert.deepEqual(peeked, [["references", 1, 9]]);
+});
+
+test("reference highlights: the language server's reads and writes in their colors instead of the plain word occurrences", async () => {
+  const ed = await lensEditor({ highlights: async (ctx) => [{ line: 0, col: 6, end: { line: 0, col: 7 }, kind: 3 }, { line: 2, col: 9, end: { line: 2, col: 10 }, kind: 2 }] });
+  ed.moveTo({ line: 2, col: 9 });
+  ed.wordKey = null; ed.restingWord(); ed.wordSince = Date.now() - 1000;
+  const first = ed.highlights(10);
+  assert.deepEqual(first.list, [], "nothing while the server answers");
+  await tick(); await tick();
+  const hits = ed.highlights(10);
+  assert.deepEqual(hits.list.map(h => [h.line, h.col, h.bg]), [[0, 6, ed.colors.wordHighlightStrong], [2, 9, ed.colors.wordHighlight]]);
+  const plain = await plainEditor(["a b a"]);
+  plain.session = stubSession({});
+  plain.wordKey = null; plain.restingWord(); plain.wordSince = Date.now() - 1000;
+  assert.deepEqual(plain.highlights(10).list.map(h => h.col), [0, 4], "without a server: the word occurrences");
+});
+
+test("Go to References with several results peeks them (editor.gotoLocation.multipleReferences: peek); one result jumps", async () => {
+  const ed = await plainEditor(["a", "a", "a"]);
+  const locs = [{ file: "/tmp/x.txt", line: 1, col: 0 }, { file: "/tmp/x.txt", line: 2, col: 0 }];
+  ed.session = stubSession({ references: async () => locs }, ["references"]);
+  await ed.runCommand("editor.action.goToReferences");
+  assert.equal(ed.peek?.items.length, 2);
+  assert.equal(ed.panel, null);
+  assert.equal(K.resolve([], "mac").byChord.get("shift+f12"), "editor.action.goToReferences");
+  assert.equal(K.resolve([], "mac").byChord.get("alt+shift+f12"), "references-view.findReferences");
+});
+
+test("Ctrl+click (⌘ when the terminal reports it) goes to the definition; Ctrl over a word underlines it", async () => {
+  const ed = await plainEditor(["alpha beta"]);
+  ed.rows = 10; ed.cols = 60;
+  const asked = [];
+  ed.session = stubSession({ definition: async (ctx) => { asked.push(ctx.col); return [{ file: "/tmp/x.txt", line: 0, col: 0 }]; } }, ["definition"]);
+  ed.render(0);
+  ed.hover({ type: "mouse", motion: true, button: 3, x: ed.gutter + 8, y: 2, ctrl: true });
+  assert.deepEqual(ed.link, { line: 0, from: 6, to: 10 });
+  assert.match(ed.render(0).out, /\x1b\[4m[^]*beta/);
+  ed.hover({ type: "mouse", motion: true, button: 3, x: ed.gutter + 8, y: 2, ctrl: false });
+  assert.equal(ed.link, null);
+  ed.handle({ type: "mouse", button: 0, x: ed.gutter + 8, y: 2, release: false, motion: false, ctrl: true });
+  await tick(); await tick();
+  assert.deepEqual(asked, [7]);
+  assert.deepEqual(ed.head, { line: 0, col: 0 });
+});
+
+test("CodeLens rows and a multi-line ghost text share the screen: rows, clicks and the reveal count both", async () => {
+  const ed = await plainEditor(["function a() {", "  x", "}", "function b() {}", "y", "z"]);
+  ed.rows = 9; ed.cols = 60; // 7 text rows
+  ed.lenses.items = [{ line: 0, col: 9, title: "1 reference", kind: "references" }, { line: 3, col: 9, title: "0 references", kind: "references" }];
+  ed.moveTo({ line: 1, col: 3 });
+  ed.inline.ghost = { file: ed.file, version: ed.buf.version, at: { line: 1, col: 3 }, items: ["foo\nbar\nbaz"], index: 0 };
+  const kind = (r) => (r.lens ? "lens" : r.ghost ? `ghost${r.ghost}` : "line");
+  assert.deepEqual(ed.layoutRows(7).map(r => [r.line, kind(r)]),
+    [[0, "lens"], [0, "line"], [1, "line"], [1, "ghost1"], [1, "ghost2"], [2, "line"], [3, "lens"]]);
+  const screen = strip(ed.render(0).out);
+  for (const t of ["1 reference", "bar", "baz"]) assert.ok(screen.includes(t), t);
+  assert.equal(ed.rowsTo(2), 5, "line 2 sits below the lens and the two ghost rows");
+  assert.equal(ed.screenOf({ line: 2, col: 0 }).row, 7);
+  assert.deepEqual(ed.cellToPos(ed.gutter + 1, 7), { line: 2, col: 0 }, "a click below the ghost text lands on its line");
+  assert.equal(ed.lensRowAt(8)?.line, 3, "the second lens row comes after the ghost rows");
+  ed.moveTo({ line: 4, col: 0 }); // the ghost goes with the cursor; line 4 needs 6 rows (2 lenses): the top moves
+  ed.afterEvent?.();
+  ed.inline.ghost = null;
+  assert.ok(ed.rowsTo(4) < ed.height, `cursor row ${ed.rowsTo(4)}`);
 });

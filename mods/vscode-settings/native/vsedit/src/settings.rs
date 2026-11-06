@@ -41,6 +41,12 @@ pub struct Settings {
     pub inline: crate::inline::InlineSettings,
     /// extensions.ignoreRecommendations: no status bar offer to install a missing language server
     pub ignore_recommendations: bool,
+    /// editor.codeLens: "N references" above declarations while a language server runs
+    pub code_lens: bool,
+    /// editor.find.seedSearchStringFromSelection: "never" | "always" | "selection"
+    pub find_seed: &'static str,
+    /// editor.find.autoFindInSelection: "never" | "always" | "multiline"
+    pub find_in_selection: &'static str,
 }
 
 impl Default for Settings {
@@ -57,6 +63,9 @@ impl Default for Settings {
             hover: true,
             inline: crate::inline::InlineSettings::default(),
             ignore_recommendations: false,
+            code_lens: true,
+            find_seed: "always",
+            find_in_selection: "never",
         }
     }
 }
@@ -65,7 +74,8 @@ fn defaults_json() -> Value {
     json!({
         "files.autoSave": "off", "files.autoSaveDelay": 1, "editor.tabSize": 4, "editor.insertSpaces": true,
         "editor.formatOnSave": false, "files.trimTrailingWhitespace": false, "files.insertFinalNewline": false,
-        "breadcrumbs.enabled": true, "editor.hover.enabled": true, "extensions.ignoreRecommendations": false,
+        "breadcrumbs.enabled": true, "editor.hover.enabled": true, "extensions.ignoreRecommendations": false, "editor.codeLens": true,
+        "editor.find.seedSearchStringFromSelection": "always", "editor.find.autoFindInSelection": "never",
     })
 }
 
@@ -98,6 +108,10 @@ pub fn normalize(raw: &Value) -> Settings {
     v.hover = flag("editor.hover.enabled", true);
     v.inline = crate::inline::normalize(raw);
     v.ignore_recommendations = flag("extensions.ignoreRecommendations", false);
+    v.code_lens = flag("editor.codeLens", true);
+    let pick = |k: &str, of: &[&'static str], d: &'static str| raw.get(k).and_then(Value::as_str).and_then(|s| of.iter().find(|o| **o == s).copied()).unwrap_or(d);
+    v.find_seed = pick("editor.find.seedSearchStringFromSelection", &["never", "always", "selection"], "always");
+    v.find_in_selection = pick("editor.find.autoFindInSelection", &["never", "always", "multiline"], "never");
     v
 }
 
@@ -166,6 +180,14 @@ mod tests {
         assert_eq!(v.tab_size, 4);
         assert!(!v.breadcrumbs);
         assert_eq!(auto_save_label(&normalize(&json!({ "files.autoSave": "afterDelay", "files.autoSaveDelay": 0.3 }))), "Auto Save: after 0.3s");
+    }
+
+    #[test]
+    fn code_lens_and_find_settings_take_known_values_only() {
+        let d = normalize(&json!({}));
+        assert_eq!((d.code_lens, d.find_seed, d.find_in_selection), (true, "always", "never"));
+        let v = normalize(&json!({ "editor.codeLens": false, "editor.find.seedSearchStringFromSelection": "selection", "editor.find.autoFindInSelection": "bogus" }));
+        assert_eq!((v.code_lens, v.find_seed, v.find_in_selection), (false, "selection", "never"));
     }
 
     #[test]

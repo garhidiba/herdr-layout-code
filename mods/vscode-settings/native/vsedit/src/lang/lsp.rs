@@ -3,7 +3,7 @@
 
 use super::edits::{add, p16, TextEdit, WorkspaceEdit, P16};
 use super::rpc::{frame, read_frames, Child, Reply};
-use super::{apply_edit, diagnosed, semantic, Action, Ctx, Diag, Loc, Resolve, Spec, WsSymbol};
+use super::{apply_edit, diagnosed, semantic, Action, Ctx, Diag, Lens, Loc, Reference, Resolve, Spec, WsSymbol};
 use crate::symbols::{from_lsp, kind_name, lsp_pos};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -130,6 +130,19 @@ pub fn diagnostics_of(params: &Value) -> Vec<Diag> {
         .collect()
 }
 
+/// A count lens's kind from its title ("3 references", "1 implementation"); None for other lenses (Run, Debug).
+pub fn lens_kind(title: &str) -> Option<&'static str> {
+    let (n, word) = title.split_once(' ')?;
+    if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    match word.to_ascii_lowercase().as_str() {
+        "reference" | "references" => Some("references"),
+        "implementation" | "implementations" => Some("implementation"),
+        _ => None,
+    }
+}
+
 /// op -> the server capability that provides it.
 fn capability(op: &str) -> Option<&'static str> {
     Some(match op {
@@ -147,6 +160,8 @@ fn capability(op: &str) -> Option<&'static str> {
         "formatRange" => "documentRangeFormattingProvider",
         "workspaceSymbols" => "workspaceSymbolProvider",
         "semanticTokens" => "semanticTokensProvider",
+        "documentHighlight" => "documentHighlightProvider",
+        "codeLens" => "codeLensProvider",
         _ => return None,
     })
 }
@@ -167,6 +182,8 @@ fn op_of_method(m: &str) -> Option<&'static str> {
         "textDocument/selectionRange" => "selectionRange",
         "textDocument/rangeFormatting" => "formatRange",
         "workspace/symbol" => "workspaceSymbols",
+        "textDocument/documentHighlight" => "documentHighlight",
+        "textDocument/codeLens" => "codeLens",
         _ => return None,
     })
 }
@@ -178,7 +195,7 @@ fn client_caps() -> Value {
         "textDocument": {
             "synchronization": { "didSave": true }, "definition": { "linkSupport": true }, "typeDefinition": { "linkSupport": true },
             "implementation": { "linkSupport": true }, "references": {}, "rename": { "prepareSupport": false }, "formatting": {}, "rangeFormatting": {}, "callHierarchy": {},
-            "hover": { "contentFormat": ["markdown", "plaintext"] }, "selectionRange": {},
+            "hover": { "contentFormat": ["markdown", "plaintext"] }, "selectionRange": {}, "documentHighlight": {}, "codeLens": {},
             "documentSymbol": { "hierarchicalDocumentSymbolSupport": true },
             "codeAction": { "codeActionLiteralSupport": { "codeActionKind": { "valueSet": ["", "quickfix", "refactor", "refactor.extract", "refactor.inline", "refactor.rewrite", "source", "source.organizeImports", "source.fixAll"] } },
                 "resolveSupport": { "properties": ["edit"] }, "dataSupport": true },
@@ -440,6 +457,27 @@ impl Lsp {
             })
             .collect())
     }
+    /// textDocument/documentHighlight (kind 3: a write).
+    pub fn highlights(&self, ctx: &Ctx) -> Result<Vec<Reference>, String> {
+        let r = self.optional("documentHighlight", "textDocument/documentHighlight", Self::tdp(ctx))?;
+        let list = r.as_array().into_iter().flatten().filter(|h| h["range"].is_object());
+        Ok(list.map(|h| Reference { start: lsp_pos(&h["range"]["start"]), end: lsp_pos(&h["range"]["end"]), write: h["kind"] == 3 }).collect())
+    }
+    /// The server's reference / implementation count lenses (resolved when it resolves them); run / debug lenses are
+    /// left out.
+    pub fn lenses(&self, ctx: &Ctx) -> Result<Vec<Lens>, String> {
+        let list = self.optional("codeLens", "textDocument/codeLens", json!({ "textDocument": { "uri": uri(&ctx.file) } }))?;
+        let resolves = self.caps.lock().unwrap().as_ref().is_some_and(|c| c["codeLensProvider"]["resolveProvider"] == true);
+        let mut out = vec![];
+        for l in list.as_array().into_iter().flatten().filter(|l| l["range"].is_object()).take(200) {
+            let l = if l["command"].is_null() && resolves { self.call("codeLens/resolve", l.clone()).unwrap_or_else(|_| l.clone()) } else { l.clone() };
+            let title = l["command"]["title"].as_str().unwrap_or("");
+            if let Some(kind) = lens_kind(title) {
+                out.push(Lens { at: lsp_pos(&l["range"]["start"]), title: title.into(), kind });
+            }
+        }
+        Ok(out)
+    }
     pub fn symbols(&self, ctx: &Ctx) -> Result<Vec<crate::symbols::Symbol>, String> {
         Ok(from_lsp(&self.call("textDocument/documentSymbol", json!({ "textDocument": { "uri": uri(&ctx.file) } }))?))
     }
@@ -511,6 +549,14 @@ fn numbers(v: &Value) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_count_lenses_are_kept() {
+        assert_eq!(lens_kind("3 references"), Some("references"));
+        assert_eq!(lens_kind("1 implementation"), Some("implementation"));
+        assert_eq!(lens_kind("▶︎ Run"), None);
+        assert_eq!(lens_kind("references"), None);
+    }
 
     #[test]
     fn uris_round_trip_with_escapes() {

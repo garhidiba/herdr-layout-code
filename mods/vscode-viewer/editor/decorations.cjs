@@ -134,4 +134,11 @@ function textMatches(lines, first, last, text) {
   return out;
 }
 
-module.exports = { leadCols, guideLevels, activeGuide, indentGuides, matchBracket, enclosingBrackets, nextBracket, wordMatches, textMatches };
+// Line decorations ({ line, ... }) after an edit replaced lines [s, s+removed) with `inserted` lines: the ones below move
+// along, one on the edited first line stays, the ones on the other replaced lines go.
+function shiftLines(items, s, removed, inserted) {
+  const delta = inserted - removed;
+  return items.flatMap(it => (it.line < s || it.line === s ? [it] : it.line >= s + removed ? [{ ...it, line: it.line + delta }] : []));
+}
+
+module.exports = { leadCols, guideLevels, activeGuide, indentGuides, matchBracket, enclosingBrackets, nextBracket, wordMatches, textMatches, shiftLines };

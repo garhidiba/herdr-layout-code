@@ -38,8 +38,6 @@ pub struct InlineState {
     seen: Option<(PathBuf, u64, Pos)>,
     /// The event being handled edited by typing (asks again once typing pauses).
     pub editing: bool,
-    /// Rows a multi-line ghost text pushed down: (screen row of the cursor line, rows).
-    pub area: Option<(i32, i32)>,
     cfg: Option<(inline::InlineSettings, Config)>,
 }
 

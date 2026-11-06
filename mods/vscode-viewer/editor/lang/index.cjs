@@ -156,6 +156,15 @@ class Session {
     }
     return { source: this.fallback.label, items: await this.fallback.symbols(ctx) };
   }
+  // The running server when it offers `op` (nothing is started): what the editor asks in the background.
+  live(op) { const s = this.kind && pool.get(`${this.kind}:${this.root}`); return s && !(s instanceof Error) && !s.dead && s.can(op) ? s : null; }
+  // documentHighlight / CodeLens from the running server, after syncing the text; null without one.
+  async background(op, method, ctx) {
+    const s = this.live(op);
+    if (!s) return null;
+    await s.sync(ctx.file, ctx.lines.join("\n"));
+    return s[method](ctx);
+  }
   // What the running server last reported for this file (nothing without one).
   diagnostics() {
     const s = this.kind && pool.get(`${this.kind}:${this.root}`);

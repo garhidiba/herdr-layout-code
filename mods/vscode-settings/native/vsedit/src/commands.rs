@@ -73,6 +73,10 @@ pub enum Act {
     SelectNextOccurrence,
     OpenFind(bool),
     ToggleFind(FindOption),
+    /// Find in Selection
+    ToggleFindInSelection,
+    /// Show CodeLens Commands for Current Line
+    ShowLenses,
     ReplaceOne,
     ReplaceAll,
     FindAgain(i32),
@@ -200,6 +204,8 @@ pub fn act_of(id: &str) -> Option<Act> {
         "toggleFindCaseSensitive" => ToggleFind(FindOption::Case),
         "toggleFindWholeWord" => ToggleFind(FindOption::Word),
         "toggleFindRegex" => ToggleFind(FindOption::Regex),
+        "toggleFindInSelection" => ToggleFindInSelection,
+        "codelens.showLensesInCurrentLine" => ShowLenses,
         "editor.action.replaceOne" => ReplaceOne,
         "editor.action.replaceAll" => ReplaceAll,
         "editor.action.nextMatchFindAction" => FindAgain(1),

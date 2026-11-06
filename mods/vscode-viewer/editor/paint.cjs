@@ -46,6 +46,12 @@ function paletteOf(colors = {}) {
     bracketMatch: blend(colors["editorBracketMatch.background"] ?? colors["editorBracketMatch.border"] ?? "#515a6b", bg),
     wordHighlight: blend(colors["editor.wordHighlightBackground"] ?? "#d2e0ff2f", bg),
     selectionHighlight: blend(colors["editor.selectionHighlightBackground"] ?? "#add6ff26", bg),
+    // reference highlights (a language server's documentHighlight: reads, writes), Find in Selection's range, CodeLens
+    wordHighlightStrong: blend(colors["editor.wordHighlightStrongBackground"] ?? "#004972b8", bg),
+    rulerWordStrong: blend(colors["editorOverviewRuler.wordHighlightStrongForeground"] ?? "#c0a0c0cc", bg),
+    findRange: blend(colors["editor.findRangeHighlightBackground"] ?? "#3a3d4166", bg),
+    codeLens: blend(colors["editorCodeLens.foreground"] ?? "#999999", bg),
+    link: opaque(colors["editorLink.activeForeground"]) ?? "#4e94ce",
     // diagnostics by severity (1 error, 2 warning, 3 information): squiggles, gutter marks, overview ruler (VS Code's
     // dark defaults; One Dark doesn't set them)
     diag: [null, opaque(colors["editorError.foreground"]) ?? "#f14c4c", opaque(colors["editorWarning.foreground"]) ?? "#cca700",

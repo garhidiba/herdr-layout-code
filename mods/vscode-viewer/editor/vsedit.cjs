@@ -65,7 +65,7 @@ function wordLeft(line, col) {
 const shiftClosers = (at, line, col, delta) => at.map(q => (q.line === line && q.col >= col ? { line, col: q.col + delta } : q));
 
 // ---------- the editor ----------
-const DOC_FIELDS = ["file", "doc", "buf", "hl", "indent", "scope", "language", "comment", "crumbs", "root", "session", "sel", "goal", "top", "left", "seenVersion", "outline", "git", "folds"];
+const DOC_FIELDS = ["file", "doc", "buf", "hl", "indent", "scope", "language", "comment", "crumbs", "root", "session", "sel", "goal", "top", "left", "seenVersion", "outline", "git", "folds", "lenses"];
 const GIT_GLYPHS = { added: "▎", modified: "▎", deletedBelow: "▁", deletedAbove: "▔" };
 const GIT_COLORS = { added: "gitAdded", modified: "gitModified", deletedBelow: "gitDeleted", deletedAbove: "gitDeleted" };
 const WORD_DELAY = 250; // ms the cursor rests on a word before its occurrences highlight, like VS Code
@@ -74,7 +74,8 @@ const CURSOR_STACK = 50; // cursor states Cursor Undo keeps, like VS Code
 const NOT_FOUND = { definition: "definition", typeDefinition: "type definition", implementation: "implementation", references: "references" };
 const PEEK_TITLE = { definition: "Definition", typeDefinition: "Type Definition", implementation: "Implementations", references: "References" };
 // Commands the find widget runs itself while it has the keys (the rest of its keys are its own).
-const WIDGET_COMMANDS = new Set(["toggleFindCaseSensitive", "toggleFindWholeWord", "toggleFindRegex", "editor.action.replaceOne", "editor.action.replaceAll"]);
+const WIDGET_COMMANDS = new Set(["toggleFindCaseSensitive", "toggleFindWholeWord", "toggleFindRegex", "toggleFindInSelection", "editor.action.replaceOne", "editor.action.replaceAll"]);
+const NO_LENSES = new Map();
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 const stampText = (ms) => { const d = new Date(ms), p = (n) => String(n).padStart(2, "0"); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; };
 
@@ -88,7 +89,7 @@ class Editor {
     this.docs = new Map(); this.loading = new Map(); this.fileLines = new Map();
     Object.assign(this, this.makeState(file, doc, grammar, scope));
     this.prompt = null; this.message = null; this.chordPrefix = null;
-    this.find = { query: "", replace: "", field: "query", matches: [], version: -1, caseSensitive: false, wholeWord: false, regex: false };
+    this.find = { query: "", replace: "", field: "query", matches: [], version: -1, caseSensitive: false, wholeWord: false, regex: false, scope: null };
     this.popup = null; this.panel = null; this.peek = null; // overlays (popup: menu, picker, input or dialog)
     this.back = []; this.forward = [];                       // navigation history: { file, pos, top }
     this.clip = { text: "", whole: false };
@@ -109,10 +110,12 @@ class Editor {
     buf.listeners.push(() => git.changed());
     const folds = new FD.Folds();
     buf.listeners.push((s, r, n) => folds.onEdit(s, r, n));
+    const lenses = { version: -1, items: [] }; // CodeLens as of a text version, moved along with edits until new ones come
+    buf.listeners.push((s, r, n) => { if (lenses.items.length) lenses.items = D.shiftLines(lenses.items, s, r, n); });
     const fallback = { useTabs: !this.settings["editor.insertSpaces"], size: this.settings["editor.tabSize"] };
     return { file, doc, buf, hl, indent: F.detectIndent(buf.lines, fallback), scope, language: L.languageName(grammar ? scope : null),
       comment: L.commentOf(scope), crumbs: breadcrumbs(file), root: gitRoot(file), session: null, sel: caret({ line: 0, col: 0 }),
-      goal: null, top: 0, left: 0, seenVersion: 0, outline: null, git, folds };
+      goal: null, top: 0, left: 0, seenVersion: 0, outline: null, git, folds, lenses };
   }
   colorsOf(colorMap) { return colorMap.map(c => (c ? c.slice(0, 7).toLowerCase() : this.colors.fg)); }
   // The grammar arrives after the first, uncolored frame (main paints before loading it).
@@ -159,6 +162,7 @@ class Editor {
     const row = this.toView(line) - this.toView(this.top);
     if (row < 0) this.top = line;
     if (row >= this.height) this.top = this.fromView(this.toView(line) - this.height + 1);
+    while (this.top < line && this.rowsTo(line) >= this.height) this.top = this.folds.next(this.top); // CodeLens rows take room too
     const x = W.displayCol(this.lines[line], col, this.tab);
     if (x < this.left) this.left = Math.max(0, x - 4);
     if (x >= this.left + this.textWidth) this.left = x - this.textWidth + 5;
@@ -441,18 +445,37 @@ class Editor {
   redo() { const s = this.buf.redo(); if (s) { this.sel = { anchor: this.buf.clamp(s.anchor), head: this.buf.clamp(s.head) }; this.reveal(); } }
 
   // ----- find / replace -----
+  // The find matches, inside Find in Selection's scope while the widget is open.
   matches() {
-    const f = this.find, key = `${+f.caseSensitive}${+f.wholeWord}${+f.regex}${f.query}`;
+    const f = this.find, scope = this.prompt?.kind === "find" ? f.scope : null;
+    const key = `${+f.caseSensitive}${+f.wholeWord}${+f.regex}${scope ? `${scope.start.line}:${scope.start.col}-${scope.end.line}:${scope.end.col}` : ""}|${f.query}`;
     if (f.version === this.buf.version && f.searched === key) return f.matches;
     ({ matches: f.matches, error: f.error } = FIND.findMatches(this.lines, f.query, f));
+    f.matches = FIND.inScope(f.matches, scope);
     f.version = this.buf.version; f.searched = key;
     return f.matches;
   }
+  restartFind() { if (this.prompt?.kind === "find" && this.find.query) this.findNext(1, ordered(this.prompt.origin.anchor, this.prompt.origin.head)[0]); }
   // Match Case / Match Whole Word / Use Regular Expression; with the widget open the search restarts where it opened.
   toggleFind(option) {
     this.find[option] = !this.find[option];
-    if (this.prompt?.kind === "find" && this.find.query) this.findNext(1, ordered(this.prompt.origin.anchor, this.prompt.origin.head)[0]);
+    this.restartFind();
   }
+  // Find in Selection (⌥⌘L / Alt+L): the search keeps to the selection the widget opened with (else the current one);
+  // again turns it off. Outside the widget it opens it.
+  toggleFindInSelection() {
+    const f = this.find, open = this.prompt?.kind === "find";
+    if (open && f.scope) { f.scope = null; return this.restartFind(); }
+    const o = open ? this.prompt.origin : this.sel, sel = cmp(o.anchor, o.head) ? o : this.sel;
+    let [s, e] = ordered(sel.anchor, sel.head);
+    if (cmp(s, e) === 0) return this.say("Select the text to find in first", this.colors.warn);
+    if (e.col === 0 && e.line > s.line) e = { line: e.line - 1, col: this.lines[e.line - 1].length }; // VS Code drops the last line's start
+    if (!open) this.openFind(false);
+    f.scope = { start: s, end: e };
+    this.restartFind();
+  }
+  // A replacement on the scope's last line moves its end along.
+  shiftScope(m, text) { const sc = this.find.scope; if (sc && m.line === sc.end.line && m.col < sc.end.col && !text.includes("\n")) sc.end = { line: sc.end.line, col: sc.end.col + text.length - m.len }; }
   replacementFor(m) { return FIND.replacementOf(this.lines[m.line], m, this.find.query, this.find, this.find.replace); }
   currentMatch() {
     const [s, e] = this.range();
@@ -470,15 +493,17 @@ class Editor {
   replaceOne() {
     const i = this.currentMatch();
     if (i === -1) return this.findNext(1);
-    const s = this.range()[0], text = this.replacementFor(this.find.matches[i]);
+    const s = this.range()[0], m = this.find.matches[i], text = this.replacementFor(m);
     this.insert(text);
+    this.shiftScope(m, text);
     this.findNext(1, endOf(s, text));
   }
   replaceAllMatches() {
     const ms = this.matches();
     if (!ms.length) return;
-    const before = this.sel;
-    this.buf.edit([...ms].reverse().map(m => ({ start: { line: m.line, col: m.col }, end: { line: m.line, col: m.col + m.len }, text: this.replacementFor(m) })), { before });
+    const before = this.sel, edits = [...ms].reverse().map(m => ({ m, start: { line: m.line, col: m.col }, end: { line: m.line, col: m.col + m.len }, text: this.replacementFor(m) }));
+    this.buf.edit(edits.map(({ start, end, text }) => ({ start, end, text })), { before });
+    for (const { m, text } of edits) this.shiftScope(m, text);
     this.moveTo(this.buf.clamp(this.head));
     this.say(`Replaced ${ms.length} occurrence${ms.length === 1 ? "" : "s"}`);
   }
@@ -652,10 +677,18 @@ class Editor {
   // ----- prompts and overlays -----
   dialog(title, detail, buttons) { this.popup = new O.Dialog({ title, detail, buttons }); }
   closePopup() { this.popup = null; }
+  // Find / Replace (⌘F / ⌥⌘F): the search seeded from the selection or (Find only) the word at the cursor
+  // (editor.find.seedSearchStringFromSelection) and selected, so typing replaces it; the selection as the scope per
+  // editor.find.autoFindInSelection.
   openFind(replace) {
-    const [s, e] = this.range();
-    if (!this.empty && s.line === e.line) this.find.query = this.buf.getText(s, e);
-    this.find.field = replace && this.find.query ? "replace" : "query";
+    const [s, e] = this.range(), f = this.find, oneLine = s.line === e.line, seed = this.settings["editor.find.seedSearchStringFromSelection"];
+    const q = FIND.seedOf(replace && seed !== "never" ? "selection" : seed,
+      { empty: this.empty, oneLine, text: oneLine ? this.buf.getText(s, e) : "", word: () => this.wordAt()?.text ?? null });
+    if (q) f.query = f.regex ? FIND.escape(q) : q;
+    const auto = this.settings["editor.find.autoFindInSelection"];
+    f.scope = !this.empty && (auto === "always" || (auto === "multiline" && !oneLine)) ? { start: s, end: e } : null;
+    f.field = replace && q ? "replace" : "query";
+    f.fresh = f.field === "query"; // the field's text is selected
     this.prompt = { kind: "find", replace, origin: this.sel };
   }
   findAgain(dir) {
@@ -728,7 +761,7 @@ class Editor {
     this.useGrammar(g);
   }
   // Screen cell under a buffer position (row, col), for popups placed at the cursor.
-  screenOf(p) { return { row: this.toView(p.line) - this.toView(this.top) + 2, col: this.gutter + W.displayCol(this.lines[p.line], p.col, this.tab) - this.left + 1 }; }
+  screenOf(p) { return { row: this.rowsTo(p.line) + 2, col: this.gutter + W.displayCol(this.lines[p.line], p.col, this.tab) - this.left + 1 }; }
   openMenu(x, y) { this.popup = new O.Menu(C.menuRows(C.MENU, cap => this.lang.can(cap), this.keymap.label), x, y); }
   openMenuAtCursor() { const s = this.screenOf(this.head); this.openMenu(Math.max(1, s.col), Math.min(this.rows, s.row + 1)); }
   openPicker(prefix) {
@@ -776,9 +809,82 @@ class Editor {
     if (this.outlineTimer) return;
     this.outlineTimer = setTimeout(() => {
       this.outlineTimer = null;
-      this.loadOutline().then(o => { if (o) this.redraw(); else if (!this.done) this.queueOutline(); }, () => {});
+      this.loadOutline().then(o => { if (o) { this.queueLenses(); this.redraw(); } else if (!this.done) this.queueOutline(); }, () => {});
     }, 300);
     this.outlineTimer.unref?.();
+  }
+  // ----- CodeLens (editor.codeLens): "N references" on a row of its own above each declaration, VS Code's -----
+  // Asked of the running language server after each outline (so 300 ms after the text last changed), one request at a
+  // time, never blocking input; the last ones stay, moved along with edits, until the new ones come.
+  queueLenses() {
+    const st = this.lenses, buf = this.buf, version = buf.version;
+    if (!this.settings["editor.codeLens"] || this.lensBusy || st.version === version || !this.lang.live("codeLens")) return;
+    this.lensBusy = true;
+    this.lang.background("codeLens", "lenses", this.langCtx()).then(items => {
+      if (buf.version === version && items) { st.items = items.sort((a, b) => a.line - b.line || a.col - b.col); st.version = version; }
+    }, () => { st.version = version; }).finally(() => { this.lensBusy = false; this.redraw(); });
+  }
+  // The shown lenses by line: line -> [{ line, col, title, kind }] (none while editor.codeLens is off).
+  lensLines() {
+    const st = this.lenses;
+    if (!this.settings["editor.codeLens"] || !st.items.length) return NO_LENSES;
+    if (st.byLine?.items !== st.items) {
+      const map = new Map();
+      for (const it of st.items) if (it.line < this.lines.length) { if (!map.has(it.line)) map.set(it.line, []); map.get(it.line).push(it); }
+      st.byLine = { items: st.items, map };
+    }
+    return st.byLine.map;
+  }
+  // Text rows from the top line to `line`'s row: view rows plus the lens rows above the lines in between (and `line`)
+  // and a multi-line ghost text's extra rows below a line before it.
+  rowsTo(line) {
+    let n = this.toView(line) - this.toView(this.top);
+    if (n < 0) return n;
+    for (const l of this.lensLines().keys()) if (l >= this.top && l <= line && !this.folds.isHidden(l)) n++;
+    const g = this.inlineGhostView();
+    if (g && g.line >= this.top && g.line < line) n += g.lines.length - 1;
+    return n;
+  }
+  // The first `count` text rows: { line, lens?, ghost? } (lens: that line's lenses, on the row above it; ghost k: line k
+  // of a multi-line ghost text, below its line; line -1: past the end).
+  layoutRows(count, ghost = this.inlineGhostView()) {
+    const by = this.lensLines(), rows = [];
+    for (let l = this.top; rows.length < count; l = this.folds.next(l)) {
+      if (l >= this.lines.length) { rows.push({ line: -1 }); continue; }
+      if (by.has(l)) rows.push({ line: l, lens: by.get(l) });
+      if (rows.length < count) rows.push({ line: l });
+      if (ghost?.line === l) for (let k = 1; k < ghost.lines.length && rows.length < count; k++) rows.push({ line: l, ghost: k });
+    }
+    return rows;
+  }
+  // A lens row's text: the titles joined by " | " from the line's indentation; parts: each lens's display columns.
+  lensText(l, items) {
+    const t = this.lines[l], indent = W.displayCol(t, t.search(/\S|$/), this.tab), parts = [];
+    let text = " ".repeat(indent);
+    for (const it of items) {
+      if (parts.length) text += " | ";
+      parts.push({ from: W.textWidth(text, this.tab), to: W.textWidth(text + it.title, this.tab), item: it });
+      text += it.title;
+    }
+    return { text, parts };
+  }
+  paintLens(P, l, items) {
+    const c = this.colors, width = this.textWidth, { text } = this.lensText(l, items);
+    P.text(" ".repeat(this.gutter), c.fg, c.bg);
+    P.text(fit([...text].slice(this.left).join(""), width), c.codeLens, c.bg);
+  }
+  // A click on a lens: its peek (VS Code's showReferences) at the declaration.
+  clickLens(row, x) {
+    const col = this.left + x - 1 - this.gutter, hit = this.lensText(row.line, row.lens).parts.find(p => col >= p.from && col < p.to);
+    if (hit) this.runLens(hit.item);
+  }
+  runLens(it) { this.moveTo({ line: it.line, col: it.col }); return this.peekAt(it.kind); }
+  // Show CodeLens Commands for Current Line: the lens of the cursor's line (a pick of them when there are several).
+  showLenses() {
+    const items = this.lensLines().get(this.head.line) ?? [];
+    if (!items.length) return this.say("No CodeLens on this line");
+    if (items.length === 1) return this.runLens(items[0]);
+    this.choose("Select a command", items.map(it => ({ label: it.title, run: () => this.runLens(it) })));
   }
   // Breadcrumbs: the file's folders and name, then the symbols around the cursor; only the name when they are off.
   crumbText() {
@@ -871,13 +977,15 @@ class Editor {
   promptKey(ev) {
     const p = this.prompt, f = this.find;
     const set = (v) => { f[f.field] = v; if (f.field === "query") this.findNext(1, ordered(p.origin.anchor, p.origin.head)[0]); };
-    if (ev.type === "text" || ev.type === "paste") return set(f[f.field] + ev.text.split(/\r?\n|\r/)[0]);
+    const fresh = f.fresh; // typing replaces a selected field's text
+    if (ev.type === "text" || ev.type === "paste") { f.fresh = false; return set((fresh ? "" : f[f.field]) + ev.text.split(/\r?\n|\r/)[0]); }
     if (ev.type !== "key") return;
     const { name, shift, alt, cmd } = ev, chord = C.chordOf(ev);
     if (name === "escape") { this.prompt = null; return; }
     const id = this.keymap.byChord.get(chord); // the widget's own commands, through the user's keys
     if (WIDGET_COMMANDS.has(id)) return this.runCommand(id);
-    if (name === "backspace") return set([...f[f.field]].slice(0, -1).join(""));
+    f.fresh = false;
+    if (name === "backspace") return set(fresh ? "" : [...f[f.field]].slice(0, -1).join(""));
     if (name === "tab" && p.replace) { f.field = f.field === "query" ? "replace" : "query"; return; }
     if (id === "editor.action.startFindReplaceAction") { p.replace = true; f.field = "replace"; return; }
     if (id === "actions.find") { p.replace = false; f.field = "query"; return; }
@@ -1047,16 +1155,16 @@ class Editor {
     return this.track(this.locate(kind).then(locs => {
       if (!locs.length) return this.noResult(kind);
       if (locs.length === 1) return this.jumpTo(locs[0]);
-      this.showPanel(PEEK_TITLE[kind], locs);
+      this.showPeek(kind, locs); // editor.gotoLocation.multiple*: "peek", VS Code's default
     }));
   }
   peekAt(kind) {
-    return this.track(this.locate(kind).then(locs => {
-      if (!locs.length) return this.noResult(kind);
-      this.peek = new O.Peek(PEEK_TITLE[kind], locs);
-      const row = this.toView(this.head.line) - this.toView(this.top); // keep the box on screen below the cursor line
-      if (row + this.peek.height >= this.height) this.top = this.fromView(Math.max(0, this.toView(this.head.line) - Math.max(0, this.height - this.peek.height - 1)));
-    }));
+    return this.track(this.locate(kind).then(locs => (locs.length ? this.showPeek(kind, locs) : this.noResult(kind))));
+  }
+  showPeek(kind, locs) {
+    this.peek = new O.Peek(PEEK_TITLE[kind], locs);
+    // keep the box on screen below the cursor line
+    if (this.rowsTo(this.head.line) + this.peek.height >= this.height) this.top = this.fromView(Math.max(0, this.toView(this.head.line) - Math.max(0, this.height - this.peek.height - 1)));
   }
   findAll(kind) {
     return this.track(this.locate(kind).then(locs => (locs.length ? this.showPanel(PEEK_TITLE[kind], locs) : this.noResult(kind))));
@@ -1220,9 +1328,12 @@ class Editor {
   // closes a mouse hover, unless onto the box.
   mouseHover(ev) {
     if (this.hoverBox?.contains(ev)) return;
-    const p = !this.prompt && !this.peek && ev.x > this.gutter && ev.y >= 2 && ev.y <= this.height + 1 ? this.cellToPos(ev.x, ev.y) : null;
+    const p = !this.prompt && !this.peek && ev.x > this.gutter && ev.y >= 2 && ev.y <= this.height + 1 && !this.lensRowAt(ev.y) ? this.cellToPos(ev.x, ev.y) : null;
     const t = p && this.lines[p.line], over = p && p.col < t.length && W.displayCol(t, p.col, this.tab) === this.left + ev.x - 1 - this.gutter;
     const w = over && (classOf(t[p.col]) === 1 ? this.wordAt(p) : this.problemsAt(p).length ? { start: p } : null);
+    // Ctrl (⌘ when the terminal reports it) over a word: underlined like a link, a click goes to its definition
+    const link = ev.ctrl && w?.text && this.lang.can("definition") ? { line: p.line, from: w.start.col, to: w.end.col } : null;
+    if (JSON.stringify(link) !== JSON.stringify(this.link ?? null)) { this.link = link; this.redraw(); }
     const key = w ? `${p.line}:${w.start.col}` : null;
     if (key === this.hoverKey) return;
     this.hoverKey = key; clearTimeout(this.hoverTimer);
@@ -1525,12 +1636,15 @@ class Editor {
   }
 
   // Terminal cell -> buffer position (rows: 1 breadcrumbs, 2..rows-1 text).
+  // A lens row gives its line's start; a row past the end, the last line.
   cellToPos(x, y) {
-    const ga = this.ghostArea; // rows the ghost text pushed down
-    if (ga && y > ga.row) y = Math.max(ga.row, y - ga.n);
-    const line = this.fromView(Math.max(0, Math.min(this.viewCount - 1, this.toView(this.top) + y - 2)));
+    const row = y >= 2 && y <= this.height + 1 ? this.layoutRows(y - 1)[y - 2] : null;
+    const line = row ? (row.line >= 0 ? row.line : this.fromView(this.viewCount - 1)) : this.fromView(Math.max(0, Math.min(this.viewCount - 1, this.toView(this.top) + y - 2)));
+    if (row?.lens) return { line, col: 0 };
     return { line, col: W.indexAtCol(this.lines[line], Math.max(0, this.left + x - 1 - this.gutter), this.tab) };
   }
+  // The lens row at screen row y, or null.
+  lensRowAt(y) { const row = y >= 2 && y <= this.height + 1 && this.lensLines().size ? this.layoutRows(y - 1)[y - 2] : null; return row?.lens ? row : null; }
   // How far past the text area a drag pointer is, in cells (the gutter and the last text column count as past the side).
   dragOverflow(x, y) {
     const right = this.gutter + this.textWidth;
@@ -1575,7 +1689,7 @@ class Editor {
       for (let k = cell(G.lineOf(h)); k <= cell(Math.max(G.lineOf(h), h.end - 1)); k++) marks[k] = color;
     }
     for (const m of ms) marks[cell(m.line)] = c.rulerFind;
-    for (const h of hits?.list ?? []) marks[cell(h.line)] = hits.ruler;
+    for (const h of hits?.list ?? []) marks[cell(h.line)] = h.ruler ?? hits.ruler;
     if (!this.empty) marks[cell(this.sel.anchor.line)] = c.rulerSelection;
     marks[cell(this.head.line)] = c.rulerCursor;
     for (const d of [...problems].sort((a, b) => b.severity - a.severity)) marks[cell(d.start.line)] = c.rulerDiag[d.severity]; // errors win, over everything else
@@ -1641,6 +1755,8 @@ class Editor {
       return;
     }
     if (ev.y < 2 || ev.y > this.height + 1) return;
+    const lensRow = this.lensRowAt(ev.y);
+    if (lensRow) { if (ev.button === 0 && !ev.motion && !this.dragging) { this.peek = null; this.clickLens(lensRow, ev.x); } return; }
     const p = this.cellToPos(ev.x, ev.y);
     if (ev.button === 2 && !ev.motion) { // right click: the context menu, at a click outside the selection the caret moves there first
       const [s, e] = this.range();
@@ -1652,6 +1768,7 @@ class Editor {
     if (this.peek && !ev.motion) { if (ev.y >= this.peekRow && ev.y < this.peekRow + this.peek.height) return; this.peek = null; }
     if (ev.motion) return;
     if (ev.x === this.gutter && this.clickFold(p.line)) return; // the chevron column
+    if (ev.ctrl && !ev.shift && ev.x > this.gutter) { this.link = null; this.moveTo(p); return this.runCommand("editor.action.revealDefinition"); } // VS Code's ⌘-click / Ctrl+click
     const now = Date.now(), c = this.lastClick;
     const double = now - c.time < 400 && c.line === p.line && c.col === p.col;
     this.lastClick = { time: now, line: p.line, col: p.col };
@@ -1673,13 +1790,10 @@ class Editor {
     this.layoutBars();
     const P = new Painter(), c = this.colors, height = this.height, width = this.textWidth, gw = this.gutter;
     const deadline = Date.now() + budget;
-    const rows = []; // the line on each text row (-1 past the end), folded lines skipped
-    for (let r = 0, l = this.top; r < height; r++, l = this.folds.next(l)) rows.push(l < this.lines.length ? l : -1);
-    // A multi-line ghost text pushes the rows below the cursor line down: slot r shows rows[src(r)], or ghost line k.
-    const ghost = this.inlineGhostView(), r0 = ghost ? rows.indexOf(ghost.line) : -1;
-    const gn = r0 < 0 ? 0 : Math.min(ghost.lines.length - 1, height - 1 - r0);
-    this.ghostArea = gn ? { row: r0 + 2, n: gn } : null;
-    const src = (r) => (r <= r0 || !gn ? r : r <= r0 + gn ? -1 : r - gn);
+    // each text row: a line (-1 past the end; folded lines skipped), its lenses above it, or a line of a multi-line
+    // ghost text below the cursor line
+    const ghost = this.inlineGhostView(), layout = this.layoutRows(height, ghost);
+    const rows = layout.filter(r => !r.lens && !r.ghost).map(r => r.line);
     const end = Math.max(this.top, ...rows) + 1;
     // long lines get at most 25 ms a frame, so keys are handled between slices
     const done = this.hl.ensure(end, deadline) & this.hl.ensureLong(this.top, end, Math.min(deadline, Date.now() + 25));
@@ -1700,15 +1814,17 @@ class Editor {
     P.text(fit(crumbs + (this.buf.dirty ? " ●" : ""), this.cols), c.barFg, c.bg);
     if (this.buf.dirty) { const w = W.textWidth(crumbs + " ", 8); if (w < this.cols) { P.move(1, w + 1); P.text("●", c.warn, c.bg); } }
 
-    for (let r = 0; r < height; r++) {
-      const sr = src(r), l = sr < 0 ? -2 : rows[sr], folded = l >= 0 && this.folds.has(l);
+    for (let r = 0, k = -1; r < height; r++) {
+      const { line: l, lens, ghost: gk } = layout[r], folded = l >= 0 && this.folds.has(l);
       P.move(r + 2, 1);
-      if (l === -2) { // a ghost text line below the cursor line
+      if (lens) { this.paintLens(P, l, lens); continue; }
+      if (gk) { // a ghost text line below the cursor line
         P.text(" ".repeat(gw), c.fg, c.bg);
-        const x = this.paintGhostTail(P, ghost, r - r0, 0, 0, width, c.bg, () => null, null);
+        const x = this.paintGhostTail(P, ghost, gk, 0, 0, width, c.bg, () => null, null);
         if (x < width) P.text(" ".repeat(width - x), c.fg, c.bg);
         continue;
       }
+      k++; // the line's index in rows (guides)
       if (l < 0) { P.text(" ".repeat(this.cols), c.fg, c.bg); continue; }
       const active = l === this.head.line;
       const spans = []; // this line's squiggles, the most severe first
@@ -1722,14 +1838,14 @@ class Editor {
       while (hi < occ.length && occ[hi].line < l) hi++;
       const lineHits = [];
       for (let k = hi; k < occ.length && occ[k].line === l; k++) lineHits.push(occ[k]);
-      this.paintLine(P, l, lineBg, ss, se, lineMatches, width, { ghost: r === r0 ? ghost : null, guide: guides[sr], brackets: brackets.filter(b => b.line === l), hits: lineHits, hitBg: hits?.bg, problems: spans, folded });
+      this.paintLine(P, l, lineBg, ss, se, lineMatches, width, { ghost: ghost && l === ghost.line ? ghost : null, guide: guides[k], brackets: brackets.filter(b => b.line === l), hits: lineHits, hitBg: hits?.bg, problems: spans, folded });
     }
     this.marks = this.vbar.shown ? this.rulerMarks(ms, hits, problems) : null;
     this.vbar.paint(P, c, this.marks);
     if (this.hbar.shown) { P.move(height + 2, 1); P.text(" ".repeat(this.cols), c.fg, c.bg); this.hbar.paint(P, c); }
 
     if (this.peek) {
-      this.peekRow = Math.max(2, Math.min(this.toView(this.head.line) - this.toView(this.top) + 3, height + 2 - this.peek.height));
+      this.peekRow = Math.max(2, Math.min(this.rowsTo(this.head.line) + 3, height + 2 - this.peek.height));
       this.peek.render(P, this, this.peekRow);
     }
     if (this.panel) this.panel.render(P, this);
@@ -1742,7 +1858,7 @@ class Editor {
     else if (cursor) P.out += `\x1b[${cursor[0]};${cursor[1]}H\x1b[?25h`;
     else {
       const { line, col } = this.head, x = W.displayCol(this.lines[line], col, this.tab) - this.left;
-      const row = this.toView(line) - this.toView(this.top), visible = !this.folds.isHidden(line) && row >= 0 && row < height && x >= 0 && x < width;
+      const row = this.rowsTo(line), visible = !this.folds.isHidden(line) && row >= 0 && row < height && x >= 0 && x < width;
       P.out += visible ? `\x1b[${row + 2};${gw + x + 1}H\x1b[?25h` : "\x1b[?25l";
     }
     return { out: P.out, done };
@@ -1802,13 +1918,33 @@ class Editor {
     }
     return key && Date.now() - this.wordSince >= WORD_DELAY ? w.text : null;
   }
-  // Occurrences to highlight { list: [{ line, col, len }], bg, ruler } or null: exact matches of a one-line selection
+  // The resting word's references from the running language server (documentHighlight: reads in
+  // editor.wordHighlightBackground, writes in editor.wordHighlightStrongBackground), asked once per resting word;
+  // nothing while it answers, null (the plain word occurrences instead) without a server or when it fails.
+  referenceHighlights() {
+    if (!this.lang.live("documentHighlight")) return null;
+    const c = this.colors, key = this.wordKey, buf = this.buf;
+    let req = this._refs;
+    if (req?.key !== key || req.buf !== buf) {
+      req = this._refs = { key, buf, hits: undefined };
+      const done = (hits) => { req.hits = hits; if (this._refs === req) this.redraw(); };
+      this.lang.background("documentHighlight", "highlights", this.langCtx()).then(list => done(list && {
+        list: list.filter(h => h.end.line === h.line && h.end.col > h.col).map(h => ({ line: h.line, col: h.col, len: h.end.col - h.col,
+          bg: h.kind === 3 ? c.wordHighlightStrong : c.wordHighlight, ruler: h.kind === 3 ? c.rulerWordStrong : c.rulerWord }))
+          .sort((a, b) => a.line - b.line || a.col - b.col),
+        bg: c.wordHighlight, ruler: c.rulerWord }), () => done(null));
+    }
+    return req.hits === undefined ? { list: [], bg: c.wordHighlight, ruler: c.rulerWord } : req.hits;
+  }
+  // Occurrences to highlight { list: [{ line, col, len, bg?, ruler? }], bg, ruler } or null: exact matches of a one-line selection
   // (selection highlight), else whole-word matches of the resting word (occurrence highlight). The whole file up to
   // 20,000 lines (for the overview ruler), else the visible lines; cached per text version and needle.
   highlights(height) {
     const [s, e] = this.range(), sel = !this.empty && s.line === e.line ? this.buf.getText(s, e) : null;
     const text = sel?.trim() ? sel : null, word = this.restingWord();
     if (!text && !word) return null;
+    const refs = text ? null : this.referenceHighlights();
+    if (refs) return refs;
     const whole = this.lines.length <= 20000, a = whole ? 0 : this.top, b = whole ? this.lines.length - 1 : this.top + height - 1;
     const key = `${this.buf.version}:${a}:${b}:${text ? "s" + text : "w" + word}`;
     if (this._hits?.key !== key || this._hits.buf !== this.buf) {
@@ -1832,13 +1968,17 @@ class Editor {
     const c = this.colors, text = this.lines[l], g = deco.guide, size = this.tab;
     const selFrom = l < ss.line || l > se.line ? -1 : l === ss.line ? ss.col : 0;
     const selTo = l < ss.line || l > se.line ? -1 : l === se.line ? se.col : Infinity;
-    const cur = this.currentMatchRange();
+    const cur = this.currentMatchRange(), sc = this.prompt?.kind === "find" ? this.find.scope : null;
+    const scopeFrom = !sc || l < sc.start.line || l > sc.end.line ? -1 : l === sc.start.line ? sc.start.col : 0;
+    const scopeTo = sc && l === sc.end.line ? sc.end.col : Infinity;
     const bgAt = (i) => {
       const m = lineMatches.find(m => i >= m.col && i < m.col + m.len);
       if (m) return cur && cur.line === l && cur.col === m.col ? c.match : c.matchOther;
       if (selFrom !== -1 && i >= selFrom && i < selTo) return c.selection;
       if (deco.brackets?.some(b => b.col === i)) return c.bracketMatch;
-      return deco.hits?.some(h => i >= h.col && i < h.col + h.len) ? deco.hitBg : null;
+      const h = deco.hits?.find(h => i >= h.col && i < h.col + h.len);
+      if (h) return h.bg ?? deco.hitBg;
+      return scopeFrom !== -1 && i >= scopeFrom && i < scopeTo ? c.findRange : null;
     };
     // a guide at every indent step the line has, the active block's in its own color
     const guideAt = g?.count ? (k) => (k % size === 0 && k / size < g.count ? (k / size === g.active ? c.guideActive : c.guide) : null) : null;
@@ -1850,7 +1990,8 @@ class Editor {
       if (gx < width) P.text(" ".repeat(width - gx), c.fg, lineBg);
       return;
     }
-    let { x, col } = this.paintText(P, text, this.hl.tokens[l] ?? null, width, this.left, lineBg, bgAt, this.tab, guideAt, curlyAt);
+    const link = this.link?.line === l ? this.link : null;
+    let { x, col } = this.paintText(P, text, this.hl.tokens[l] ?? null, width, this.left, lineBg, bgAt, this.tab, guideAt, curlyAt, link);
     // Selection past the line end shows one cell for the line break, like VS Code.
     if (x < width && selFrom !== -1 && selTo > text.length && col >= this.left) { P.text(" ", c.fg, c.selection); x++; }
     if (deco.folded && x < width && col >= this.left) { const m = " ⋯".slice(0, width - x); P.text(m, c.foldPlaceholder, lineBg); x += m.length; } // VS Code's collapsed marker
@@ -1867,8 +2008,9 @@ class Editor {
   }
   // Paints a line's visible part [left, left+width) with token colors; bgAt(i) overrides the background at UTF-16 index i,
   // guideAt(col) gives an indent guide's color at a display column of the leading whitespace (not over a selection).
-  // curlyAt(i) the squiggle color under UTF-16 index i. Returns { x: cells painted, col: the line's display width }.
-  paintText(P, text, tokens, width, left, lineBg, bgAt, tab, guideAt = null, curlyAt = null) {
+  // curlyAt(i) the squiggle color under UTF-16 index i; link { from, to }: indexes underlined in the link color. Returns
+  // { x: cells painted, col: the line's display width }.
+  paintText(P, text, tokens, width, left, lineBg, bgAt, tab, guideAt = null, curlyAt = null, link = null) {
     const c = this.colors;
     let col = 0, ti = 0, x = 0, i = 0, lead = !!guideAt;
     const right = left + width;
@@ -1882,7 +2024,9 @@ class Editor {
       while (tokens && ti + 2 < tokens.length && tokens[ti + 2] <= i) ti += 2;
       const meta = tokens ? tokens[ti + 1] : 0;
       let fg = tokens ? this.colorMap[H.foregroundOf(meta)] ?? c.fg : c.fg;
-      const style = tokens ? H.fontStyleOf(meta) : 0, bg = bgAt(i) ?? lineBg, curly = curlyAt?.(i) ?? null;
+      let style = tokens ? H.fontStyleOf(meta) : 0;
+      const bg = bgAt(i) ?? lineBg, curly = curlyAt?.(i) ?? null;
+      if (link && i >= link.from && i < link.to) { fg = c.link; style |= 4; }
       const cp = ch.codePointAt(0);
       let w, glyph = ch;
       if (ch === "\t") { w = tab - (col % tab); glyph = " ".repeat(w); }
@@ -1973,7 +2117,7 @@ class Editor {
     if (!p) return null;
     // find widget, top right like VS Code: ▸/▾ (replace) [Find] Aa ab .* N of M ↑ ↓ ×, then [Replace] Replace All
     const w = Math.min(this.cols, 60), x = this.cols - w + 1, f = this.find, compact = w < 40;
-    const fw = w - 3 - (compact ? 0 : 26), hits = this.findHits = [];
+    const fw = w - 3 - (compact ? 0 : 28), hits = this.findHits = [];
     this.findBox = { x, y: 2, w, h: p.replace ? 2 : 1 };
     let row = 2, col = x, cursor = null;
     const at = (r) => { row = r; col = x; P.move(r, x); };
@@ -1988,7 +2132,7 @@ class Editor {
     const field = (name, placeholder) => {
       const value = f[name], shown = W.textWidth(value, 8) > fw - 1 ? "…" + [...value].slice(-(fw - 2)).join("") : value;
       if (name === f.field) cursor = [row, col + 1 + Math.min(fw - 2, W.textWidth(shown, 8))];
-      cells(fit(" " + (shown || placeholder), fw), shown ? c.fg : c.lineNumber, c.input, () => { f.field = name; });
+      cells(fit(" " + (shown || placeholder), fw), shown ? c.fg : c.lineNumber, shown && f.fresh && name === f.field ? c.selection : c.input, () => { f.field = name; f.fresh = false; });
     };
     at(2);
     btn(p.replace ? " ▾" : " ▸", () => { p.replace = !p.replace; f.field = p.replace ? "replace" : "query"; });
@@ -1999,6 +2143,7 @@ class Editor {
       gap(); btn("Aa", () => this.toggleFind("caseSensitive"), f.caseSensitive);
       gap(); btn("ab", () => this.toggleFind("wholeWord"), f.wholeWord);
       gap(); btn(".*", () => this.toggleFind("regex"), f.regex);
+      gap(); btn("≡", () => this.toggleFindInSelection(), !!f.scope); // Find in Selection
       gap(); cells(fit(count, 10), f.query && !n ? c.error : c.fg, c.widget);
       btn(" ↑", () => this.findNext(-1)); btn(" ↓", () => this.findNext(1)); btn(" ×", () => { this.prompt = null; });
     }

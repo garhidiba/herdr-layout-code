@@ -46,19 +46,22 @@ function diagnosticsOf(params) {
 const OPS = { definition: "definitionProvider", typeDefinition: "typeDefinitionProvider", implementation: "implementationProvider",
   references: "referencesProvider", rename: "renameProvider", format: "documentFormattingProvider", refactor: "codeActionProvider",
   source: "codeActionProvider", callHierarchy: "callHierarchyProvider", symbols: "documentSymbolProvider", quickFix: "codeActionProvider",
-  hover: "hoverProvider", selectionRange: "selectionRangeProvider", formatRange: "documentRangeFormattingProvider", workspaceSymbols: "workspaceSymbolProvider" };
+  hover: "hoverProvider", selectionRange: "selectionRangeProvider", formatRange: "documentRangeFormattingProvider", workspaceSymbols: "workspaceSymbolProvider",
+  documentHighlight: "documentHighlightProvider", codeLens: "codeLensProvider" };
 const METHOD_OP = { "textDocument/definition": "definition", "textDocument/typeDefinition": "typeDefinition", "textDocument/implementation": "implementation",
   "textDocument/references": "references", "textDocument/rename": "rename", "textDocument/formatting": "format", "textDocument/codeAction": "refactor",
   "textDocument/prepareCallHierarchy": "callHierarchy", "textDocument/documentSymbol": "symbols", "textDocument/hover": "hover",
-  "textDocument/selectionRange": "selectionRange", "textDocument/rangeFormatting": "formatRange", "workspace/symbol": "workspaceSymbols" };
+  "textDocument/selectionRange": "selectionRange", "textDocument/rangeFormatting": "formatRange", "workspace/symbol": "workspaceSymbols",
+  "textDocument/documentHighlight": "documentHighlight", "textDocument/codeLens": "codeLens" };
 
+const LENS_TITLE = /^\d+ (references?|implementations?)$/i;
 const CLIENT_CAPS = {
   general: { positionEncodings: ["utf-16"] },
   workspace: { applyEdit: true, workspaceEdit: { documentChanges: true }, configuration: true, workspaceFolders: true, symbol: {} },
   textDocument: {
     synchronization: { didSave: true }, definition: { linkSupport: true }, typeDefinition: { linkSupport: true },
     implementation: { linkSupport: true }, references: {}, rename: { prepareSupport: false }, formatting: {}, rangeFormatting: {}, callHierarchy: {},
-    hover: { contentFormat: ["markdown", "plaintext"] }, selectionRange: {},
+    hover: { contentFormat: ["markdown", "plaintext"] }, selectionRange: {}, documentHighlight: {}, codeLens: {},
     documentSymbol: { hierarchicalDocumentSymbolSupport: true },
     codeAction: { codeActionLiteralSupport: { codeActionKind: { valueSet: ["", "quickfix", "refactor", "refactor.extract", "refactor.inline", "refactor.rewrite", "source", "source.organizeImports", "source.fixAll"] } },
       resolveSupport: { properties: ["edit"] }, dataSupport: true },
@@ -179,6 +182,23 @@ class Lsp {
     }).filter(Boolean);
   }
   async symbols(ctx) { return fromLsp(await this.call("textDocument/documentSymbol", { textDocument: { uri: uri(ctx.file) } })); }
+  // [{ line, col, end, kind (1 text, 2 read, 3 write) }]
+  async highlights(ctx) {
+    return ((await this.optional("documentHighlight", "textDocument/documentHighlight", this.tdp(ctx))) ?? [])
+      .filter(h => h?.range).map(h => ({ ...pos(h.range.start), end: pos(h.range.end), kind: h.kind ?? 1 }));
+  }
+  // The server's reference / implementation count lenses (resolved when it resolves them); run / debug lenses are left
+  // out: [{ line, col, title, kind: "references" | "implementation" }].
+  async lenses(ctx) {
+    const out = [];
+    for (let l of ((await this.optional("codeLens", "textDocument/codeLens", { textDocument: { uri: uri(ctx.file) } })) ?? []).slice(0, 200)) {
+      if (!l?.range) continue;
+      if (!l.command && this.caps?.codeLensProvider?.resolveProvider) l = await this.call("codeLens/resolve", l).catch(() => l);
+      const title = l.command?.title ?? "";
+      if (LENS_TITLE.test(title)) out.push({ ...pos(l.range.start), title, kind: /implementation/i.test(title) ? "implementation" : "references" });
+    }
+    return out;
+  }
   async calls(ctx, dir) {
     const items = await this.call("textDocument/prepareCallHierarchy", this.tdp(ctx)) ?? [];
     const out = [];

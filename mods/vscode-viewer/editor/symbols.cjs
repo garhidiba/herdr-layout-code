@@ -94,4 +94,34 @@ function symbolPath(items, pos) {
   return chain;
 }
 
-module.exports = { KINDS, fromLsp, fromNavtree, outline, symbolPath };
+// Where VS Code's TypeScript reference CodeLens go (typescript.referencesCodeLens with showOnAllFunctions): named
+// functions, classes, interfaces, types and enums, enum members, members of classes / interfaces / types (not one
+// starting where its parent does), exported variables. [{ line, col }] at the names (0-based, UTF-16), from the navtree.
+const LENS_MEMBERS = new Set(["method", "getter", "setter", "constructor", "property"]);
+function lensesFromNavtree(tree) {
+  const out = [], seen = new Set();
+  const pos = (x) => ({ line: x.line - 1, col: x.offset - 1 });
+  const same = (a, b) => a && b && a.line === b.line && a.offset === b.offset;
+  const want = (it, parent) => {
+    if (parent?.kind === "enum") return true;
+    switch (it.kind) {
+      case "function": return !!it.nameSpan;
+      case "const": case "let": case "var": return /\bexport\b/.test(it.kindModifiers ?? "");
+      case "class": return it.text !== "<class>";
+      case "interface": case "type": case "enum": return true;
+      default: return LENS_MEMBERS.has(it.kind) && ["class", "interface", "type"].includes(parent?.kind) && !same(parent.spans?.[0]?.start, it.spans?.[0]?.start);
+    }
+  };
+  const walk = (it, parent) => {
+    const start = it.nameSpan?.start ?? it.spans?.[0]?.start;
+    if (start && want(it, parent)) {
+      const p = pos(start), key = `${p.line}:${p.col}`;
+      if (!seen.has(key)) { seen.add(key); out.push(p); }
+    }
+    for (const child of it.childItems ?? []) walk(child, it);
+  };
+  for (const it of tree?.childItems ?? []) walk(it, undefined);
+  return out.sort((a, b) => a.line - b.line || a.col - b.col);
+}
+
+module.exports = { KINDS, fromLsp, fromNavtree, outline, symbolPath, lensesFromNavtree };
