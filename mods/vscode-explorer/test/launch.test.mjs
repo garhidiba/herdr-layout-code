@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, chmodSync } from "node:fs";
+import { mkdtempSync, writeFileSync, chmodSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { directRun, createOpenTab } from "../launch.js";
@@ -84,3 +84,7 @@ test("a tab Herdr never shows is ended and opened with tab.new instead", async (
   assert.deepEqual(h.calls, [["tab.new", editor]]);
 });
 
+test("vscode-settings carries the same launch.js", () => {
+  const read = (mod) => readFileSync(new URL(`../../${mod}/launch.js`, import.meta.url), "utf8");
+  assert.equal(read("vscode-settings"), read("vscode-explorer"));
+});

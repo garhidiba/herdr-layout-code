@@ -7,12 +7,14 @@
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { theme, props, run, exec, appHome, readTextFile, writeTextFile, closeOverlay, keys } from "herdr";
+import { theme, props, run, exec, hc, spaces, appHome, readTextFile, writeTextFile, closeOverlay, keys } from "herdr";
 import { FILE, normalize, parse, loose, withSetting, withDefaults, rewrite, updateFile, stepDelay, coreStatus, coreCurrent, DEFAULTS,
   PAGE_FILE, requestedPage } from "./settings.js";
 import { FILE as KB_FILE, fromHerdr, label, matchesRow, conflicts, parseFile, serializeFile, withKey, withoutKey, withReset,
   hasUserEntries, herdrRoute, withPassthrough } from "./keybindings.js";
+import { createOpenTab } from "./launch.js";
 
+const openTab = createOpenTab({ hc, run, spaces });
 const settingsPath = () => `${appHome()}/${FILE}`;
 const kbPath = () => `${appHome()}/${KB_FILE}`;
 const keysPath = () => `${appHome()}/keys.json`;
@@ -174,14 +176,17 @@ export default class Settings extends View {
     run("tab.new", { name: "Build Rust core", folder: appHome(), argv: ["sh", `${appHome()}/mods/vscode-settings/build-core.sh`, appHome()] });
   }
 
-  openJson(name, path) {
-    closeOverlay(props().overlay);
-    run("tab.new", { name, folder: appHome(), argv: ["exec", "node", `${appHome()}/${EDITOR}`, path] }); // exec: the tab closes with the editor
+  // The dialog closes once the editor tab is shown: closing first could end the wait (see launch.js).
+  async openJson(name, path, cx) {
+    if (this.opening) return;
+    this.opening = true;
+    try { await openTab({ name, folder: appHome(), argv: ["exec", "node", `${appHome()}/${EDITOR}`, path] }, cx); } // exec: the tab closes with the editor
+    finally { this.opening = false; closeOverlay(props().overlay); }
   }
   openKeysJson(cx) {
-    cx.spawn(async () => {
+    cx.spawn(async (cx) => {
       if (this.kbText == null) await writeTextFile(kbPath(), "[]\n", null).catch(() => {}); // the editor opens a missing file as new, but empty
-      this.openJson(KB_FILE, kbPath());
+      await this.openJson(KB_FILE, kbPath(), cx);
     });
   }
 
@@ -363,7 +368,7 @@ export default class Settings extends View {
       .child(keysOn ? this.keysPage(t) : this.settingsPage(t))
       .child(h_flex().h(52).px(18).gap(8).items_center().border_t(1).border_color(t.border)
         .when(!keysOn, (el) => el
-          .child(this.button(t, "open-json", "Open settings.json", () => this.openJson(FILE, settingsPath())))
+          .child(this.button(t, "open-json", "Open settings.json", (_e, cx) => cx.spawn((cx) => this.openJson(FILE, settingsPath(), cx))))
           .child(this.button(t, "reset", "Reset to defaults", (_e, cx) => this.write(withDefaults, cx))))
         .when(keysOn, (el) => el.child(this.button(t, "open-kb-json", `Open ${KB_FILE}`, (_e, cx) => this.openKeysJson(cx))))
         .child(div().flex_1())
