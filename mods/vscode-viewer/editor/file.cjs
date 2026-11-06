@@ -23,14 +23,16 @@ function encode(lines, { eol = "\n", finalNewline = false, bom = false } = {}) {
   return (bom ? "﻿" : "") + lines.join(eol) + (finalNewline ? eol : "");
 }
 
-// VS Code-style guess: Tabs when most indented lines start with a tab, else the most common small space step.
-function detectIndent(lines) {
+// VS Code-style guess: Tabs when most indented lines start with a tab, else the most common small space step;
+// `fallback` when no line is indented.
+function detectIndent(lines, fallback = { useTabs: false, size: 4 }) {
   let tabs = 0; const steps = {};
   for (const l of lines.slice(0, 2000)) {
     if (l.startsWith("\t")) tabs++;
     else { const m = l.match(/^( +)\S/); if (m && m[1].length <= 8) steps[m[1].length] = (steps[m[1].length] ?? 0) + 1; }
   }
   const spaceLines = Object.values(steps).reduce((a, b) => a + b, 0);
+  if (!tabs && !spaceLines) return { ...fallback };
   const size = Object.keys(steps).map(Number).sort((a, b) => a - b).find(k => steps[k] >= Math.max(Math.min(2, spaceLines), spaceLines * 0.1)) ?? 4;
   return tabs > spaceLines ? { useTabs: true, size: 4 } : { useTabs: false, size };
 }

@@ -1,5 +1,7 @@
 #!/usr/bin/env node
-// A VS Code-like terminal editor: VS Code's own tokenizer and One Dark colors, Ctrl shortcuts, mouse, IME-friendly cursor.
+// A VS Code-like terminal editor: VS Code's own tokenizer and One Dark colors, VS Code's macOS keys (⌘ through the Kitty
+// keyboard protocol, Ctrl as fallback), its editor context menu and command palette, language intelligence (lang/),
+// mouse, IME-friendly cursor, auto save and hot exit.
 // usage: node vsedit.cjs <file>
 const fs = require("fs");
 const os = require("os");
@@ -11,60 +13,15 @@ const F = require("./file.cjs");
 const L = require("./language.cjs");
 const H = require("./highlight.cjs");
 const { parse } = require("./keys.cjs");
-
-// ---------- colors ----------
-const hex = (c) => [1, 3, 5].map(i => parseInt(c.slice(i, i + 2), 16));
-const opaque = (c) => (typeof c === "string" && /^#[0-9a-f]{6}$/i.test(c) ? c.toLowerCase() : null);
-// Alpha color (#rrggbbaa) composited over an opaque one.
-function blend(c, under) {
-  if (opaque(c)) return opaque(c);
-  if (!/^#[0-9a-f]{8}$/i.test(c ?? "")) return under;
-  const a = parseInt(c.slice(7, 9), 16) / 255, top = hex(c), bot = hex(under);
-  return "#" + top.map((v, i) => Math.round(v * a + bot[i] * (1 - a)).toString(16).padStart(2, "0")).join("");
-}
-function paletteOf(colors = {}) {
-  const bg = opaque(colors["editor.background"]) ?? "#282c34";
-  const selection = opaque(colors["editor.selectionBackground"]) ?? "#3e4451";
-  const matchOther = blend(colors["editor.findMatchHighlightBackground"] ?? "#528bff3d", bg);
-  return {
-    bg, fg: opaque(colors["editor.foreground"]) ?? "#abb2bf", selection,
-    lineNumber: opaque(colors["editorLineNumber.foreground"]) ?? "#636d83",
-    lineNumberActive: opaque(colors["editorLineNumber.activeForeground"]) ?? "#abb2bf",
-    currentLine: opaque(colors["editor.lineHighlightBackground"]) ?? "#2c313c",
-    match: opaque(colors["editor.findMatchBackground"]) ?? "#42557b", matchOther,
-    warn: "#e5c07b", error: "#e06c75", ok: "#98c379",
-    bar: opaque(colors["statusBar.background"]) ?? "#21252b", barFg: opaque(colors["statusBar.foreground"]) ?? "#9da5b4",
-    widget: opaque(colors["editorWidget.background"]) ?? "#21252b", input: opaque(colors["input.background"]) ?? "#1b1d23",
-    cursor: opaque(colors["editorCursor.foreground"]) ?? "#528bff",
-  };
-}
-const fgSGR = (c) => { const [r, g, b] = hex(c); return `\x1b[38;2;${r};${g};${b}m`; };
-const bgSGR = (c) => { const [r, g, b] = hex(c); return `\x1b[48;2;${r};${g};${b}m`; };
-const styleSGR = (s) => "\x1b[22;23;24;29m" + (s & 1 ? "\x1b[3m" : "") + (s & 2 ? "\x1b[1m" : "") + (s & 4 ? "\x1b[4m" : "") + (s & 8 ? "\x1b[9m" : "");
-
-// Paints cells, emitting SGR only when an attribute changes.
-class Painter {
-  constructor() { this.out = ""; this.fg = this.bg = null; this.style = -1; }
-  set(fg, bg, style = 0) {
-    if (style !== this.style) { this.out += styleSGR(style); this.style = style; }
-    if (fg !== this.fg) { this.out += fgSGR(fg); this.fg = fg; }
-    if (bg !== this.bg) { this.out += bgSGR(bg); this.bg = bg; }
-  }
-  text(s, fg, bg, style = 0) { this.set(fg, bg, style); this.out += s; }
-  move(row, col) { this.out += `\x1b[${row};${col}H`; }
-}
-
-// Fits text into `width` display columns (cut with …, or padded).
-function fit(s, width) {
-  if (width <= 0) return "";
-  let out = "", w = 0;
-  for (const ch of s) {
-    const cw = W.charWidth(ch.codePointAt(0));
-    if (w + cw > width) { while (w > width - 1) { const last = [...out].pop(); out = out.slice(0, -last.length); w -= W.charWidth(last.codePointAt(0)); } return out + "…" + " ".repeat(width - 1 - w); }
-    out += ch; w += cw;
-  }
-  return out + " ".repeat(width - w);
-}
+const { blend, paletteOf, Painter, fit } = require("./paint.cjs");
+const C = require("./commands.cjs");
+const O = require("./overlays.cjs");
+const S = require("./settings.cjs");
+const B = require("./backup.cjs");
+const Lang = require("./lang/index.cjs");
+const { applyWorkspaceEdit, lastFirst } = require("./lang/edits.cjs");
+const { wordOccurrences, Fallback } = require("./lang/fallback.cjs");
+const { gitRoot, run, which } = require("./lang/proc.cjs");
 
 // VS Code's "Col": characters before the cursor, tabs counted to the next tab stop.
 function visibleColumn(line, index, tab) {
@@ -89,30 +46,50 @@ function wordLeft(line, col) {
 }
 
 // ---------- the editor ----------
+const DOC_FIELDS = ["file", "doc", "buf", "hl", "indent", "scope", "language", "comment", "crumbs", "root", "session", "sel", "goal", "top", "left", "seenVersion"];
+const NOT_FOUND = { definition: "definition", typeDefinition: "type definition", implementation: "implementation", references: "references" };
+const PEEK_TITLE = { definition: "Definition", typeDefinition: "Type Definition", implementation: "Implementations", references: "References" };
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+const stampText = (ms) => { const d = new Date(ms), p = (n) => String(n).padStart(2, "0"); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; };
+
 class Editor {
-  constructor(file, doc, { grammar, colorMap, textmate }, theme, scope) {
-    this.file = file; this.doc = doc;
-    this.buf = new TextBuffer(doc.lines);
-    this.indent = F.detectIndent(this.buf.lines);
-    this.scope = scope; this.language = L.languageName(grammar ? scope : null); this.comment = L.commentOf(scope);
+  // settings: S.normalize()d values (the file is read by main, not here).
+  constructor(file, doc, { grammar, colorMap, textmate }, theme, scope, settings = S.normalize()) {
+    this.theme = theme; this.textmate = textmate; this.settings = settings;
     this.colors = paletteOf(theme.colors);
     this.colorMap = colorMap.map(c => (c ? c.slice(0, 7).toLowerCase() : this.colors.fg));
-    this.hl = new H.Highlighter(grammar, textmate.INITIAL, this.buf.lines);
-    this.buf.listeners.push((s, r, n) => this.hl.onEdit(s, r, n));
-    this.sel = caret({ line: 0, col: 0 });
-    this.goal = null; this.top = 0; this.left = 0;
+    this.docs = new Map(); this.loading = new Map(); this.fileLines = new Map();
+    Object.assign(this, this.makeState(file, doc, grammar, scope));
     this.prompt = null; this.message = null; this.find = { query: "", replace: "", field: "query", matches: [], version: -1 };
+    this.popup = null; this.panel = null; this.peek = null; // overlays (popup: menu, picker, input or dialog)
+    this.back = []; this.forward = [];                       // navigation history: { file, pos, top }
     this.clip = { text: "", whole: false };
     this.lastClick = { time: 0, line: -1, col: -1 }; this.dragging = false;
-    this.crumbs = breadcrumbs(file);
     this.rows = 24; this.cols = 80;
+    this.redraw = () => {}; this.onExit = null; this.autoTimer = null;
   }
+
+  // Everything that belongs to one open file; switching files swaps these fields.
+  makeState(file, doc, grammar, scope) {
+    const buf = new TextBuffer(doc.lines), hl = new H.Highlighter(grammar, this.textmate.INITIAL, buf.lines);
+    buf.listeners.push((s, r, n) => hl.onEdit(s, r, n));
+    const fallback = { useTabs: !this.settings["editor.insertSpaces"], size: this.settings["editor.tabSize"] };
+    return { file, doc, buf, hl, indent: F.detectIndent(buf.lines, fallback), scope, language: L.languageName(grammar ? scope : null),
+      comment: L.commentOf(scope), crumbs: breadcrumbs(file), root: gitRoot(file), session: null, sel: caret({ line: 0, col: 0 }),
+      goal: null, top: 0, left: 0, seenVersion: 0 };
+  }
+  snapshot() { const st = {}; for (const k of DOC_FIELDS) st[k] = this[k]; return st; }
+  activate(st) { this.docs.set(this.file, this.snapshot()); Object.assign(this, st); this.docs.set(st.file, st); }
+  // The current file first, then every other open file.
+  allStates() { return [this.snapshot(), ...[...this.docs.values()].filter(s => s.file !== this.file)]; }
+  get lang() { return (this.session ??= new Lang.Session(this.file, this.scope)); }
+  get index() { return (this._index ??= H.loadIndex()); }
 
   get lines() { return this.buf.lines; }
   get tab() { return this.indent.size; }
   get head() { return this.sel.head; }
   get empty() { return cmp(this.sel.anchor, this.sel.head) === 0; }
-  get height() { return Math.max(1, this.rows - 2); }
+  get height() { return Math.max(1, this.rows - 2 - (this.panel ? this.panel.height(this) : 0)); }
   get gutter() { return Math.max(3, String(this.lines.length).length) + 3; }
   get textWidth() { return Math.max(1, this.cols - this.gutter); }
   range() { return ordered(this.sel.anchor, this.sel.head); }
@@ -342,107 +319,444 @@ class Editor {
   }
 
   // ----- files -----
-  saveFile(force = false) {
+  // Saves the current file (format on save, trim, final newline from the settings). Resolves true when written.
+  async saveFile(force = false, { auto = false } = {}) {
     if (!force && F.changedOnDisk(this.file, this.doc.stamp)) {
-      return this.choose("The file has been changed on disk.", [["o", "Overwrite", () => this.saveFile(true)], ["r", "Reload", () => this.reload()], ["c", "Cancel", () => {}]]);
+      if (auto) return false;
+      return new Promise(resolve => this.dialog("The file has been changed on disk.", `Overwrite ${path.basename(this.file)} with your version, or reload it?`, [
+        { label: "Overwrite", key: "o", run: () => resolve(this.saveFile(true)) },
+        { label: "Reload", key: "r", run: () => { this.reload(); resolve(false); } },
+        { label: "Cancel", key: "c", cancel: true, run: () => resolve(false) }]));
     }
+    if (this.settings["editor.formatOnSave"] && this.lang.can("format")) {
+      try { this.applyLocalEdits(await this.lang.run("format", "format", this.langCtx())); } catch (e) { this.say(`Format on save: ${e.message}`, this.colors.warn, 5000); }
+    }
+    if (this.settings["files.trimTrailingWhitespace"]) this.trimTrailing();
+    if (this.settings["files.insertFinalNewline"] && this.lines.join("")) this.doc.finalNewline = true;
     try {
       this.doc.stamp = F.save(this.file, F.encode(this.lines, this.doc));
-      this.buf.markSaved(); this.buf.seal();
-      this.say("Saved", this.colors.ok);
+      this.buf.markSaved(); this.buf.seal(); B.remove(this.file);
+      this.session?.saved(this.file);
+      if (!auto) this.say("Saved", this.colors.ok);
       return true;
     } catch (e) { this.say(`Failed to save: ${e.message}`, this.colors.error, 8000); return false; }
+    finally { this.redraw(); }
+  }
+  // Writes another open file as it is (rename across files, auto save).
+  writeState(st) {
+    try { st.doc.stamp = F.save(st.file, F.encode(st.buf.lines, st.doc)); st.buf.markSaved(); B.remove(st.file); return true; }
+    catch (e) { this.say(`Failed to save ${path.basename(st.file)}: ${e.message}`, this.colors.error, 8000); return false; }
+  }
+  trimTrailing() {
+    const edits = [];
+    this.lines.forEach((t, line) => { const n = t.trimEnd().length; if (n < t.length) edits.push({ line, col: n, remove: t.length - n, text: "" }); });
+    this.lineEdits(edits);
   }
   reload() {
     let doc;
     try { doc = F.load(this.file); } catch (e) { return this.say(`Failed to reload: ${e.message}`, this.colors.error, 8000); }
     if (doc.error) return this.say(doc.error, this.colors.error, 8000);
-    const last = this.lines.length - 1, before = this.sel;
-    this.buf.edit([{ start: { line: 0, col: 0 }, end: { line: last, col: this.lines[last].length }, text: doc.lines.join("\n") }], { before });
+    this.replaceAll(doc.lines.join("\n"));
     Object.assign(this.doc, { eol: doc.eol, finalNewline: doc.finalNewline, bom: doc.bom, stamp: doc.stamp });
     this.buf.markSaved();
-    this.moveTo(this.buf.clamp(before.head));
     this.say("Reloaded from disk");
   }
+  // The whole text replaced as one undo step, keeping the cursor where it was.
+  replaceAll(text, at = this.head) {
+    const last = this.lines.length - 1, before = this.sel;
+    this.buf.edit([{ start: { line: 0, col: 0 }, end: { line: last, col: this.lines[last].length }, text }], { before });
+    this.moveTo(this.buf.clamp(at));
+  }
+  // Asks about each unsaved file, then exits.
   quit() {
-    if (!this.buf.dirty) return this.exit();
-    this.choose(`Do you want to save the changes you made to ${path.basename(this.file)}?`,
-      [["s", "Save", () => { if (this.saveFile() === true) this.exit(); }], ["d", "Don't Save", () => this.exit()], ["c", "Cancel", () => {}]]);
+    const st = this.allStates().find(s => s.buf.dirty);
+    if (!st) return this.exit();
+    const ask = () => this.dialog(`Do you want to save the changes you made to ${path.basename(this.file)}?`, "Your changes will be lost if you don't save them.", [
+      { label: "Save", key: "s", run: () => this.saveFile().then(ok => { if (ok) this.quit(); }) },
+      { label: "Don't Save", key: "d", run: () => { B.remove(this.file); this.buf.markSaved(); this.quit(); } },
+      { label: "Cancel", key: "c", cancel: true, run: () => {} }]);
+    if (st.file === this.file) return ask();
+    this.track(this.open(st.file, null, false).then(ask));
+  }
+  // Hot exit: unsaved files go to backups (synchronous: runs right before the process ends).
+  hotExit() {
+    for (const st of this.allStates()) if (st.buf.dirty) { try { B.write(st.file, st.buf.lines.join("\n"), st.sel.head); } catch {} }
+  }
+  // Offers a hot-exit backup of the current file back.
+  offerBackup() {
+    const b = B.read(this.file);
+    if (!b) return;
+    if (b.text === this.lines.join("\n")) return B.remove(this.file);
+    const changed = B.changedSince(b, this.file);
+    this.dialog(`Restore unsaved changes from ${stampText(b.time)}?`,
+      changed ? "Warning: the file has changed on disk since then." : `Unsaved changes to ${path.basename(this.file)} were kept when the editor closed.`, [
+        { label: "Restore", key: "r", run: () => { this.replaceAll(b.text, b.cursor ?? this.head); this.say("Restored unsaved changes"); } },
+        { label: "Discard", key: "d", run: () => B.remove(this.file) }]);
   }
 
-  // ----- prompts -----
-  choose(text, options) { this.prompt = { kind: "choice", text, options }; }
+  // ----- other files and navigation -----
+  async loadState(file) {
+    let doc;
+    try { doc = F.load(file); } catch (e) { this.say(`Cannot open ${path.basename(file)}: ${e.message}`, this.colors.error, 6000); return null; }
+    if (doc.error) { this.say(doc.error, this.colors.error, 6000); return null; }
+    const scope = L.scopeOf(this.index, path.basename(file));
+    const { grammar } = await H.loadGrammar(scope, this.index, this.theme);
+    const st = this.docs.get(file) ?? this.makeState(file, doc, grammar, scope);
+    this.docs.set(file, st);
+    return st;
+  }
+  // The state of an open (or being loaded) file for drawing; null while it loads.
+  docFor(file) {
+    if (file === this.file) return this;
+    const st = this.docs.get(file);
+    if (st) return st;
+    if (!this.loading.has(file)) this.loading.set(file, this.loadState(file).finally(() => { this.loading.delete(file); this.redraw(); }));
+    return null;
+  }
+  // Shows `file` (loading it once), optionally at pos; record = remember where we were for Go Back.
+  async open(file, pos = null, record = true) {
+    file = path.resolve(file);
+    if (record) this.pushNav();
+    if (file !== this.file) {
+      const st = this.docs.get(file) ?? await (this.loading.get(file) ?? this.loadState(file));
+      if (!st) { if (record) this.back.pop(); return false; }
+      const first = !this.docs.has(file) || st.seenVersion === 0;
+      this.activate(st);
+      if (first) this.offerBackup();
+    }
+    if (pos) { this.moveTo(pos); this.top = Math.max(0, this.head.line - Math.floor(this.height / 3)); }
+    this.redraw();
+    return true;
+  }
+  jumpTo(loc) { return this.track(this.open(loc.file, { line: loc.line, col: loc.col })); }
+  pushNav() { this.back.push({ file: this.file, pos: { ...this.head }, top: this.top }); if (this.back.length > 50) this.back.shift(); this.forward = []; }
+  navigate(dir) {
+    const from = dir < 0 ? this.back : this.forward, to = dir < 0 ? this.forward : this.back, e = from.pop();
+    if (!e) return;
+    to.push({ file: this.file, pos: { ...this.head }, top: this.top });
+    return this.track(this.open(e.file, null, false).then(() => { this.moveTo(e.pos); this.top = e.top; }));
+  }
+
+  // ----- prompts and overlays -----
+  dialog(title, detail, buttons) { this.popup = new O.Dialog({ title, detail, buttons }); }
+  closePopup() { this.popup = null; }
   openFind(replace) {
     const [s, e] = this.range();
     if (!this.empty && s.line === e.line) this.find.query = this.buf.getText(s, e);
     this.find.field = replace && this.find.query ? "replace" : "query";
     this.prompt = { kind: "find", replace, origin: this.sel };
   }
-  openGoto() { this.prompt = { kind: "goto", text: "" }; }
+  findAgain(dir) {
+    const [s, e] = this.range();
+    if (!this.find.query && !this.empty && s.line === e.line) this.find.query = this.buf.getText(s, e);
+    if (!this.find.query) return this.openFind(false);
+    this.findNext(dir);
+  }
+  openGoto() { this.popup = new O.Input({ label: `Go to line (1-${this.lines.length}), :col optional:`, onAccept: (v) => this.gotoText(v) }); }
+  gotoText(text) {
+    const [ln, col] = text.split(/[:,]/).map(Number);
+    if (!ln) return;
+    const line = Math.max(0, Math.min(this.lines.length, ln) - 1);
+    this.moveTo({ line, col: col ? col - 1 : 0 });
+    this.top = Math.max(0, line - Math.floor(this.height / 2));
+  }
+  // Screen cell under a buffer position (row, col), for popups placed at the cursor.
+  screenOf(p) { return { row: p.line - this.top + 2, col: this.gutter + W.displayCol(this.lines[p.line], p.col, this.tab) - this.left + 1 }; }
+  openMenu(x, y) { this.popup = new O.Menu(C.menuRows(C.MENU, cap => this.lang.can(cap)), x, y); }
+  openMenuAtCursor() { const s = this.screenOf(this.head); this.openMenu(Math.max(1, s.col), Math.min(this.rows, s.row + 1)); }
+  openPicker(prefix) {
+    this.popup = new O.Picker(prefix, (t) => this.pickItems(t), "Search files by name (: to go to a line, > for commands)");
+  }
+  pickItems(text) {
+    if (text.startsWith(">")) {
+      return C.filter(C.COMMANDS, text.slice(1).trim(), c => c.title).map(({ item, hits }) => ({ label: item.title, hits, key: item.key,
+        detail: item.run === "toggleAutoSave" || item.run === "askAutoSaveDelay" ? S.autoSaveLabel(this.settings) : "", run: () => this.runCommand(item.id) }));
+    }
+    if (text.startsWith(":")) return [{ label: text.length > 1 ? `Go to line ${text.slice(1)}` : "Type a line number to go to", run: () => this.gotoText(text.slice(1)) }];
+    return C.filter(this.projectFiles(), text.trim(), f => f).slice(0, 300)
+      .map(({ item, hits }) => ({ label: item, hits, run: () => this.track(this.open(path.join(this.root, item))) }));
+  }
+  // Files of the git root (git ls-files), else up to 20,000 files found under the file's folder.
+  projectFiles() {
+    if (this._files?.root === this.root) return this._files.list;
+    let list = [];
+    const r = fs.existsSync(path.join(this.root, ".git")) ? run("git", ["ls-files", "-co", "--exclude-standard"], { cwd: this.root, timeout: 5000 }) : null;
+    if (r && r.code === 0) list = r.stdout.split("\n").filter(Boolean);
+    else {
+      const walk = (dir, depth) => {
+        if (list.length >= 20000 || depth > 8) return;
+        let ents = [];
+        try { ents = fs.readdirSync(path.join(this.root, dir), { withFileTypes: true }); } catch { return; }
+        for (const e of ents) {
+          if (e.name === ".git" || e.name === "node_modules") continue;
+          const rel = dir ? `${dir}/${e.name}` : e.name;
+          if (e.isDirectory()) walk(rel, depth + 1); else if (list.length < 20000) list.push(rel);
+        }
+      };
+      walk("", 0);
+    }
+    this._files = { root: this.root, list };
+    return list;
+  }
 
   promptKey(ev) {
-    const p = this.prompt;
-    if (p.kind === "choice") {
-      if (ev.type !== "key" && ev.type !== "text") return;
-      const k = (ev.type === "text" ? ev.text : ev.name).toLowerCase();
-      if (k === "escape") return (this.prompt = null);
-      const opt = p.options.find(o => o[0] === k) ?? (k === "enter" ? p.options[0] : null);
-      if (opt) { this.prompt = null; opt[2](); }
-      return;
-    }
-    const field = p.kind === "goto" ? "text" : this.find.field, holder = p.kind === "goto" ? p : this.find;
-    const set = (v) => { holder[field] = v; if (p.kind === "find" && field === "query") this.findNext(1, ordered(p.origin.anchor, p.origin.head)[0]); };
-    if (ev.type === "text" || ev.type === "paste") return set(holder[field] + ev.text.split(/\r?\n|\r/)[0]);
+    const p = this.prompt, f = this.find;
+    const set = (v) => { f[f.field] = v; if (f.field === "query") this.findNext(1, ordered(p.origin.anchor, p.origin.head)[0]); };
+    if (ev.type === "text" || ev.type === "paste") return set(f[f.field] + ev.text.split(/\r?\n|\r/)[0]);
     if (ev.type !== "key") return;
-    const { name, shift, ctrl, alt } = ev;
+    const { name, shift, ctrl, alt, cmd } = ev, chord = C.chordOf(ev);
     if (name === "escape") { this.prompt = null; return; }
-    if (name === "backspace") return set([...holder[field]].slice(0, -1).join(""));
-    if (p.kind === "goto") {
-      if (name !== "enter") return;
-      this.prompt = null;
-      const [ln, col] = p.text.split(/[:,]/).map(Number);
-      if (!ln) return;
-      const line = Math.max(0, Math.min(this.lines.length, ln) - 1);
-      this.moveTo({ line, col: col ? col - 1 : 0 });
-      this.top = Math.max(0, line - Math.floor(this.height / 2));
-      return;
-    }
-    if (name === "tab" && p.replace) { this.find.field = this.find.field === "query" ? "replace" : "query"; return; }
-    if (ctrl && name === "h") { p.replace = true; this.find.field = "replace"; return; }
-    if (ctrl && name === "f") { p.replace = false; this.find.field = "query"; return; }
-    if (name === "enter" && alt && p.replace) return this.replaceAll();
-    if (name === "enter" && this.find.field === "replace") return this.replaceOne();
+    if (name === "backspace") return set([...f[f.field]].slice(0, -1).join(""));
+    if (name === "tab" && p.replace) { f.field = f.field === "query" ? "replace" : "query"; return; }
+    if (chord === "ctrl+h" || chord === "cmd+alt+f") { p.replace = true; f.field = "replace"; return; }
+    if (chord === "ctrl+f" || chord === "cmd+f") { p.replace = false; f.field = "query"; return; }
+    if (name === "enter" && (alt || cmd) && p.replace) return this.replaceAll();
+    if (name === "enter" && f.field === "replace") return this.replaceOne();
+    if (name === "g" && cmd) return this.findNext(shift ? -1 : 1);
     if (name === "enter" || name === "f3" || name === "down") return this.findNext(shift ? -1 : 1);
     if (name === "up") return this.findNext(-1);
+    void ctrl;
   }
+
+  // ----- commands -----
+  runCommand(id) {
+    const c = C.BY_ID.get(id);
+    if (!c) return;
+    if (c.cap && !this.lang.can(c.cap)) return this.say(`No ${c.title.replace(/\.\.\.$/, "").toLowerCase()} support for ${this.language}`, this.colors.warn);
+    return this[c.run](...(c.args ?? []));
+  }
+  // Runs an async operation; its error becomes the status message, and the screen redraws when it ends.
+  track(promise) {
+    return Promise.resolve(promise).catch(e => this.say(e?.message ?? String(e), this.colors.warn, 5000)).finally(() => this.redraw());
+  }
+  selectAll() { this.sel = { anchor: { line: 0, col: 0 }, head: { line: this.lines.length - 1, col: this.lines[this.lines.length - 1].length } }; this.buf.seal(); }
+  // The word under/before p: { text, start, end } or null.
+  wordAt(p = this.head) {
+    const t = this.lines[p.line];
+    let s = p.col, e = p.col;
+    while (s > 0 && classOf(t[s - 1]) === 1) s--;
+    while (e < t.length && classOf(t[e]) === 1) e++;
+    return s < e ? { text: t.slice(s, e), start: { line: p.line, col: s }, end: { line: p.line, col: e } } : null;
+  }
+  // ⌘D without multiple cursors: select the word, then move the selection to the next occurrence.
+  selectNextOccurrence() {
+    if (this.empty) { const w = this.wordAt(); if (w) { this.sel = { anchor: w.start, head: w.end }; this.buf.seal(); } return; }
+    const [s, e] = this.range(), text = this.buf.getText(s, e);
+    if (text.includes("\n")) return;
+    const n = this.lines.length;
+    for (let k = 0; k <= n; k++) {
+      const l = (e.line + k) % n, from = k === 0 ? e.col : 0, i = this.lines[l].indexOf(text, from);
+      if (i !== -1 && !(k === n && i >= s.col)) { this.sel = { anchor: { line: l, col: i }, head: { line: l, col: i + text.length } }; this.buf.seal(); this.reveal(); return; }
+    }
+  }
+  deleteLines() {
+    const [a, b] = this.selectedLines(), last = this.lines.length - 1, col = this.head.col;
+    if (b < last) this.deleteRange({ line: a, col: 0 }, { line: b + 1, col: 0 });
+    else if (a > 0) this.deleteRange({ line: a - 1, col: this.lines[a - 1].length }, { line: b, col: this.lines[b].length });
+    else this.deleteRange({ line: 0, col: 0 }, { line: b, col: this.lines[b].length });
+    this.moveTo({ line: Math.min(a, this.lines.length - 1), col });
+  }
+  // Swaps the selected lines with the line above (dir -1) or below (1).
+  moveLines(dir) {
+    const [a, b] = this.selectedLines();
+    if ((dir < 0 && a === 0) || (dir > 0 && b === this.lines.length - 1)) return;
+    const block = this.lines.slice(a, b + 1), from = dir < 0 ? a - 1 : a, to = dir < 0 ? b : b + 1;
+    const text = (dir < 0 ? [...block, this.lines[a - 1]] : [this.lines[b + 1], ...block]).join("\n");
+    const shift = (p) => ({ line: p.line + dir, col: p.col }), before = this.sel, after = { anchor: shift(this.sel.anchor), head: shift(this.sel.head) };
+    this.buf.edit([{ start: { line: from, col: 0 }, end: { line: to, col: this.lines[to].length }, text }], { before, after });
+    this.sel = after; this.buf.seal(); this.reveal();
+  }
+  copyLines(dir) {
+    const [a, b] = this.selectedLines(), block = this.lines.slice(a, b + 1).join("\n"), n = b - a + 1;
+    const before = this.sel, shift = (p) => ({ line: p.line + (dir > 0 ? n : 0), col: p.col }), after = { anchor: shift(this.sel.anchor), head: shift(this.sel.head) };
+    this.buf.edit([{ start: { line: b, col: this.lines[b].length }, text: "\n" + block }], { before, after });
+    this.sel = after; this.buf.seal(); this.reveal();
+  }
+  insertLine(below) {
+    const l = this.head.line, indent = this.lines[l].match(/^[\t ]*/)[0], before = this.sel;
+    const at = below ? { line: l, col: this.lines[l].length } : { line: l, col: 0 }, pos = { line: below ? l + 1 : l, col: indent.length };
+    this.buf.edit([{ start: at, text: below ? "\n" + indent : indent + "\n" }], { before, after: caret(pos) });
+    this.moveTo(pos);
+  }
+
+  // ----- language features -----
+  langCtx() {
+    const [s, e] = this.range(), { line, col } = this.head;
+    return { file: this.file, lines: this.lines, line, col, sel: { start: s, end: e }, tabSize: this.tab, insertSpaces: !this.indent.useTabs,
+      word: this.wordAt()?.text ?? "", language: this.language };
+  }
+  locate(kind) { return this.lang.run(kind, kind, this.langCtx()); }
+  noResult(kind) { const w = this.wordAt()?.text; this.say(`No ${NOT_FOUND[kind]} found${w ? ` for '${w}'` : ""}`, this.colors.warn); }
+  goTo(kind) {
+    return this.track(this.locate(kind).then(locs => {
+      if (!locs.length) return this.noResult(kind);
+      if (locs.length === 1) return this.jumpTo(locs[0]);
+      this.showPanel(PEEK_TITLE[kind], locs);
+    }));
+  }
+  peekAt(kind) {
+    return this.track(this.locate(kind).then(locs => {
+      if (!locs.length) return this.noResult(kind);
+      this.peek = new O.Peek(PEEK_TITLE[kind], locs);
+      const row = this.head.line - this.top; // keep the box on screen below the cursor line
+      if (row + this.peek.height >= this.height) this.top = Math.max(0, this.head.line - Math.max(0, this.height - this.peek.height - 1));
+    }));
+  }
+  findAll(kind) {
+    return this.track(this.locate(kind).then(locs => (locs.length ? this.showPanel(PEEK_TITLE[kind], locs) : this.noResult(kind))));
+  }
+  callHierarchy(dir = "incoming", ctx = this.langCtx()) {
+    return this.track(this.lang.run("callHierarchy", "calls", ctx, dir).then(items => {
+      for (const it of items) if (it.name?.includes("/")) it.name = path.basename(it.name);
+      const other = dir === "incoming" ? "outgoing" : "incoming";
+      this.showPanel(`${dir === "incoming" ? "Incoming" : "Outgoing"} calls · ${ctx.word}`, items, { toggle: `${other} calls`, onToggle: () => this.callHierarchy(other, ctx) });
+    }));
+  }
+  lineOf(file, line) {
+    const st = file === this.file ? this : this.docs.get(file);
+    if (st) return st.buf.lines[line] ?? "";
+    if (!this.fileLines.has(file)) { try { this.fileLines.set(file, F.load(file).lines ?? []); } catch { this.fileLines.set(file, []); } }
+    return this.fileLines.get(file)[line] ?? "";
+  }
+  showPanel(title, items, opts) {
+    this.fileLines.clear();
+    for (const it of items) it.preview ??= this.lineOf(it.file, it.line);
+    this.panel = new O.Panel(title, items, opts);
+    this.reveal();
+  }
+  // Inline box position under a buffer position.
+  inlineAt(p) { const s = this.screenOf(p); return { row: Math.min(this.rows - 3, s.row + 1), col: Math.max(1, s.col - 1) }; }
+  renameSymbol() {
+    const w = this.wordAt();
+    if (!w) return this.say("The element can't be renamed.", this.colors.warn);
+    if (this.lang.provider("rename") instanceof Fallback) return this.changeAll("Rename (whole word, this file)");
+    const ctx = this.langCtx();
+    this.popup = new O.Input({ label: "Enter to Rename, Esc to Cancel", text: w.text, at: this.inlineAt(w.start),
+      onAccept: (name) => { if (name && name !== w.text) this.track(this.lang.run("rename", "rename", ctx, name).then(ws => this.reportEdit(this.applyEdit(ws), "Renamed"))); } });
+  }
+  reportEdit(r, verb) {
+    if (r.failed.length) return this.say(`${verb} ${plural(r.edits, "occurrence")}; failed: ${r.failed.map(f => path.basename(f.file)).join(", ")}`, this.colors.error, 8000);
+    this.say(`${verb} ${plural(r.edits, "occurrence")} in ${plural(r.files, "file")}`, this.colors.ok, 5000);
+  }
+  // Whole-word replace in this file with a live preview (VS Code's Change All Occurrences is file-local too).
+  changeAll(label = "Change All Occurrences") {
+    const [s, e] = this.range();
+    const word = !this.empty && s.line === e.line ? this.buf.getText(s, e) : this.wordAt()?.text;
+    if (!word) return;
+    const occ = this.empty || /^[\p{L}\p{N}_$]+$/u.test(word) ? wordOccurrences(this.lines, word) : [];
+    if (!occ.length) return;
+    let applied = false;
+    const at = this.wordAt()?.start ?? s, origin = this.sel;
+    const preview = (v) => {
+      if (applied) { this.buf.undo(); applied = false; }
+      if (v && v !== word) { this.buf.edit(lastFirst(occ).map(o => ({ start: o.start, end: o.end, text: v })), { before: origin, after: origin }); applied = true; }
+      this.sel = { anchor: this.buf.clamp(origin.anchor), head: this.buf.clamp(origin.head) };
+    };
+    this.popup = new O.Input({ label: `${label} · ${plural(occ.length, "occurrence")}`, text: word, at: this.inlineAt(at), onChange: preview,
+      onAccept: () => { this.buf.seal(); if (applied) this.say(`Changed ${plural(occ.length, "occurrence")}`, this.colors.ok); },
+      onCancel: () => preview(word) });
+  }
+  // Text edits on the current file as one undo step.
+  applyLocalEdits(edits) {
+    if (!edits?.length) return;
+    const before = this.sel, at = this.head;
+    this.buf.edit(lastFirst(edits).map(e => ({ start: e.start, end: e.end, text: e.text.replace(/\r\n?/g, "\n") })), { before });
+    this.moveTo(this.buf.clamp(at));
+  }
+  // Workspace edits: the current file stays unsaved (one undo step), other open files are edited and saved, the rest rewritten on disk.
+  applyEdit(ws) {
+    const r = applyWorkspaceEdit(ws, (file, edits) => {
+      if (file === this.file) { this.applyLocalEdits(edits); return true; }
+      const st = this.docs.get(file);
+      if (!st) return false;
+      st.buf.edit(lastFirst(edits).map(e => ({ start: e.start, end: e.end, text: e.text.replace(/\r\n?/g, "\n") })), { before: st.sel });
+      st.sel = { anchor: st.buf.clamp(st.sel.anchor), head: st.buf.clamp(st.sel.head) };
+      return this.writeState(st);
+    });
+    for (const file of Object.keys(ws ?? {})) if (file !== this.file) this.lang.touch(file, this.docs.get(file)?.buf.lines.join("\n"));
+    return r;
+  }
+  formatDocument() { return this.track(this.lang.run("format", "format", this.langCtx()).then(edits => this.applyLocalEdits(edits))); }
+  codeActions(kind) {
+    return this.track(this.lang.run(kind, kind === "refactor" ? "refactors" : "sourceActions", this.langCtx()).then(list => {
+      if (!list.length) return this.say(kind === "refactor" ? "No refactorings available" : "No source actions available", this.colors.warn);
+      this.popup = new O.Picker("", (t) => C.filter(list, t, a => a.title).map(({ item, hits }) => ({ label: item.title, hits,
+        run: () => this.track(item.resolve().then(ws => { const r = this.applyEdit(ws); if (r.failed.length) this.reportEdit(r, "Applied"); })) })),
+      kind === "refactor" ? "Select a refactoring" : "Select a source action");
+    }));
+  }
+
+  // ----- settings, auto save -----
+  applySettings({ values, stamp }) { this.settings = values; this.settingsStamp = stamp; }
+  pollSettings() {
+    const file = S.settingsFile();
+    let st = null;
+    try { const s = fs.statSync(file); st = { mtimeMs: s.mtimeMs, size: s.size }; } catch {}
+    if (st && (!this.settingsStamp || st.mtimeMs !== this.settingsStamp.mtimeMs || st.size !== this.settingsStamp.size)) { this.applySettings(S.load(file)); return true; }
+    return false;
+  }
+  toggleAutoSave() {
+    try { this.applySettings(S.update("files.autoSave", this.settings["files.autoSave"] === "off" ? "afterDelay" : "off")); this.say(S.autoSaveLabel(this.settings)); }
+    catch (e) { this.say(`Cannot write settings: ${e.message}`, this.colors.error, 6000); }
+  }
+  askAutoSaveDelay() {
+    this.popup = new O.Input({ label: "Auto save delay in seconds (0.1-3600):", text: String(this.settings["files.autoSaveDelay"]), onAccept: (v) => {
+      const n = Number(v);
+      if (!v.trim() || !Number.isFinite(n)) return this.say(`Not a number of seconds: ${v}`, this.colors.warn);
+      try { this.applySettings(S.update("files.autoSaveDelay", Math.max(0.1, Math.min(3600, n)))); this.say(S.autoSaveLabel(this.settings)); }
+      catch (e) { this.say(`Cannot write settings: ${e.message}`, this.colors.error, 6000); }
+    } });
+  }
+  openSettings() { S.load(); return this.track(this.open(S.settingsFile())); }
+  // After each input event: restart the auto-save timer when the text changed.
+  afterEvent() {
+    if (this.buf.version === this.seenVersion) return;
+    this.seenVersion = this.buf.version;
+    if (this.settings["files.autoSave"] !== "afterDelay" || !this.buf.dirty) return;
+    clearTimeout(this.autoTimer);
+    this.autoTimer = setTimeout(() => this.autoSave(), this.settings["files.autoSaveDelay"] * 1000);
+  }
+  autoSave() {
+    if (this.done || this.popup) return;
+    for (const st of this.allStates()) if (st.file !== this.file && st.buf.dirty) this.writeState(st);
+    if (this.buf.dirty) this.track(this.saveFile(false, { auto: true }));
+  }
+  focusChanged(focused) { if (!focused && this.settings["files.autoSave"] === "onFocusChange") this.autoSave(); }
 
   // ----- input -----
   handle(ev) {
+    if (ev.type === "focus") return this.focusChanged(ev.focused);
     if (ev.type === "mouse") return this.mouse(ev);
+    if (this.popup) return void this.popup.key(ev, this);
     if (this.prompt) return this.promptKey(ev);
+    if (this.peek && this.peek.key(ev, this)) return;
+    if (this.panel?.focused && this.panel.key(ev, this)) return;
     if (ev.type === "text") return this.typed(ev.text);
     if (ev.type === "paste") return this.paste(ev.text);
-    const { name, ctrl, shift, alt } = ev;
+    const cmd = C.KEYMAP.get(C.chordOf(ev));
+    if (cmd) return this.runCommand(cmd.id);
+    const { name, ctrl, shift, alt } = ev, last = this.lines.length - 1;
+    if (ev.cmd) {
+      switch (name) {
+        case "left": return this.home(shift);
+        case "right": return this.moveTo({ line: this.head.line, col: this.lines[this.head.line].length }, shift);
+        case "up": return this.moveTo({ line: 0, col: 0 }, shift);
+        case "down": return this.moveTo({ line: last, col: this.lines[last].length }, shift);
+        case "backspace": return this.empty ? this.deleteRange({ line: this.head.line, col: 0 }, this.head) : this.backspace(false);
+        case "delete": return this.empty ? this.deleteRange(this.head, { line: this.head.line, col: this.lines[this.head.line].length }) : this.deleteForward(false);
+      }
+      return;
+    }
     if (ctrl) {
       switch (name) {
-        case "a": this.sel = { anchor: { line: 0, col: 0 }, head: { line: this.lines.length - 1, col: this.lines[this.lines.length - 1].length } }; this.buf.seal(); return;
-        case "c": return this.copy(false);
-        case "x": return this.copy(true);
-        case "v": return this.paste();
-        case "z": return shift ? this.redo() : this.undo();
-        case "y": return this.redo();
-        case "/": return this.toggleComment();
-        case "f": return this.openFind(false);
-        case "h": return this.openFind(true);
-        case "g": return this.openGoto();
-        case "s": return this.saveFile();
-        case "q": return this.quit();
         case "home": return this.moveTo({ line: 0, col: 0 }, shift);
-        case "end": return this.moveTo({ line: this.lines.length - 1, col: this.lines[this.lines.length - 1].length }, shift);
+        case "end": return this.moveTo({ line: last, col: this.lines[last].length }, shift);
         case "left": case "right": return this.horizontal(name === "left" ? -1 : 1, shift, true);
-        case "up": case "down": this.top = Math.max(0, Math.min(this.lines.length - 1, this.top + (name === "up" ? -1 : 1))); return;
-        case "backspace": return this.backspace(true);
+        case "up": case "down": this.top = Math.max(0, Math.min(last, this.top + (name === "up" ? -1 : 1))); return;
+        case "backspace": case "w": return this.backspace(true);   // ctrl+w: what Herdr sends for ⌥⌫
         case "delete": return this.deleteForward(true);
+        case "u": return this.empty ? this.deleteRange({ line: this.head.line, col: 0 }, this.head) : this.backspace(false); // Herdr's ⌘⌫
+        case "e": return this.moveTo({ line: this.head.line, col: this.lines[this.head.line].length }, shift);              // Herdr's ⌘→
       }
       return;
     }
@@ -460,7 +774,7 @@ class Editor {
       case "tab": return this.tabKey(shift);
       case "backspace": return this.backspace(alt);
       case "delete": return this.deleteForward(alt);
-      case "escape": if (!this.empty) this.moveTo(this.head); return;
+      case "escape": if (!this.empty) this.moveTo(this.head); else if (this.panel) this.panel = null; return;
     }
   }
 
@@ -470,15 +784,24 @@ class Editor {
     return { line, col: W.indexAtCol(this.lines[line], Math.max(0, this.left + x - 1 - this.gutter), this.tab) };
   }
   mouse(ev) {
+    if (this.popup) return void this.popup.mouse(ev, this);
+    if (this.panel && this.panel.mouse(ev, this)) return;
     if (ev.button === 64 || ev.button === 65) { // wheel
       this.top = Math.max(0, Math.min(Math.max(0, this.lines.length - 1), this.top + (ev.button === 64 ? -3 : 3)));
       return;
     }
     if (ev.button === 66 || ev.button === 67) { this.left = Math.max(0, this.left + (ev.button === 66 ? -6 : 6)); return; }
     if (ev.release) { this.dragging = false; return; }
-    if (ev.button !== 0 || this.prompt?.kind === "choice") return;
-    if (ev.y < 2 || ev.y > this.rows - 1) return;
+    if (ev.y < 2 || ev.y > this.height + 1) return;
     const p = this.cellToPos(ev.x, ev.y);
+    if (ev.button === 2 && !ev.motion) { // right click: the context menu, at a click outside the selection the caret moves there first
+      const [s, e] = this.range();
+      if (this.empty || cmp(p, s) < 0 || cmp(p, e) > 0) this.moveTo(p);
+      return this.openMenu(ev.x, ev.y);
+    }
+    if (ev.button !== 0) return;
+    if (this.panel) this.panel.focused = false;
+    if (this.peek && !ev.motion) { if (ev.y >= this.peekRow && ev.y < this.peekRow + this.peek.height) return; this.peek = null; }
     if (ev.motion) { if (this.dragging) { this.sel = { anchor: this.sel.anchor, head: p }; this.reveal(); } return; }
     const now = Date.now(), c = this.lastClick;
     const double = now - c.time < 400 && c.line === p.line && c.col === p.col;
@@ -523,10 +846,17 @@ class Editor {
       this.paintLine(P, l, lineBg, ss, se, lineMatches, width);
     }
 
+    if (this.peek) {
+      this.peekRow = Math.max(2, Math.min(this.head.line - this.top + 3, height + 2 - this.peek.height));
+      this.peek.render(P, this, this.peekRow);
+    }
+    if (this.panel) this.panel.render(P, this);
     this.renderStatus(P);
-    const cursor = this.renderPrompt(P);
+    let cursor = this.renderPrompt(P);
+    if (this.popup) { this.popup.cursor = null; this.popup.render(P, this); cursor = this.popup.cursor ?? "hide"; }
     P.out += "\x1b[0m";
-    if (cursor) P.out += `\x1b[${cursor[0]};${cursor[1]}H\x1b[?25h`;
+    if (cursor === "hide") P.out += "\x1b[?25l";
+    else if (cursor) P.out += `\x1b[${cursor[0]};${cursor[1]}H\x1b[?25h`;
     else {
       const { line, col } = this.head, x = W.displayCol(this.lines[line], col, this.tab) - this.left;
       const visible = line >= this.top && line < this.top + height && x >= 0 && x < width;
@@ -536,33 +866,42 @@ class Editor {
   }
 
   paintLine(P, l, lineBg, ss, se, lineMatches, width) {
-    const c = this.colors, text = this.lines[l], tokens = this.hl.tokens[l] ?? null, tab = this.tab;
+    const c = this.colors, text = this.lines[l];
     const selFrom = l < ss.line || l > se.line ? -1 : l === ss.line ? ss.col : 0;
     const selTo = l < ss.line || l > se.line ? -1 : l === se.line ? se.col : Infinity;
     const cur = this.currentMatchRange();
+    const bgAt = (i) => {
+      const m = lineMatches.find(m => i >= m.col && i < m.col + m.len);
+      if (m) return cur && cur.line === l && cur.col === m.col ? c.match : c.matchOther;
+      return selFrom !== -1 && i >= selFrom && i < selTo ? c.selection : null;
+    };
+    let { x, col } = this.paintText(P, text, this.hl.tokens[l] ?? null, width, this.left, lineBg, bgAt, this.tab);
+    // Selection past the line end shows one cell for the line break, like VS Code.
+    if (x < width && selFrom !== -1 && selTo > text.length && col >= this.left) { P.text(" ", c.fg, c.selection); x++; }
+    if (x < width) P.text(" ".repeat(width - x), c.fg, lineBg);
+  }
+  // Paints a line's visible part [left, left+width) with token colors; bgAt(i) overrides the background at UTF-16 index i.
+  // Returns { x: cells painted, col: the line's display width }.
+  paintText(P, text, tokens, width, left, lineBg, bgAt, tab) {
+    const c = this.colors;
     let col = 0, ti = 0, x = 0, i = 0;
-    const right = this.left + width;
+    const right = left + width;
     for (const ch of text) {
       if (col >= right) break;
       while (tokens && ti + 2 < tokens.length && tokens[ti + 2] <= i) ti += 2;
       const meta = tokens ? tokens[ti + 1] : 0;
       const fg = tokens ? this.colorMap[H.foregroundOf(meta)] ?? c.fg : c.fg, style = tokens ? H.fontStyleOf(meta) : 0;
-      let bg = lineBg;
-      const m = lineMatches.find(m => i >= m.col && i < m.col + m.len);
-      if (m) bg = cur && cur.line === l && cur.col === m.col ? c.match : c.matchOther;
-      else if (selFrom !== -1 && i >= selFrom && i < selTo) bg = c.selection;
+      const bg = bgAt(i) ?? lineBg;
       const cp = ch.codePointAt(0);
       let w, glyph = ch;
       if (ch === "\t") { w = tab - (col % tab); glyph = " ".repeat(w); }
       else { w = W.charWidth(cp); if (cp < 0x20) glyph = String.fromCharCode(0x2400 + cp); else if (cp === 0x7f) glyph = "␡"; }
-      if (w === 0) { if (col > this.left && col <= right) P.out += ch; }
-      else if (col >= this.left && col + w <= right) { P.text(glyph, fg, bg, style); x += w; }
-      else if (col + w > this.left) { const vis = Math.min(col + w, right) - Math.max(col, this.left); P.text(" ".repeat(vis), fg, bg, style); x += vis; }
+      if (w === 0) { if (col > left && col <= right) P.out += ch; }
+      else if (col >= left && col + w <= right) { P.text(glyph, fg, bg, style); x += w; }
+      else if (col + w > left) { const vis = Math.min(col + w, right) - Math.max(col, left); P.text(" ".repeat(vis), fg, bg, style); x += vis; }
       col += w; i += ch.length;
     }
-    // Selection past the line end shows one cell for the line break, like VS Code.
-    if (x < width && selFrom !== -1 && selTo > text.length && col >= this.left) { P.text(" ", c.fg, c.selection); x++; }
-    if (x < width) P.text(" ".repeat(width - x), c.fg, lineBg);
+    return { x, col };
   }
   currentMatchRange() {
     if (this.prompt?.kind !== "find") return null;
@@ -579,6 +918,7 @@ class Editor {
       this.indent.useTabs ? `Tab Size: ${this.tab}` : `Spaces: ${this.tab}`, this.doc.bom ? "UTF-8 with BOM" : "UTF-8",
       this.doc.eol === "\r\n" ? "CRLF" : "LF", this.language,
     ];
+    if (this.settings["files.autoSave"] !== "off") parts.unshift("Auto Save");
     const rightText = parts.join("   ") + "  ";
     let leftText = "", leftColor = c.barFg;
     if (this.message && this.message.until > Date.now()) { leftText = this.message.text; leftColor = this.message.color; }
@@ -598,18 +938,6 @@ class Editor {
   renderPrompt(P) {
     const p = this.prompt, c = this.colors;
     if (!p) return null;
-    if (p.kind === "choice") {
-      const text = " " + p.text + "  " + p.options.map(o => `[${o[0].toUpperCase()}] ${o[1]}`).join("  ") + " ";
-      P.move(this.rows - 1, 1);
-      P.text(fit(text, this.cols), c.warn, c.widget);
-      return [this.rows - 1, Math.min(this.cols, W.textWidth(text, 8) + 1)];
-    }
-    if (p.kind === "goto") {
-      const label = ` Go to line (1-${this.lines.length}): `;
-      P.move(2, 1);
-      P.text(fit(label + p.text, this.cols), c.fg, c.widget);
-      return [2, Math.min(this.cols, W.textWidth(label + p.text, 8) + 1)];
-    }
     // find widget, top right like VS Code
     const w = Math.min(this.cols, 48), x = this.cols - w + 1, f = this.find;
     const rowsOf = [["Find", "query"], ...(p.replace ? [["Replace", "replace"]] : [])];
@@ -626,7 +954,7 @@ class Editor {
     return cursor;
   }
 
-  exit() { this.done = true; }
+  exit() { this.done = true; this.onExit?.(); }
 }
 
 // `folder › folder › file` relative to the enclosing git repo (else the home folder), like VS Code's breadcrumbs.
@@ -651,8 +979,21 @@ function readClipboard() {
 }
 
 // ---------- terminal ----------
-const ENTER = "\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[5 q";
-const LEAVE = "\x1b[0m\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[?2004l\x1b[0 q\x1b]112\x07\x1b[?25h\x1b[?1049l";
+// Alternate screen, bracketed paste, SGR mouse, focus reports (1004), Kitty keyboard "disambiguate" (CSI > 1 u: ⌘ keys
+// arrive as CSI-u with the super bit), bar cursor; LEAVE undoes each.
+const ENTER = "\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?1004h\x1b[>1u\x1b[5 q";
+const LEAVE = "\x1b[0m\x1b[<u\x1b[?1004l\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[?2004l\x1b[0 q\x1b]112\x07\x1b[?25h\x1b[?1049l";
+
+// Inside a Herdr terminal, right-clicks go to the program (Shift+right-click stays Herdr's menu) while the editor runs.
+function rightClicksTo(to, wait) {
+  const id = process.env.HC_TERMINAL_ID, bin = id && which("herdr-app");
+  if (!bin) return;
+  const args = ["do", "terminal.right_click", "--to", to, "--terminal", id];
+  try {
+    if (wait) require("child_process").spawnSync(bin, args, { stdio: "ignore", timeout: 1500 });
+    else require("child_process").spawn(bin, args, { stdio: "ignore", detached: true }).on("error", () => {}).unref();
+  } catch {}
+}
 
 async function main() {
   const arg = process.argv[2];
@@ -667,8 +1008,10 @@ async function main() {
   if (doc.error) { process.stderr.write(`vsedit: ${path.basename(file)}: ${doc.error}\n`); process.exit(1); }
   if (!process.stdin.isTTY || !process.stdout.isTTY) { process.stderr.write("vsedit: needs a terminal\n"); process.exit(1); }
 
+  const settings = S.load();
   const index = H.loadIndex(), theme = H.loadTheme(), scope = L.scopeOf(index, path.basename(file));
-  const ed = new Editor(file, doc, await H.loadGrammar(scope, index, theme), theme, scope);
+  const ed = new Editor(file, doc, await H.loadGrammar(scope, index, theme), theme, scope, settings.values);
+  ed.settingsStamp = settings.stamp;
 
   let restored = false;
   const restore = () => {
@@ -676,14 +1019,22 @@ async function main() {
     restored = true;
     try { process.stdout.write(LEAVE); } catch {}
     try { process.stdin.setRawMode(false); } catch {}
+    Lang.shutdown();
+    rightClicksTo("menu", true);
   };
+  // Closed from outside (tab closed, terminal gone): keep unsaved text as a backup, then leave.
+  const hotExit = (code) => { ed.hotExit(); restore(); process.exit(code); };
   process.on("exit", restore);
-  for (const sig of ["SIGTERM", "SIGHUP", "SIGINT"]) process.on(sig, () => { restore(); process.exit(128 + (os.constants.signals[sig] ?? 1)); });
-  process.on("uncaughtException", (e) => { restore(); process.stderr.write(`vsedit crashed: ${e && e.stack || e}\n`); process.exit(1); });
+  for (const sig of ["SIGTERM", "SIGHUP", "SIGINT"]) process.on(sig, () => hotExit(128 + (os.constants.signals[sig] ?? 1)));
+  process.on("uncaughtException", (e) => { try { ed.hotExit(); } catch {} restore(); process.stderr.write(`vsedit crashed: ${e && e.stack || e}\n`); process.exit(1); });
+  process.stdin.on("end", () => hotExit(129));
+  process.stdin.on("error", () => hotExit(129));
+  process.stdout.on("error", () => hotExit(129));
 
   process.stdin.setRawMode(true);
   process.stdin.setEncoding("utf8");
   process.stdout.write(ENTER + `\x1b]12;${ed.colors.cursor}\x07`);
+  rightClicksTo("program", false);
 
   let scheduled = false, timer = null;
   let first = true;
@@ -698,20 +1049,22 @@ async function main() {
     if (ed.message) timer = setTimeout(schedule, Math.max(50, ed.message.until - Date.now() + 10));
   };
   const schedule = () => { if (!scheduled) { scheduled = true; setImmediate(draw); } };
+  ed.redraw = () => { ed.afterEvent(); schedule(); };
+  ed.onExit = () => { restore(); process.exit(0); };
+  Lang.setApplyEdit((ws) => { ed.applyEdit(ws); schedule(); return true; });
+  setInterval(() => { if (ed.pollSettings()) schedule(); }, 2000).unref();
 
   let pending = "";
   process.stdin.on("data", (chunk) => {
     const { events, rest } = parse(pending + chunk);
     pending = rest;
-    for (const ev of events) {
-      ed.handle(ev);
-      if (ed.done) { restore(); process.exit(0); }
-    }
+    for (const ev of events) { ed.handle(ev); ed.afterEvent(); }
     // A split escape sequence that never completes was a plain Esc.
     if (pending) setTimeout(() => { if (pending === rest) { pending = ""; ed.handle({ type: "key", name: "escape" }); schedule(); } }, 50);
     schedule();
   });
   process.stdout.on("resize", schedule);
+  ed.offerBackup();
   draw();
 }
 

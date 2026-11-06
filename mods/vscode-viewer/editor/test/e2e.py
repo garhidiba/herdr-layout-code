@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""End-to-end: runs vsedit.cjs in a 100x30 pseudo-terminal, types, saves, quits, and checks colors against tokenize.cjs.
+"""End-to-end: runs vsedit.cjs in a 100x30 pseudo-terminal, types, saves, quits, and checks colors against tokenize.cjs;
+the context menu, Kitty ⌘ keys, tsserver definition/references/rename, gofmt, the save dialog, auto save and hot exit.
 usage: python3 -I mods/vscode-viewer/editor/test/e2e.py"""
-import fcntl, json, os, pty, re, select, shutil, struct, subprocess, sys, tempfile, termios, time
+import fcntl, json, os, pty, re, select, shutil, signal, struct, subprocess, sys, tempfile, termios, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 EDITOR = os.path.join(HERE, "..", "vsedit.cjs")
@@ -26,11 +27,18 @@ func main() {
 '''
 
 
+# Settings, backups and Herdr are never the real ones: main() points these at a temp folder.
+ISOLATED = {}
+
+
 class Term:
-    def __init__(self, file, cols=100, rows=30):
+    def __init__(self, file, cols=100, rows=30, env=None):
         pid, fd = pty.fork()
         if pid == 0:
-            os.execvp("node", ["node", EDITOR, file])
+            e = {k: v for k, v in os.environ.items() if k != "HC_TERMINAL_ID"}
+            e.update(ISOLATED)
+            e.update(env or {})
+            os.execvpe("node", ["node", EDITOR, file], e)
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
         self.pid, self.fd, self.out = pid, fd, b""
 
@@ -162,10 +170,174 @@ def run_crlf(tmp):
     print("crlf: ok")
 
 
+def screen_of(t):
+    return t.out.decode("utf8", "replace")
+
+
+def run_menu_and_cmd_save(tmp):
+    """Right-click (SGR button 2) opens VS Code's context menu; Herdr is told to route right-clicks; Kitty ⌘S saves."""
+    stub = os.path.join(tmp, "stub")
+    os.makedirs(stub, exist_ok=True)
+    log = os.path.join(tmp, "herdr.log")
+    with open(os.path.join(stub, "herdr-app"), "w") as f:
+        f.write(f'#!/bin/sh\necho "$@" >> "{log}"\n')
+    os.chmod(os.path.join(stub, "herdr-app"), 0o755)
+    file = os.path.join(tmp, "menu.txt")
+    open(file, "w").write("hello world\n")
+    t = Term(file, env={"HC_TERMINAL_ID": "term-7", "PATH": stub + ":" + os.environ["PATH"]})
+    assert t.read("Ln 1, Col 1"), "no first frame"
+    assert "\x1b[>1u" in screen_of(t) and "\x1b[?1004h" in screen_of(t), "Kitty keyboard / focus reports not enabled"
+    t.send("\x1b[<2;20;2M\x1b[<2;20;2m")
+    assert t.read("Command Palette...", timeout=2), "right-click did not open the menu"
+    sc = screen_of(t)
+    for item in ["Go to Definition", "Peek", "Find All References", "Rename Symbol", "Change All Occurrences", "Format Document", "Cut", "Copy", "Paste"]:
+        assert item in sc, item
+    t.send("\x1b[27u")              # Kitty Esc closes it
+    t.send("\x1b[F"); t.send("!")
+    t.send("\x1b[115;9u")           # ⌘S as Kitty CSI-u
+    assert t.read("Saved", timeout=2), "⌘S did not save"
+    t.send("\x1b[113;9u")           # ⌘Q is not ours; Ctrl+Q quits
+    t.send("\x11")
+    assert t.wait_exit() == 0
+    assert open(file).read() == "hello world!\n"
+    out = screen_of(t)
+    assert "\x1b[<u" in out[-300:], "Kitty keyboard mode not popped on exit"
+    calls = open(log).read()
+    assert "do terminal.right_click --to program --terminal term-7" in calls, calls
+    assert "do terminal.right_click --to menu --terminal term-7" in calls, calls
+    print("menu + ⌘S: ok")
+
+
+TS_A = 'export function greet(name: string) {\n  return "hi " + name;\n}\n'
+TS_B = 'import { greet } from "./a";\nconst x = greet("a");\ngreet("b");\n'
+
+
+def run_typescript(tmp):
+    """F12 jumps to the definition through tsserver, ⌥⇧F12 lists references, F2 renames across two files."""
+    proj = os.path.join(tmp, "tsproj")
+    os.makedirs(proj)
+    subprocess.run(["git", "init", "-q"], cwd=proj, check=True)
+    open(os.path.join(proj, "tsconfig.json"), "w").write('{"compilerOptions":{"strict":true}}')
+    open(os.path.join(proj, "a.ts"), "w").write(TS_A)
+    open(os.path.join(proj, "b.ts"), "w").write(TS_B)
+    t = Term(os.path.join(proj, "b.ts"))
+    assert t.read("Ln 1, Col 1"), "no first frame"
+    t.send("\x07"); t.send("2:12\r")             # Ctrl+G 2:12 -> on `greet` in `const x = greet("a")`
+    assert t.read("Ln 2, Col 12", timeout=2)
+    t.out = b""
+    t.send("\x1b[24~", wait=0.3)                  # F12
+    assert t.read("Ln 1, Col 17", timeout=20), "F12 did not jump to greet in a.ts:\n" + screen_of(t)[-400:]
+    assert "a.ts" in screen_of(t)
+    t.out = b""
+    t.send("\x1b[24;4~", wait=0.3)                # ⌥⇧F12 Find All References
+    assert t.read("results in 2 files", timeout=20), "no references panel:\n" + screen_of(t)[-600:]
+    sc = screen_of(t)
+    m = re.search(r"(\d+) results in 2 files", sc)
+    assert m and int(m.group(1)) >= 2, sc[-400:]
+    assert "REFERENCES" in sc
+    t.send("\x1b[27u")                            # Esc closes the panel
+    t.out = b""
+    t.send("\x1bOQ", wait=0.3)                    # F2 Rename Symbol
+    assert t.read("Enter to Rename", timeout=5), "no rename box"
+    t.send("hello"); t.send("\r", wait=0.3)
+    assert t.read("Renamed 4 occurrences in 2 files", timeout=20), "rename failed:\n" + screen_of(t)[-400:]
+    assert open(os.path.join(proj, "b.ts")).read() == TS_B.replace("greet", "hello"), "b.ts not renamed on disk"
+    t.send("\x13"); assert t.read("Saved", timeout=2)
+    assert open(os.path.join(proj, "a.ts")).read() == TS_A.replace("greet", "hello")
+    t.send("\x11")
+    assert t.wait_exit() == 0
+    print("typescript (definition, references, rename): ok")
+
+
+def run_format(tmp):
+    """⌥⇧F formats a Go file with gofmt (no server for Go)."""
+    if not shutil.which("gofmt", path=os.environ["PATH"] + ":/opt/homebrew/bin:/usr/local/bin"):
+        print("format: skipped (no gofmt)"); return
+    file = os.path.join(tmp, "fmt.go")
+    open(file, "w").write("package main\nfunc  main( ) {\nx:=1\n_ = x}\n")
+    t = Term(file)
+    assert t.read("Ln 1, Col 1")
+    t.send("\x1b[102;4u", wait=0.5)               # ⌥⇧F as Kitty CSI-u
+    t.read("never", timeout=1.5)
+    t.send("\x13"); assert t.read("Saved", timeout=2)
+    t.send("\x11"); assert t.wait_exit() == 0
+    assert open(file).read() == "package main\n\nfunc main() {\n\tx := 1\n\t_ = x\n}\n", repr(open(file).read())
+    print("format (gofmt): ok")
+
+
+def run_save_dialog(tmp):
+    """Unsaved changes: Ctrl+Q asks Save / Don't Save / Cancel; Esc cancels, Enter saves and quits."""
+    file = os.path.join(tmp, "dialog.txt")
+    open(file, "w").write("abc\n")
+    t = Term(file)
+    assert t.read("Ln 1, Col 1")
+    t.send("X")
+    t.send("\x11")
+    assert t.read("Do you want to save the changes you made to dialog.txt?", timeout=2)
+    sc = screen_of(t)
+    assert "Your changes will be lost if you don't save them." in sc and " Save " in sc and " Don't Save " in sc and " Cancel " in sc
+    t.send("\x1b[27u")                            # Esc = Cancel
+    t.send("Y")
+    t.out = b""
+    t.send("\x11")
+    assert t.read("Do you want to save", timeout=2)
+    t.send("\r")                                  # Enter = Save
+    assert t.wait_exit() == 0
+    assert open(file).read() == "XYabc\n", open(file).read()
+    print("save dialog: ok")
+
+
+def run_auto_save(tmp):
+    """files.autoSave afterDelay with files.autoSaveDelay in seconds saves without Ctrl+S."""
+    settings = os.path.join(tmp, "auto", "vscode-settings.json")
+    os.makedirs(os.path.dirname(settings))
+    open(settings, "w").write('{"files.autoSave": "afterDelay", "files.autoSaveDelay": 0.3, "keep.me": 1}')
+    file = os.path.join(tmp, "auto.txt")
+    open(file, "w").write("one\n")
+    t = Term(file, env={"VSEDIT_SETTINGS": settings})
+    assert t.read("Auto Save"), "status bar has no Auto Save"
+    t.send("Z")
+    t.read("never", timeout=1.2)
+    assert open(file).read() == "Zone\n", "not auto-saved: " + repr(open(file).read())
+    t.send("\x11")
+    assert t.wait_exit() == 0, "quit should not ask: the file was auto-saved"
+    assert json.load(open(settings))["keep.me"] == 1
+    print("auto save: ok")
+
+
+def run_hot_exit(tmp):
+    """SIGHUP with unsaved text writes a backup; reopening offers to restore it."""
+    file = os.path.join(tmp, "hot.txt")
+    open(file, "w").write("base\n")
+    t = Term(file)
+    assert t.read("Ln 1, Col 1")
+    t.send("NEW ")
+    os.kill(t.pid, signal.SIGHUP)
+    t.wait_exit()
+    backups = os.listdir(ISOLATED["VSEDIT_BACKUPS"])
+    assert len(backups) == 1, backups
+    b = json.load(open(os.path.join(ISOLATED["VSEDIT_BACKUPS"], backups[0])))
+    assert b["path"] == os.path.realpath(file) or b["path"] == file
+    assert b["text"] == "NEW base" and b["cursor"] == {"line": 0, "col": 4}
+    assert open(file).read() == "base\n"
+    t = Term(file)
+    assert t.read("Restore unsaved changes from", timeout=3) and t.read(" Discard ", timeout=2), "no restore prompt"
+    assert " Restore " in screen_of(t) and " Discard " in screen_of(t)
+    t.send("\r")                                  # Restore
+    t.send("\x13"); assert t.read("Saved", timeout=2)
+    t.send("\x11"); assert t.wait_exit() == 0
+    assert open(file).read() == "NEW base\n"
+    assert os.listdir(ISOLATED["VSEDIT_BACKUPS"]) == [], "backup not removed after save"
+    print("hot exit: ok")
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="vsedit-e2e-")
+    ISOLATED.update(VSEDIT_SETTINGS=os.path.join(tmp, "settings", "vscode-settings.json"), VSEDIT_BACKUPS=os.path.join(tmp, "backups"))
     try:
         run_tsx(tmp); run_go(tmp); run_crlf(tmp)
+        run_menu_and_cmd_save(tmp); run_save_dialog(tmp); run_auto_save(tmp); run_hot_exit(tmp)
+        run_format(tmp); run_typescript(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("e2e: all passed")

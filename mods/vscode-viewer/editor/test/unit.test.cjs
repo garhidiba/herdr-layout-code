@@ -204,6 +204,49 @@ test("function keys, Shift+F10, the menu key and focus reports", () => {
   assert.equal(parse("\x1b[115;9").rest, "\x1b[115;9"); // split sequence waits for the rest
 });
 
+// ---------- commands, menu, fuzzy ----------
+const Cmd = require("../commands.cjs");
+
+test("the context menu has VS Code's items, order and separators, with Peek as a submenu", () => {
+  const rows = Cmd.menuRows(Cmd.MENU, () => true);
+  const titles = rows.map(r => (r.sep ? "---" : r.title));
+  assert.deepEqual(titles, ["Go to Definition", "Go to Type Definition", "Go to Implementations", "Go to References", "Peek", "---",
+    "Find All References", "Find All Implementations", "Show Call Hierarchy", "---",
+    "Rename Symbol", "Change All Occurrences", "Format Document", "Refactor...", "Source Action...", "---",
+    "Cut", "Copy", "Paste", "---", "Command Palette..."]);
+  assert.deepEqual(rows[4].submenu.map(r => r.title), ["Peek Definition", "Peek References", "Peek Implementations", "Peek Type Definition"]);
+  assert.deepEqual(rows.filter(r => r.key).map(r => r.key), ["F12", "⌘F12", "⇧F12", "⌥⇧F12", "⌥⇧H", "F2", "⌘F2", "⌥⇧F", "⌃⇧R", "⌘X", "⌘C", "⌘V", "⇧⌘P"]);
+});
+
+test("items without a provider are disabled, and keyboard steps skip them and separators", () => {
+  const rows = Cmd.menuRows(Cmd.MENU, cap => cap === "definition" || cap === "references");
+  const enabled = rows.filter(r => !r.sep && r.enabled).map(r => r.title);
+  assert.deepEqual(enabled, ["Go to Definition", "Go to References", "Peek", "Find All References", "Change All Occurrences", "Cut", "Copy", "Paste", "Command Palette..."]);
+  assert.equal(rows[Cmd.stepMenu(rows, 0, 1)].title, "Go to References");
+  assert.equal(rows[Cmd.stepMenu(rows, 0, -1)].title, "Command Palette..."); // wraps
+  assert.equal(Cmd.stepMenu([{ sep: true }], 0, 1), -1);
+});
+
+test("⌘ chords and their Ctrl fallbacks run the same commands", () => {
+  const id = (chord) => Cmd.KEYMAP.get(chord)?.id;
+  assert.equal(id("cmd+s"), "workbench.action.files.save");
+  assert.equal(id("ctrl+s"), "workbench.action.files.save");
+  assert.equal(id("shift+cmd+p"), "workbench.action.showCommands");
+  assert.equal(id("alt+shift+f12"), "references-view.findReferences");
+  assert.equal(id("f12"), "editor.action.revealDefinition");
+  assert.equal(id(Cmd.normalize("cmd+shift+k")), "editor.action.deleteLines");
+  assert.equal(id("shift+f10"), "editor.action.showContextMenu");
+});
+
+test("fuzzy filter ranks word starts and consecutive letters first, and drops non-matches", () => {
+  const files = ["README.md", "mods/vscode-viewer/editor/vsedit.cjs", "mods/vscode-viewer/editor/test/e2e.py", "mods/vscode-viewer/main.js"];
+  assert.equal(Cmd.filter(files, "vsedit", f => f)[0].item, "mods/vscode-viewer/editor/vsedit.cjs");
+  assert.deepEqual(Cmd.filter(files, "e2e", f => f).map(r => r.item), ["mods/vscode-viewer/editor/test/e2e.py"]);
+  assert.equal(Cmd.filter(files, "zzz", f => f).length, 0);
+  assert.equal(Cmd.filter(Cmd.COMMANDS, "fmt doc", c => c.title)[0].item.title, "Format Document");
+  assert.equal(Cmd.filter(files, "", f => f).length, 4);
+});
+
 // ---------- language fallbacks and workspace edits ----------
 const FB = require("../lang/fallback.cjs");
 const E = require("../lang/edits.cjs");
@@ -244,4 +287,105 @@ test("a workspace edit rewrites closed files keeping CRLF, and gives open files 
   assert.equal(fs.readFileSync(b, "utf8"), "x"); // the editor took it
   assert.deepEqual(seen, [1]);
   assert.deepEqual([r.files, r.edits, r.failed.length], [2, 3, 1]);
+});
+
+// ---------- settings and hot exit ----------
+const S = require("../settings.cjs");
+const B = require("../backup.cjs");
+
+test("settings: defaults on first run, seconds clamped to 0.1-3600, unknown keys kept on write", () => {
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "vsedit-set-")), "sub", "vscode-settings.json");
+  const first = S.load(file);
+  assert.deepEqual(first.values, S.DEFAULTS);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), S.DEFAULTS);
+  fs.writeFileSync(file, '{\n  // mine\n  "files.autoSave": "afterDelay", "files.autoSaveDelay": 0.01, "workbench.colorTheme": "x", "editor.tabSize": "big",\n}');
+  const v = S.load(file).values;
+  assert.equal(v["files.autoSave"], "afterDelay");
+  assert.equal(v["files.autoSaveDelay"], 0.1);
+  assert.equal(v["editor.tabSize"], 4);
+  assert.equal(S.autoSaveLabel(v), "Auto Save: after 0.1s");
+  S.update("files.autoSaveDelay", 2.5, file);
+  const raw = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.equal(raw["workbench.colorTheme"], "x");
+  assert.equal(S.autoSaveLabel(S.load(file).values), "Auto Save: after 2.5s");
+  assert.equal(S.normalize({ "files.autoSave": "sometimes", "files.autoSaveDelay": 99999 })["files.autoSaveDelay"], 3600);
+  assert.equal(S.normalize({ "files.autoSave": "sometimes" })["files.autoSave"], "off");
+});
+
+test("hot exit backups: written per path, read back only for that path, stale when the file changed", () => {
+  process.env.VSEDIT_BACKUPS = fs.mkdtempSync(path.join(os.tmpdir(), "vsedit-bk-"));
+  const file = path.join(process.env.VSEDIT_BACKUPS, "doc.txt");
+  fs.writeFileSync(file, "old\n");
+  B.write(file, "new text", { line: 0, col: 3 });
+  const b = B.read(file);
+  assert.deepEqual([b.path, b.text, b.cursor], [file, "new text", { line: 0, col: 3 }]);
+  assert.equal(B.changedSince(b, file), false);
+  assert.equal(B.read(file + "x"), null);
+  fs.writeFileSync(file, "changed on disk\n");
+  assert.equal(B.changedSince(b, file), true);
+  B.remove(file);
+  assert.equal(B.read(file), null);
+  assert.equal(B.pathHash("/a/b"), B.pathHash("/a/b"));
+  delete process.env.VSEDIT_BACKUPS;
+});
+
+// ---------- editor commands ----------
+const plainEditor = async (lines, file = "/tmp/x.txt") => new Editor(file, { lines, eol: "\n", finalNewline: true }, await H.loadGrammar(null), H.loadTheme(), null);
+
+test("line commands: move, copy, delete, insert below/above", async () => {
+  const ed = await plainEditor(["a", "b", "c"]);
+  ed.moveTo({ line: 0, col: 1 });
+  ed.moveLines(1);
+  assert.deepEqual(ed.lines, ["b", "a", "c"]);
+  assert.equal(ed.head.line, 1);
+  ed.copyLines(1);
+  assert.deepEqual(ed.lines, ["b", "a", "a", "c"]);
+  assert.equal(ed.head.line, 2);
+  ed.deleteLines();
+  assert.deepEqual(ed.lines, ["b", "a", "c"]);
+  assert.equal(ed.head.line, 2); // the line after the deleted one
+  ed.insertLine(1);
+  assert.deepEqual(ed.lines, ["b", "a", "c", ""]);
+  ed.undo(); ed.undo(); ed.undo(); ed.undo();
+  assert.deepEqual(ed.lines, ["a", "b", "c"]);
+});
+
+test("Change All Occurrences previews live, applies as one step, and Esc restores", async () => {
+  const ed = await plainEditor(["foo = foo + food"]);
+  ed.moveTo({ line: 0, col: 1 });
+  ed.changeAll();
+  ed.handle({ type: "text", text: "x" });
+  assert.deepEqual(ed.lines, ["x = x + food"]);
+  ed.handle({ type: "text", text: "y" });
+  assert.deepEqual(ed.lines, ["xy = xy + food"]);
+  ed.handle({ type: "key", name: "escape" });
+  assert.deepEqual(ed.lines, ["foo = foo + food"]);
+  ed.changeAll();
+  ed.handle({ type: "text", text: "bar" });
+  ed.handle({ type: "key", name: "enter" });
+  assert.deepEqual(ed.lines, ["bar = bar + food"]);
+  ed.undo();
+  assert.deepEqual(ed.lines, ["foo = foo + food"]);
+});
+
+test("closing with unsaved changes asks Save / Don't Save / Cancel; hot exit keeps a backup", async () => {
+  process.env.VSEDIT_BACKUPS = fs.mkdtempSync(path.join(os.tmpdir(), "vsedit-bk-"));
+  const file = path.join(process.env.VSEDIT_BACKUPS, "a.txt");
+  fs.writeFileSync(file, "one\n");
+  const ed = await plainEditor(["one"], file);
+  ed.typed("x");
+  ed.runCommand("workbench.action.closeActiveEditor");
+  assert.equal(ed.popup.title, "Do you want to save the changes you made to a.txt?");
+  assert.deepEqual(ed.popup.buttons.map(b => b.label), ["Save", "Don't Save", "Cancel"]);
+  ed.handle({ type: "key", name: "escape" });
+  assert.equal(ed.popup, null);
+  assert.ok(!ed.done);
+  ed.hotExit();
+  assert.equal(B.read(file).text, "xone");
+  ed.quit();
+  ed.handle({ type: "text", text: "d" });
+  assert.ok(ed.done);
+  assert.equal(B.read(file), null);
+  assert.equal(fs.readFileSync(file, "utf8"), "one\n");
+  delete process.env.VSEDIT_BACKUPS;
 });

@@ -89,4 +89,4 @@ class Highlighter {
   }
 }
 
-module.exports = { loadGrammar, loadIndex, loadTheme, Highlighter, foregroundOf, fontStyleOf, MAX_LINE };
+module.exports = { loadGrammar, loadIndex, loadTheme, Highlighter, foregroundOf, fontStyleOf, MAX_LINE, loose };
