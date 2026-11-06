@@ -1,5 +1,6 @@
 // A lazy file explorer for the focused pane's folder, with Material Icon Theme icons.
-// Click a file to open it in a new tab (vscode-viewer mod); Cmd+click opens it in VS Code.
+// Click a code/text file to edit it in a new terminal tab (vsedit); images, markdown and remote files
+// open in the vscode-viewer mod tab. Cmd+click opens it in VS Code.
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, window, run, appHome } from "herdr";
@@ -12,6 +13,7 @@ function location() {
 }
 const key = () => JSON.stringify(location());
 const PER_FOLDER = 500, TOTAL = 5000;
+const VIEWER_EXT = /\.(png|jpe?g|gif|webp|bmp|ico|svg|tiff?|md|markdown|mdx|mkd)$/i;
 
 // VS Code's git decoration colors and how severe each state is (a folder shows its worst child).
 const GIT_COLOR = { M: "#e2c08d", A: "#73c991", U: "#73c991", D: "#c74e39", "!": "#e4676b" };
@@ -167,8 +169,9 @@ export default class Files extends View {
   }
 
   open(path) {
-    const file = `${this.root}/${path}`;
-    run("tab.new", { name: path.split("/").pop(), mod: "vscode-viewer", props: { file, on: this.on } });
+    const file = `${this.root}/${path}`, name = path.split("/").pop();
+    if (this.on || VIEWER_EXT.test(name)) return run("tab.new", { name, mod: "vscode-viewer", props: { file, on: this.on } });
+    run("tab.new", { name, folder: file.slice(0, file.lastIndexOf("/")) || "/", argv: ["node", `${appHome()}/mods/vscode-viewer/editor/vsedit.cjs`, file] });
   }
 
   // `inherited` is "U" below an untracked folder: git lists the folder once, its files are untracked too.
