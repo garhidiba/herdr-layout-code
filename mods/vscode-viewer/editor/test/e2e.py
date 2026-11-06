@@ -596,12 +596,35 @@ def run_decorations(tmp):
     print("decorations: ok")
 
 
+def run_autoclose(tmp):
+    """Typing in a TypeScript file: ( and " insert their pairs, typing the closers steps over them, Backspace in an empty
+    pair deletes both, an opener wraps the selection; a quick chunk of keys is handled key by key."""
+    file = os.path.join(tmp, "pairs.ts")
+    open(file, "w").write("\n")
+    t = Term(file)
+    assert colored_frame(t), "no colored frame"
+    for ch in 'f("a':
+        t.send(ch, wait=0.05)
+    t.send('")')                                   # one chunk: over the quote, over the paren
+    t.send(" [", wait=0.05); t.send("\x7f")         # [] then Backspace: both gone
+    t.send(";")
+    t.send("\x1b[1;2D")                            # Shift+Left selects the ;
+    t.send("{")                                    # wraps it
+    t.send("\x13")
+    assert t.read("Saved", timeout=2)
+    t.send("\x11")
+    assert t.wait_exit() == 0
+    got = open(file).read()
+    assert got == 'f("a") {;}\n', repr(got)
+    print("auto-closing pairs: ok")
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="vsedit-e2e-")
     ISOLATED.update(VSEDIT_SETTINGS=os.path.join(tmp, "settings", "vscode-settings.json"), VSEDIT_BACKUPS=os.path.join(tmp, "backups"),
                     VSEDIT_KEYBINDINGS=os.path.join(tmp, "settings", "vscode-keybindings.json"))
     try:
-        run_tsx(tmp); run_go(tmp); run_crlf(tmp); run_hex(tmp); run_error_page(tmp); run_drag_scroll(tmp); run_minified(tmp); run_scrollbars(tmp); run_decorations(tmp)
+        run_tsx(tmp); run_go(tmp); run_crlf(tmp); run_hex(tmp); run_error_page(tmp); run_drag_scroll(tmp); run_minified(tmp); run_scrollbars(tmp); run_decorations(tmp); run_autoclose(tmp)
         run_menu_and_cmd_save(tmp); run_save_dialog(tmp); run_auto_save(tmp); run_hot_exit(tmp); run_keybindings(tmp)
         run_format(tmp); run_typescript(tmp)
     finally:

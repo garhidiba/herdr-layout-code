@@ -119,3 +119,65 @@ test("a one-line selection highlights its other exact matches at once, in select
   ed.sel = { anchor: { line: 2, col: 1 }, head: { line: 2, col: 2 } };
   assert.equal(ed.highlights(10), null, "nor a whitespace-only one");
 });
+
+// ---------- auto-closing pairs ----------
+const A = require("../autoclose.cjs");
+const type = (ch, text, col, more = {}) => A.onType(ch, { pairs: A.pairsOf("source.ts"), text, col, selected: false, inText: false, closer: false, ...more });
+
+test("an opening bracket or quote pairs before whitespace, a closer or the line end, not before a word", () => {
+  assert.equal(type("(", "", 0), "pair");
+  assert.equal(type("[", "a )", 1), "pair");
+  assert.equal(type("{", ";", 0), "pair");
+  assert.equal(type("(", "abc", 0), null, "before a word: just the char");
+  assert.equal(type("x", "", 0), null);
+});
+
+test("quotes don't pair right after a word character or inside strings and comments", () => {
+  assert.equal(type('"', "", 0), "pair");
+  assert.equal(type("'", "don", 3), null, "an apostrophe in a word");
+  assert.equal(type('"', "", 0, { inText: true }), null);
+  assert.equal(type("`", "", 0), "pair", "backticks in TypeScript");
+  assert.equal(A.onType("`", { pairs: A.pairsOf("source.python"), text: "", col: 0 }), null, "but not in Python");
+  assert.equal(A.onType("'", { pairs: A.pairsOf("source.rust"), text: "", col: 0 }), null, "no ' pairs in Rust (lifetimes)");
+});
+
+test("typing a closer over one the editor inserted steps over it; with a selection, an opener wraps it", () => {
+  assert.equal(type(")", "()", 1, { closer: true }), "over");
+  assert.equal(type(")", "()", 1), null, "a closer the user typed is not stepped over");
+  assert.equal(type("(", "abc", 0, { selected: true }), "wrap");
+  assert.equal(type("x", "abc", 0, { selected: true }), null);
+});
+
+test("the cursor is in a string or comment by the grammar's tokens; after a closing quote is outside", async () => {
+  const { grammar, textmate } = await H.loadGrammar("source.ts");
+  const at = (text, col) => A.inStringOrComment(grammar.tokenizeLine2(text, textmate.INITIAL).tokens, text, col);
+  assert.equal(at('x = "ab', 6), true, "inside a string");
+  assert.equal(at('x = "ab"', 8), false, "after its closing quote");
+  assert.equal(at('x = "', 5), true, "right after a lone opening quote");
+  assert.equal(at("x // note", 9), true, "in a comment");
+  assert.equal(at("x = 1", 5), false);
+});
+
+test("editor: auto-closing, type-over, Backspace in an empty pair, wrapping, no pair in a string", async () => {
+  const ed = await editor([""], "source.ts", "/tmp/x.ts");
+  ed.typed("f(");
+  assert.deepEqual([ed.lines[0], ed.head.col], ["f()", 2]);
+  ed.typed('"');
+  assert.deepEqual([ed.lines[0], ed.head.col], ['f("")', 3]);
+  ed.typed("a\"");
+  assert.deepEqual([ed.lines[0], ed.head.col], ['f("a")', 5], "typed over the auto-inserted quote");
+  ed.typed(")");
+  assert.deepEqual([ed.lines[0], ed.head.col], ['f("a")', 6], "and over the auto-inserted paren");
+  ed.typed(" [");
+  ed.backspace(false);
+  assert.equal(ed.lines[0], 'f("a") ', "Backspace in [] deletes both");
+  ed.typed(")");
+  assert.equal(ed.lines[0], 'f("a") )', "a closer nobody inserted is typed");
+  ed.sel = { anchor: { line: 0, col: 3 }, head: { line: 0, col: 4 } };
+  ed.typed("(");
+  assert.equal(ed.lines[0], 'f("(a)") )', "an opener wraps the selection");
+  assert.deepEqual(ed.range().map(p => p.col), [4, 5], "keeping the inner text selected");
+  ed.moveTo({ line: 0, col: 5 });
+  ed.typed("'");
+  assert.equal(ed.lines[0], `f("(a')") )`, "no pair inside a string");
+});

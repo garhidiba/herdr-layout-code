@@ -30,6 +30,7 @@ const HV = require("./hexview.cjs");
 const E = require("./errorpage.cjs");
 const SB = require("./scrollbar.cjs");
 const D = require("./decorations.cjs");
+const A = require("./autoclose.cjs");
 
 // VS Code's "Col": characters before the cursor, tabs counted to the next tab stop.
 function visibleColumn(line, index, tab) {
@@ -52,6 +53,9 @@ function wordLeft(line, col) {
   while (col > 0 && classOf(line[col - 1]) === c && c !== 0) col--;
   return col;
 }
+
+// Closers on `line` at or after `col` moved by `delta` columns (an insert or delete there).
+const shiftClosers = (at, line, col, delta) => at.map(q => (q.line === line && q.col >= col ? { line, col: q.col + delta } : q));
 
 // ---------- the editor ----------
 const DOC_FIELDS = ["file", "doc", "buf", "hl", "indent", "scope", "language", "comment", "crumbs", "root", "session", "sel", "goal", "top", "left", "seenVersion"];
@@ -165,7 +169,37 @@ class Editor {
   }
   typed(text) {
     text = text.replace(/\r\n?/g, "\n");
+    if (text.length > 1 && !text.includes("\n") && /[()[\]{}"'`]/.test(text)) { for (const ch of text) this.typed(ch); return; } // a fast-typed chunk, key by key
+    const closers = this.liveClosers(), { line, col } = this.head, empty = this.empty;
+    if (this.autoClose(text, closers)) return;
     this.insert(text, text.includes("\n") ? null : "type");
+    if (empty && !text.includes("\n")) this.setClosers(shiftClosers(closers, line, col, text.length));
+  }
+
+  // ----- auto-closing pairs -----
+  // Closers the editor inserted itself ({ line, col }), valid until an edit they weren't moved along with.
+  liveClosers() { const c = this.closers; return c && c.buf === this.buf && c.version === this.buf.version ? c.at : []; }
+  setClosers(at) { this.closers = { buf: this.buf, version: this.buf.version, at }; }
+  // Typing `ch` steps over an auto-inserted closer, wraps the selection or inserts a pair (autoclose.cjs); false: a plain insert.
+  autoClose(ch, closers) {
+    const { line, col } = this.head, text = this.lines[line], pairs = A.pairsOf(this.scope);
+    const isCloser = closers.some(q => q.line === line && q.col === col);
+    this.hl.ensure(line, Date.now() + 20);
+    const action = A.onType(ch, { pairs, text, col, selected: !this.empty, closer: isCloser,
+      inText: A.inStringOrComment(this.hl.tokens[line] ?? null, text, col) });
+    if (action === "over") { this.moveTo({ line, col: col + 1 }); this.setClosers(closers.filter(q => q.line !== line || q.col !== col)); }
+    else if (action === "wrap") {
+      const [s, e] = this.range(), before = this.sel, shift = (p) => (p.line === s.line ? { line: p.line, col: p.col + 1 } : p);
+      const after = { anchor: shift(before.anchor), head: shift(before.head) };
+      this.buf.edit([{ start: e, text: pairs[ch] }, { start: s, text: ch }], { before, after });
+      this.sel = after; this.buf.seal(); this.reveal();
+    } else if (action === "pair") {
+      const at = { line, col: col + 1 };
+      this.buf.edit([{ start: this.head, text: ch + pairs[ch] }], { before: this.sel, after: caret(at), kind: "type" });
+      this.sel = caret(at); this.goal = null; this.reveal();
+      this.setClosers([...shiftClosers(closers, line, col, 2), at]);
+    }
+    return !!action;
   }
   deleteRange(s, e) {
     if (cmp(s, e) === 0) return;
@@ -175,12 +209,18 @@ class Editor {
   }
   backspace(word) {
     if (!this.empty) return this.deleteRange(...this.range());
-    const { line, col } = this.head, text = this.lines[line];
+    const { line, col } = this.head, text = this.lines[line], closers = this.liveClosers();
     if (col === 0) return line > 0 && this.deleteRange({ line: line - 1, col: this.lines[line - 1].length }, this.head);
+    const closer = closers.some(q => q.line === line && q.col === col);
+    if (!word && A.deletesPair({ pairs: A.pairsOf(this.scope), text, col, closer })) { // between an auto-closed empty pair: both go
+      this.deleteRange({ line, col: col - 1 }, { line, col: col + 1 });
+      return this.setClosers(shiftClosers(closers.filter(q => q.line !== line || q.col !== col), line, col, -2));
+    }
     let to = word ? wordLeft(text, col) : W.prevIndex(text, col);
     const lead = text.slice(0, col);
     if (!word && !this.indent.useTabs && /^ +$/.test(lead)) to = Math.max(0, col - (((col - 1) % this.tab) + 1)); // to the previous tab stop
     this.deleteRange({ line, col: to }, this.head);
+    this.setClosers(shiftClosers(closers, line, col, to - col));
   }
   deleteForward(word) {
     if (!this.empty) return this.deleteRange(...this.range());
