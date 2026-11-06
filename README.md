@@ -8,7 +8,8 @@ A VS Code–style layout for [Herdr](https://herdr.dev):
 - **Editor:** code files open in a terminal tab in a VS Code-like editor colored by VS Code's own tokenizer (Atom One Dark), with VS Code's right-click menu, command palette, quick open, macOS keys, Go to Definition / References / Rename / Format through tsserver and language servers, a save dialog, hot exit and auto save; images and markdown open in a viewer tab.
 - **Explorer menu:** VS Code's right-click menu (new, open with, reveal, cut/copy/paste, copy path, rename, delete to Trash).
 - **Pane menu:** Open in VS Code / Finder.
-- **Status bar:** Claude and Codex usage meters; Codex limit resets can be redeemed from the card.
+- **Status bar:** Claude and Codex usage meters; Codex limit resets can be redeemed from the card; a gear for Settings.
+- **Settings:** a VS Code-style dialog (gear, `cmd-,`, or the editor's Preferences: Open Settings) for auto save, trim/final newline, format on save, tab size and the core engine (JavaScript or the optional Rust core).
 
 See [RECIPE.md](RECIPE.md) for exactly what it does and how it is built.
 
@@ -33,6 +34,7 @@ Optional Claude meter: set Claude Code's `statusLine.command` to `sh ~/.config/h
 - Language servers, started on first use and stopped when the editor closes: `tsserver` (TypeScript/JavaScript; the project's `node_modules/typescript` first, else the one on PATH), `rust-analyzer`, `clangd`, `sourcekit-lsp`, and VS Code's JSON/CSS/HTML servers bundled in Devin.app (`node …/json-language-features/server/dist/node/jsonServerMain.js --stdio`, likewise css and html)
 - Without a server: `git grep` / `grep -r` (Go to Definition and references by word), `gofmt`, `rustfmt`, `prettier` (Format Document)
 - `cp`, `mv`, `mkdir`, `test`, `pbcopy`, `trash` or `osascript` (Explorer menu)
+- `<herdr home>/vscode-core/vscode-core --version` (Settings: Rust core status), `sh` + `<herdr home>/vscode-core/install.sh` (Build Rust core, only when you click it)
 - `code` (Open in VS Code), `open` (Finder, Reveal in Finder, System Default)
 - `stat`, `cp`, `sips` (image preview: copies the image into `mods/vscode-viewer/.cache/`)
 - `node` + `codex app-server` (Codex usage and limit resets, with your Codex login: it reads every 5 min and redeems a reset only when you click Use a reset and confirm)
