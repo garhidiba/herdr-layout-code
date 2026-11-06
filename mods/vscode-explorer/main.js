@@ -4,12 +4,14 @@
 // (menu.js), which runs as an overlay of this same mod.
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, window, run, appHome, props, shared, setShared, notify } from "herdr";
+import { spaces, panes, focused, exec, hc, readTextFile, watchFolder, theme, window, run, appHome, props, shared, setShared, notify } from "herdr";
 import { openArgs } from "./paths.js";
+import { createOpenTab } from "./launch.js";
 import { freshRoot, encode, decode } from "./cache.js";
 import { ExplorerMenu, ExplorerDialog, openMenu, refreshKey } from "./menu.js";
 import { createCore } from "./core.js";
 // Herdr starts with PATH=/usr/bin:/bin, so Homebrew/user tools (node, code, codex, trash) are looked up here too.
+const openTab = createOpenTab({ hc, run, spaces });
 const userExec = (cmd, args, opts) => exec("sh", ["-c", 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; exec "$0" "$@"', cmd, ...args], opts);
 
 // The project you work in: the focused terminal's folder. Editor and diff tabs have no folder, so focusing
@@ -270,9 +272,10 @@ export default class Files extends View {
     cx.notify();
   }
 
-  open(path) {
+  open(path, cx) {
     // The editor tab is a terminal: started in the Explorer's root, so focusing it keeps the tree where it is.
-    run("tab.new", openArgs(`${this.root}/${path}`, { on: this.on, appHome: appHome(), folder: this.root }));
+    const args = openArgs(`${this.root}/${path}`, { on: this.on, appHome: appHome(), folder: this.root });
+    cx.spawn(cx => openTab(args, cx));
   }
 
   menu(abs, dir, cx) {
@@ -292,7 +295,7 @@ export default class Files extends View {
         .on_click((e, cx) => {
           if (entry.dir) return this.toggle(path, cx);
           if (e.modifiers.platform && !this.on) userExec("code", [abs]).catch(() => {});
-          else this.open(path);
+          else this.open(path, cx);
         })
         .child(entry.dir ? svg(`mods/vscode-explorer/chevron-${open ? "down" : "right"}.svg`).size(12).flex_none().text_color(t.dim) : div().w(12).flex_none())
         .child(icon ? image(`mods/vscode-explorer/icons/${icon}.svg`).w(16).h(16).flex_none() : div().w(16).flex_none())

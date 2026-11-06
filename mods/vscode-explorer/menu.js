@@ -2,9 +2,11 @@
 // (props { menu } or { dialog }), so they share the open rule in paths.js with the tree.
 import { div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { exec, run, props, openOverlay, closeOverlay, theme, shared, setShared, appHome, writeTextFile } from "herdr";
+import { exec, hc, run, spaces, props, openOverlay, closeOverlay, theme, shared, setShared, appHome, writeTextFile } from "herdr";
+import { createOpenTab } from "./launch.js";
 import { menuItems, menuHeight, OPEN_WITH, openArgs, baseName, parentOf, relativeTo, within, freeName, nameProblem } from "./paths.js";
 
+const openTab = createOpenTab({ hc, run, spaces });
 const CLIPBOARD = "vscode-explorer.clipboard", REFRESH = "vscode-explorer.refresh";
 export const refreshKey = REFRESH;
 
@@ -56,11 +58,13 @@ export class ExplorerMenu {
   choose(action, cx) {
     const t = this.target, folder = t.dir ? t.path : parentOf(t.path);
     if (action === "openWith") { this.withList = true; this.at = -1; return cx.notify(); }
+    // Closed once the tab is shown: closing first could end the wait. A second pick meanwhile is ignored.
+    const open = (args) => !this.opening && (this.opening = true) && cx.spawn(async cx => { try { await openTab(args, cx); } finally { this.close(); } });
+    if (action === "open") return open(openArgs(t.path, { on: t.on, appHome: appHome(), folder: t.root }));
+    if (action === "editor" || action === "viewer") return open(openArgs(t.path, { appHome: appHome(), how: action, folder: t.root }));
     this.close();
     const fail = (e) => dialog({ kind: "error", text: String(e?.message ?? e) }, 150);
     switch (action) {
-      case "open": return run("tab.new", openArgs(t.path, { on: t.on, appHome: appHome(), folder: t.root }));
-      case "editor": case "viewer": return run("tab.new", openArgs(t.path, { appHome: appHome(), how: action, folder: t.root }));
       case "code": return sh('exec code "$1"', t.path).catch(fail);
       case "system": return exec("open", [t.path]).catch(fail);
       case "reveal": return exec("open", ["-R", t.path]).catch(fail);
@@ -118,7 +122,7 @@ export class ExplorerDialog {
 
   close() { closeOverlay(props().overlay); }
 
-  async apply() {
+  async apply(cx) {
     const s = this.spec;
     if (s.kind === "delete") {
       const r = await sh(TRASH, s.path);
@@ -131,7 +135,7 @@ export class ExplorerDialog {
     const problem = nameProblem(name, name && !name.includes("/") && await exists(target));
     if (problem) throw new Error(problem);
     if (s.kind === "newFolder") { const r = await exec("mkdir", [target]); if (r.code !== 0) throw new Error(r.stderr.trim()); return; }
-    if (s.kind === "newFile") { await writeTextFile(target, "", null); run("tab.new", openArgs(target, { appHome: appHome(), folder: s.root })); return; }
+    if (s.kind === "newFile") { await writeTextFile(target, "", null); await openTab(openArgs(target, { appHome: appHome(), folder: s.root }), cx); return; }
     const r = await exec("mv", ["-n", s.path, target]);
     if (r.code !== 0) throw new Error(r.stderr.trim() || "Rename failed");
   }
@@ -139,7 +143,7 @@ export class ExplorerDialog {
   submit(cx) {
     if (this.spec.kind === "error") return this.close();
     cx.spawn(async (cx) => {
-      try { await this.apply(); this.close(); refresh(); }
+      try { await this.apply(cx); this.close(); refresh(); }
       catch (e) { this.error = String(e?.message ?? e); cx.notify(); }
     });
   }
