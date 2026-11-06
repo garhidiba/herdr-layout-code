@@ -11,7 +11,7 @@ import { theme, props, run, exec, hc, spaces, appHome, readTextFile, writeTextFi
 import { FILE, normalize, parse, loose, withSetting, withDefaults, rewrite, updateFile, stepDelay, coreStatus, coreCurrent, DEFAULTS,
   PAGE_FILE, requestedPage } from "./settings.js";
 import { FILE as KB_FILE, fromHerdr, label, matchesRow, conflicts, parseFile, serializeFile, withKey, withoutKey, withReset,
-  hasUserEntries, herdrRoute, withPassthrough } from "./keybindings.js";
+  hasUserEntries, herdrRoute, withPassthrough, recordStep } from "./keybindings.js";
 import { createOpenTab } from "./launch.js";
 
 const openTab = createOpenTab({ hc, run, spaces });
@@ -34,7 +34,7 @@ export default class Settings extends View {
     this.number("files.autoSaveDelay");
     this.number("editor.tabSize");
     this.page = "settings";
-    this.kb = null; this.kbEntries = []; this.kbText = undefined; this.kbError = null; this.query = ""; this.rec = null;
+    this.kb = null; this.kbOs = "mac"; this.kbEntries = []; this.kbText = undefined; this.kbError = null; this.query = ""; this.rec = null;
     this.search = InputState.new({ placeholder: "Type to search in keybindings" });
     this.search.on("change", (_e, cx) => { this.query = this.search.value(); cx.notify(); });
     this.recH = cx.focus_handle();
@@ -114,7 +114,8 @@ export default class Settings extends View {
       const r = await userExec("node", [`${appHome()}/${KB_TABLE}`, "--table", kbPath()]).catch((e) => ({ code: -1, stderr: e?.message ?? String(e) }));
       try {
         if (r.code !== 0) throw new Error((r.stderr || `exit ${r.code}`).trim().split("\n").pop());
-        this.kb = JSON.parse(r.stdout).rows;
+        const table = JSON.parse(r.stdout);
+        this.kb = table.rows; this.kbOs = table.os ?? "mac"; // the OS whose keys the editor uses: labels in its style
       } catch (e) { this.kbError = `Cannot list the editor's commands (node ${KB_TABLE}): ${e.message}`; }
       cx.notify();
     });
@@ -147,12 +148,12 @@ export default class Settings extends View {
     cx.timer.after(30, () => this.recH.focus()); // again once the recorder is drawn and tracks the handle
     cx.notify();
   }
-  // The recorder takes the next chord; Enter saves it, Escape cancels (VS Code's Define Keybinding).
+  // The recorder takes the next keystrokes (two make a chord); Enter saves, Escape cancels (VS Code's Define Keybinding).
   recordKey(e, cx) {
     cx.stop_propagation();
     if (e.keystroke === "escape") this.rec = null;
     else if (e.keystroke === "enter") { if (this.rec.key) this.saveRecord(cx); }
-    else this.rec.key = fromHerdr(e.keystroke) ?? this.rec.key;
+    else { const k = fromHerdr(e.keystroke); if (k) this.rec.key = recordStep(this.rec.key, k); }
     cx.notify();
   }
   saveRecord(cx) {
@@ -258,13 +259,13 @@ export default class Settings extends View {
 
   kbd(t, c, big = false) {
     return div().flex_none().h(big ? 32 : 20).px(big ? 12 : 6).flex().items_center().rounded(4).border_1().border_color(t.input)
-      .bg(t.background).text_size(big ? 16 : 11.5).text_color(t.foreground).child(label(c));
+      .bg(t.background).text_size(big ? 16 : 11.5).text_color(t.foreground).child(label(c, this.kbOs));
   }
 
   // "⇧⌘D doesn't reach the editor…" with the button that passes it (and what that takes from other terminals).
   passNote(t, rowId, key, route) {
-    const k = label(key), taken = route.loses.map((l) => `${l.action} (${l.section})`).join(", ");
-    const why = taken ? `Herdr runs ${taken} for it.` : "Herdr keeps ⌘ keys unless keys.json passes them to terminal programs.";
+    const k = label(key, this.kbOs), taken = route.loses.map((l) => `${l.action} (${l.section})`).join(", ");
+    const why = taken ? `Herdr runs ${taken} for it.` : `Herdr keeps ${this.kbOs === "mac" ? "⌘" : "Super"} keys unless keys.json passes them to terminal programs.`;
     const cost = taken ? `Passing it sends ${k} to the program in every terminal, so ${taken} no longer runs while a terminal has focus.`
       : `Nothing in Herdr uses ${k}, so other terminals lose nothing.`;
     return h_flex().gap(10).items_center().pb(8)
@@ -280,7 +281,7 @@ export default class Settings extends View {
         .child(v_flex().flex_1().min_w(0)
           .child(div().text_size(12.5).truncate().child(name))
           .child(div().text_size(10.5).text_color(t.dim).truncate().child(r.id)))
-        .child(h_flex().w(120).flex_none().child(r.key ? this.kbd(t, r.key) : div().text_size(11.5).text_color(t.dim).child("—")))
+        .child(h_flex().w(160).flex_none().child(r.key ? this.kbd(t, r.key) : div().text_size(11.5).text_color(t.dim).child("—")))
         .child(div().w(56).flex_none().text_size(11.5).text_color(r.source === "User" ? t.foreground : t.muted).child(r.source))
         .child(h_flex().w(236).flex_none().gap(4).justify_end()
           .child(this.small(t, `change-${rowId}`, r.key ? "Change" : "Add", `Change keybinding of ${name}`, (_e, cx) => this.startRecord(r, cx)))
@@ -312,7 +313,7 @@ export default class Settings extends View {
 
   keysPage(t) {
     if (this.rec) return this.recorder(t);
-    const all = this.kb ?? [], rows = all.filter((r) => matchesRow(r, this.query)), bindings = herdrKeys();
+    const all = this.kb ?? [], rows = all.filter((r) => matchesRow(r, this.query, this.kbOs)), bindings = herdrKeys();
     const head = (text, w) => (w ? div().w(w).flex_none() : div().flex_1()).child(text);
     return v_flex().flex_1().min_h(0)
       .child(h_flex().px(18).pt(10).pb(6).gap(10).items_center()
@@ -320,7 +321,7 @@ export default class Settings extends View {
           .child(Input.new(this.search).w_full()))
         .child(div().text_size(11).text_color(t.dim).child(this.kb ? `${rows.length} of ${all.length}` : "Loading…")))
       .child(h_flex().px(18).h(26).gap(10).items_center().border_b(1).border_color(t.border).text_size(11).font_semibold().text_color(t.dim)
-        .child(head("Command", 0)).child(head("Keybinding", 120)).child(head("Source", 56)).child(head("", 236)))
+        .child(head("Command", 0)).child(head("Keybinding", 160)).child(head("Source", 56)).child(head("", 236)))
       .child(v_flex().id("kb-rows").flex_1().min_h(0).px(18).pb(10).overflow_y_scrollbar()
         .children(rows.map((r) => this.keyRow(t, r, bindings)))
         .when(Boolean(this.kb) && !rows.length, (el) => el.child(div().py(16).text_size(12).text_color(t.muted).child("No keybindings match the search."))));

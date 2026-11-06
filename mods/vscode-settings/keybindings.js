@@ -1,7 +1,8 @@
-// Pure rules for the Keyboard Shortcuts page: key spellings (VS Code "shift+cmd+k", Herdr/GPUI "cmd-shift-k", and the
-// editor's chord "shift+cmd+k" that both map to), edits of <herdr home>/vscode-keybindings.json that keep every other
-// entry, and whether Herdr lets a key reach the editor (keys.json's "terminal" passthrough). Which binding wins is the
-// editor's rule (mods/vscode-viewer/editor/keybindings.cjs, whose `--table` the page shows); chords here match its form.
+// Pure rules for the Keyboard Shortcuts page: key spellings (VS Code "shift+cmd+k" or the chord "ctrl+k ctrl+c", Herdr/GPUI
+// "cmd-shift-k", and the editor's key "shift+cmd+k" that both map to), labels in the OS's style, edits of
+// <herdr home>/vscode-keybindings.json that keep every other entry, and whether Herdr lets a key reach the editor
+// (keys.json's "terminal" passthrough, step by step for a chord). Which binding wins, and for which OS, is the editor's
+// rule (mods/vscode-viewer/editor/keybindings.cjs, whose `--table` gives the rows and the OS); keys here match its form.
 
 export const FILE = "vscode-keybindings.json";
 
@@ -15,40 +16,57 @@ function split(s, sep) {
   const i = s.length > 1 ? s.lastIndexOf(sep, s.length - 2) : -1;
   return { mods: i < 0 ? [] : s.slice(0, i).split(sep), name: s.slice(i + 1) };
 }
-function chord(s, sep) {
-  if (typeof s !== "string") return null;
-  s = s.trim().toLowerCase();
-  if (!s || /\s/.test(s)) return null; // two-step chords ("cmd+k cmd+s") aren't supported
+// One keystroke ("shift+cmd+k" with sep "+") -> the editor's form, or null.
+function step(s, sep) {
   const { mods, name } = split(s, sep), m = mods.map(x => MODS[x]);
-  if (m.some(x => !x)) return null;
+  if (!name || m.some(x => !x)) return null;
   return ORDER.filter(o => m.includes(o)).map(o => o + "+").join("") + (NAMES[name] ?? name);
 }
+// A key of one or two steps ("cmd+k cmd+s") -> the editor's form, or null (empty, three steps, unknown modifier).
+function chord(s, sep) {
+  if (typeof s !== "string") return null;
+  const steps = s.trim().toLowerCase().split(/\s+/).map(x => step(x, sep));
+  return steps[0] && steps.length <= 2 && steps.every(Boolean) ? steps.join(" ") : null;
+}
+const steps = (c) => c.split(" ");
 
-// VS Code key -> chord, or null.
+// VS Code key (a chord too) -> the editor's key, or null.
 export const canon = (key) => chord(key, "+");
-// Herdr / GPUI keystroke ("cmd-shift-d", what on_key_down reports) -> chord, or null.
-export const fromHerdr = (keystroke) => chord(keystroke, "-");
-// Chord -> Herdr's spelling for keys.json.
-export function toHerdr(c) {
-  const { mods, name } = split(c, "+");
+// Herdr / GPUI keystroke ("cmd-shift-d", what on_key_down reports; win/super are the same key as cmd) -> key, or null.
+export const fromHerdr = (keystroke) => (typeof keystroke === "string" && !/\s/.test(keystroke.trim()) ? chord(keystroke, "-") : null);
+// Key -> Herdr's spelling for keys.json (each step of a chord).
+export const toHerdr = (c) => steps(c).map((s) => {
+  const { mods, name } = split(s, "+");
   return [...HERDR_ORDER.filter(m => mods.includes(m)), name].join("-");
-}
+}).join(" ");
 
-// Chord -> macOS label in VS Code's glyphs (the editor's commands.cjs label): "shift+cmd+k" -> "⇧⌘K".
+// The recorder's key after another keystroke: a second keystroke makes a chord (VS Code's Define Keybinding), a third
+// starts over.
+export const recordStep = (prev, keystroke) => (prev && !prev.includes(" ") ? `${prev} ${keystroke}` : keystroke);
+
+// Key -> its label as VS Code shows it on that OS (the editor's commands.cjs label): macOS glyphs "⇧⌘K", "⌘K ⌘J";
+// Windows / Linux text "Ctrl+Shift+K", "Ctrl+K Ctrl+J" (⌘ is the Windows / Super key).
 const GLYPHS = { ctrl: "⌃", alt: "⌥", shift: "⇧", cmd: "⌘" };
-const KEY_GLYPHS = { up: "↑", down: "↓", left: "←", right: "→", enter: "↩", backspace: "⌫", delete: "⌦", tab: "⇥", escape: "Escape",
-  pageup: "PageUp", pagedown: "PageDown", space: "Space" };
-export function label(c) {
+const MAC_KEYS = { up: "↑", down: "↓", left: "←", right: "→", enter: "↩", backspace: "⌫", delete: "⌦", tab: "⇥", escape: "Escape",
+  pageup: "PageUp", pagedown: "PageDown", space: "Space", home: "Home", end: "End", insert: "Insert" };
+const TEXT_KEYS = { up: "UpArrow", down: "DownArrow", left: "LeftArrow", right: "RightArrow", enter: "Enter", backspace: "Backspace",
+  delete: "Delete", tab: "Tab", escape: "Escape", pageup: "PageUp", pagedown: "PageDown", space: "Space", home: "Home", end: "End", insert: "Insert" };
+const capital = (name) => name.charAt(0).toUpperCase() + name.slice(1);
+export function label(c, os = "mac") {
   if (!c) return "";
-  const { mods, name } = split(c, "+");
-  return mods.map(m => GLYPHS[m]).join("") + (KEY_GLYPHS[name] ?? name.charAt(0).toUpperCase() + name.slice(1));
+  return steps(c).map((s) => {
+    const { mods, name } = split(s, "+");
+    if (os === "mac") return mods.map(m => GLYPHS[m]).join("") + (MAC_KEYS[name] ?? capital(name));
+    const text = { ctrl: "Ctrl", shift: "Shift", alt: "Alt", cmd: os === "win" ? "Windows" : "Super" };
+    return [...["ctrl", "shift", "alt", "cmd"].filter(m => mods.includes(m)).map(m => text[m]), TEXT_KEYS[name] ?? capital(name)].join("+");
+  }).join(" ");
 }
 
-// Search: the query in the title, id or key (as typed, as a glyph label, or as a key spelled in any order).
-export function matchesRow(row, query) {
+// Search: the query in the title, id or key (as typed, as the OS's label, or as a key spelled in any order).
+export function matchesRow(row, query, os = "mac") {
   const q = query.trim().toLowerCase();
   if (!q) return true;
-  return [row.title, row.id, row.key, label(row.key)].some(s => s.toLowerCase().includes(q)) || (!!row.key && canon(q) === row.key);
+  return [row.title, row.id, row.key, label(row.key, os)].some(s => s.toLowerCase().includes(q)) || (!!row.key && canon(q) === row.key);
 }
 
 // How many other rows already have this key (the recorder's "N existing commands have this keybinding").
@@ -95,20 +113,28 @@ export const hasUserEntries = (entries, id) => entries.length !== withReset(entr
 
 // ----- Herdr's keys -----
 
-// Does the chord reach a terminal program (the editor)? bindings: Herdr's keys(), [{ section, keys, action }].
-// "terminal" in the terminal section passes it; a global, layout or terminal action takes it first; ⌘ keys
-// nobody binds don't reach programs either. `loses`: what passing it takes from every terminal.
+// Does the key reach a terminal program (the editor)? bindings: Herdr's keys() for this OS, [{ section, keys, action }].
+// "terminal" in the terminal section passes it; a global, layout or terminal action takes it first; ⌘ (Windows / Super)
+// keys nobody binds don't reach programs either. A chord passes when both its keystrokes do. `loses`: what passing it
+// takes from every terminal.
 export function herdrRoute(bindings, c) {
-  const hits = bindings.filter(b => fromHerdr(b.keys) === c && (b.section === "terminal" || b.section === "global" || b.section.startsWith("layout:")));
-  const passed = hits.some(b => b.section === "terminal" && b.action === "terminal");
-  const loses = hits.filter(b => b.action !== "terminal").map(({ section, action }) => ({ section, action }));
-  return { passes: passed || (!loses.length && !split(c, "+").mods.includes("cmd")), loses };
+  let passes = true;
+  const loses = [];
+  for (const s of steps(c)) {
+    const hits = bindings.filter(b => fromHerdr(b.keys) === s && (b.section === "terminal" || b.section === "global" || b.section.startsWith("layout:")));
+    const passed = hits.some(b => b.section === "terminal" && b.action === "terminal");
+    const taken = hits.filter(b => b.action !== "terminal").map(({ section, action }) => ({ section, action }));
+    passes &&= passed || (!taken.length && !split(s, "+").mods.includes("cmd"));
+    loses.push(...taken);
+  }
+  return { passes, loses };
 }
 
-// keys.json object with the chord passed to terminal programs; other sections and keys kept, another spelling of the
-// same key in "terminal" replaced.
+// keys.json object with the key (each keystroke of a chord) passed to terminal programs; other sections and keys kept,
+// another spelling of the same keystroke in "terminal" replaced.
 export function withPassthrough(keys, c) {
   if (!keys || typeof keys !== "object" || Array.isArray(keys)) throw new Error("keys.json is not a JSON object");
-  const terminal = Object.fromEntries(Object.entries(keys.terminal ?? {}).filter(([k]) => fromHerdr(k) !== c));
-  return { ...keys, terminal: { ...terminal, [toHerdr(c)]: "terminal" } };
+  let terminal = { ...(keys.terminal ?? {}) };
+  for (const s of steps(c)) terminal = { ...Object.fromEntries(Object.entries(terminal).filter(([k]) => fromHerdr(k) !== s)), [toHerdr(s)]: "terminal" };
+  return { ...keys, terminal };
 }
