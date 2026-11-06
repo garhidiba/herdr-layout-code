@@ -58,8 +58,8 @@ export class ExplorerMenu {
     this.close();
     const fail = (e) => dialog({ kind: "error", text: String(e?.message ?? e) }, 150);
     switch (action) {
-      case "open": return run("tab.new", openArgs(t.path, { on: t.on, appHome: appHome() }));
-      case "editor": case "viewer": return run("tab.new", openArgs(t.path, { appHome: appHome(), how: action }));
+      case "open": return run("tab.new", openArgs(t.path, { on: t.on, appHome: appHome(), folder: t.root }));
+      case "editor": case "viewer": return run("tab.new", openArgs(t.path, { appHome: appHome(), how: action, folder: t.root }));
       case "code": return exec("code", [t.path]).catch(fail);
       case "system": return exec("open", [t.path]).catch(fail);
       case "reveal": return exec("open", ["-R", t.path]).catch(fail);
@@ -130,7 +130,7 @@ export class ExplorerDialog {
     const problem = nameProblem(name, name && !name.includes("/") && await exists(target));
     if (problem) throw new Error(problem);
     if (s.kind === "newFolder") { const r = await exec("mkdir", [target]); if (r.code !== 0) throw new Error(r.stderr.trim()); return; }
-    if (s.kind === "newFile") { await writeTextFile(target, "", null); run("tab.new", openArgs(target, { appHome: appHome() })); return; }
+    if (s.kind === "newFile") { await writeTextFile(target, "", null); run("tab.new", openArgs(target, { appHome: appHome(), folder: s.root })); return; }
     const r = await exec("mv", ["-n", s.path, target]);
     if (r.code !== 0) throw new Error(r.stderr.trim() || "Rename failed");
   }

@@ -6,11 +6,12 @@ export const EDITOR = "mods/vscode-viewer/editor/vsedit.cjs";
 export const baseName = (p) => p.slice(p.lastIndexOf("/") + 1);
 export const parentOf = (p) => p.slice(0, p.lastIndexOf("/")) || "/";
 
-// tab.new args: the terminal editor, or the vscode-viewer tab (images, markdown, remote files, or when asked).
-export function openArgs(file, { on = null, appHome, how = "auto" }) {
+// tab.new args: the terminal editor (started in `folder`, default the file's own), or the vscode-viewer tab
+// (images, markdown, remote files, or when asked).
+export function openArgs(file, { on = null, appHome, how = "auto", folder = parentOf(file) }) {
   const name = baseName(file);
   if (how === "viewer" || on || (how === "auto" && VIEWER_EXT.test(name))) return { name, mod: "vscode-viewer", props: { file, on } };
-  return { name, folder: parentOf(file), argv: ["node", `${appHome}/${EDITOR}`, file] };
+  return { name, folder, argv: ["node", `${appHome}/${EDITOR}`, file] };
 }
 
 export const relativeTo = (root, abs) => (abs === root ? "." : abs.startsWith(root + "/") ? abs.slice(root.length + 1) : abs);

@@ -14,6 +14,7 @@ test("code opens in the terminal editor, images/markdown/remote files in the vie
   assert.equal(openArgs("/p/README.md", { appHome: home, how: "editor" }).argv[0], "node");
   assert.equal(openArgs("/p/a.ts", { appHome: home, how: "viewer" }).mod, "vscode-viewer");
   assert.equal(parentOf("/a"), "/");
+  assert.equal(openArgs("/p/src/a.ts", { appHome: home, folder: "/p" }).folder, "/p"); // the tree's root, not src
 });
 
 test("relative paths are relative to the Explorer root", () => {

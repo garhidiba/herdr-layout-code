@@ -8,14 +8,19 @@ import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, window,
 import { openArgs } from "./paths.js";
 import { ExplorerMenu, ExplorerDialog, openMenu, refreshKey } from "./menu.js";
 
-// Rooted at the active space's folder, like a VS Code workspace (opening a file in a new tab doesn't move it);
-// the focused pane's folder only when the space has none.
+// The project you work in: the focused terminal's folder. Editor and diff tabs have no folder, so focusing
+// them keeps this space's last project instead of reloading; a fresh space starts at its first terminal's folder.
+const lastRoot = {};
 function location() {
   const space = spaces().find(s => s.active), f = focused();
-  if (space?.folder) return { cwd: space.folder, on: space.machine ?? null, space: space.id };
   const pane = f?.pane ? panes().find(p => p.pane === f.pane) : null;
   const on = f?.pane === null ? (f.terminal?.includes("/") ? f.terminal.split("/")[0] : null) : space?.machine ?? null;
-  return { cwd: pane?.cwd || f?.cwd, on, space: space?.id };
+  const cwd = f?.pane === null ? f?.cwd : pane?.terminal ? pane.cwd : null;
+  if (cwd) return (lastRoot[space?.id] = { cwd, on, space: space?.id });
+  if (lastRoot[space?.id]) return lastRoot[space?.id];
+  const tabs = new Set((space?.tabs ?? []).map(t => t.id));
+  const first = panes().find(p => tabs.has(p.tab) && p.terminal && p.cwd);
+  return { cwd: first?.cwd || space?.folder, on: space?.machine ?? null, space: space?.id };
 }
 const key = () => JSON.stringify(location());
 const PER_FOLDER = 500, TOTAL = 5000;
@@ -177,7 +182,8 @@ export default class Files extends View {
   }
 
   open(path) {
-    run("tab.new", openArgs(`${this.root}/${path}`, { on: this.on, appHome: appHome() }));
+    // The editor tab is a terminal: started in the Explorer's root, so focusing it keeps the tree where it is.
+    run("tab.new", openArgs(`${this.root}/${path}`, { on: this.on, appHome: appHome(), folder: this.root }));
   }
 
   menu(abs, dir, cx) {
