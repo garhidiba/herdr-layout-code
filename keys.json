@@ -50,7 +50,8 @@
     "cmd-alt-s": "terminal",
     "cmd-shift-\\": "terminal",
     "cmd-f3": "terminal",
-    "cmd-shift-f3": "terminal"
+    "cmd-shift-f3": "terminal",
+    "cmd-f": "terminal"
   },
   "layout:vscode": {
     "cmd-e": "layout.toggle:panel",
