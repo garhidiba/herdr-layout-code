@@ -18,7 +18,9 @@ const C = require("./commands.cjs");
 const O = require("./overlays.cjs");
 const S = require("./settings.cjs");
 const B = require("./backup.cjs");
-const Lang = require("./lang/index.cjs");
+// The language layer loads on first use (a server request, or shutdown when it was used), not before the first frame.
+let langModule = null;
+const Lang = new Proxy({}, { get: (_, k) => (langModule ??= require("./lang/index.cjs"))[k] });
 const { applyWorkspaceEdit, lastFirst } = require("./lang/edits.cjs");
 const { wordOccurrences, Fallback } = require("./lang/fallback.cjs");
 const { gitRoot, run, which } = require("./lang/proc.cjs");
@@ -60,7 +62,7 @@ class Editor {
   constructor(file, doc, { grammar, colorMap, textmate }, theme, scope, settings = S.normalize()) {
     this.theme = theme; this.textmate = textmate; this.settings = settings;
     this.colors = paletteOf(theme.colors);
-    this.colorMap = colorMap.map(c => (c ? c.slice(0, 7).toLowerCase() : this.colors.fg));
+    this.colorMap = this.colorsOf(colorMap);
     this.docs = new Map(); this.loading = new Map(); this.fileLines = new Map();
     Object.assign(this, this.makeState(file, doc, grammar, scope));
     this.prompt = null; this.message = null; this.find = { query: "", replace: "", field: "query", matches: [], version: -1 };
@@ -80,6 +82,13 @@ class Editor {
     return { file, doc, buf, hl, indent: F.detectIndent(buf.lines, fallback), scope, language: L.languageName(grammar ? scope : null),
       comment: L.commentOf(scope), crumbs: breadcrumbs(file), root: gitRoot(file), session: null, sel: caret({ line: 0, col: 0 }),
       goal: null, top: 0, left: 0, seenVersion: 0 };
+  }
+  colorsOf(colorMap) { return colorMap.map(c => (c ? c.slice(0, 7).toLowerCase() : this.colors.fg)); }
+  // The grammar arrives after the first, uncolored frame (main paints before loading it).
+  useGrammar({ grammar, colorMap, textmate }) {
+    this.textmate = textmate; this.colorMap = this.colorsOf(colorMap);
+    this.hl.reset(grammar, textmate.INITIAL);
+    this.language = L.languageName(grammar ? this.scope : null);
   }
   snapshot() { const st = {}; for (const k of DOC_FIELDS) st[k] = this[k]; return st; }
   activate(st) { this.docs.set(this.file, this.snapshot()); Object.assign(this, st); this.docs.set(st.file, st); }
@@ -1048,7 +1057,9 @@ async function main() {
 
   const settings = S.load();
   const index = H.loadIndex(), theme = H.loadTheme(), scope = L.scopeOf(index, path.basename(file));
-  const ed = new Editor(file, doc, await H.loadGrammar(scope, index, theme), theme, scope, settings.values);
+  // Paint the text right away; the grammar (oniguruma wasm, regex compilation) loads after the first frame.
+  const ed = new Editor(file, doc, { grammar: null, colorMap: [], textmate: { INITIAL: null } }, theme, scope, settings.values);
+  ed.language = L.languageName(index.scopes[scope] ? scope : null);
   ed.settingsStamp = settings.stamp;
 
   let restored = false;
@@ -1057,7 +1068,7 @@ async function main() {
     restored = true;
     try { process.stdout.write(LEAVE); } catch {}
     try { process.stdin.setRawMode(false); } catch {}
-    Lang.shutdown();
+    if (langModule) Lang.shutdown();
     rightClicksTo("menu", true);
   };
   // Closed from outside (tab closed, terminal gone): keep unsaved text as a backup, then leave.
@@ -1075,18 +1086,16 @@ async function main() {
   rightClicksTo("program", false);
 
   let scheduled = false, timer = null;
-  let first = true;
-  const draw = () => {
+  const draw = (budget = 60) => {
     scheduled = false;
     ed.rows = process.stdout.rows || 24; ed.cols = process.stdout.columns || 80;
-    const { out, done } = ed.render(first ? 1000 : 60); // the first screen waits for its colors
-    first = false;
+    const { out, done } = ed.render(budget);
     process.stdout.write("\x1b[?25l" + out);
     if (!done) schedule(); // keep tokenizing toward the viewport in small slices
     clearTimeout(timer);
     if (ed.message) timer = setTimeout(schedule, Math.max(50, ed.message.until - Date.now() + 10));
   };
-  const schedule = () => { if (!scheduled) { scheduled = true; setImmediate(draw); } };
+  const schedule = () => { if (!scheduled) { scheduled = true; setImmediate(() => draw()); } };
   ed.redraw = () => { ed.afterEvent(); schedule(); };
   ed.onExit = () => { restore(); process.exit(0); };
   Lang.setApplyEdit((ws) => { ed.applyEdit(ws); schedule(); return true; });
@@ -1103,7 +1112,9 @@ async function main() {
   });
   process.stdout.on("resize", schedule);
   ed.offerBackup();
-  draw();
+  draw(0); // the text at once, uncolored
+  ed.useGrammar(await H.loadGrammar(scope, index, theme));
+  draw(1000); // the first colored screen waits for its colors
 }
 
 // A crash shows the error page (unsaved text is already in a backup); Try Again starts the editor again in this terminal.

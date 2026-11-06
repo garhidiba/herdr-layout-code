@@ -99,6 +99,12 @@ class Highlighter {
     this.editEnd = -1;           // last line touched by edits since then
   }
 
+  // A new grammar (it loads after the first, uncolored frame): everything is tokenized again.
+  reset(grammar, initial) {
+    this.grammar = grammar; this.initial = initial;
+    this.tokens = []; this.states = []; this.long = []; this.validTo = 0; this.editEnd = -1;
+  }
+
   // Buffer listener: lines [start, start+removed) became `inserted` lines.
   onEdit(start, removed, inserted) {
     const fill = new Array(inserted).fill(undefined);

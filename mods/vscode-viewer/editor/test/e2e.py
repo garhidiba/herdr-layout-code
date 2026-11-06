@@ -77,6 +77,14 @@ class Term:
         raise AssertionError("editor did not exit")
 
 
+def colored_frame(t, timeout=5.0):
+    """Waits for the second frame: the first one is painted before the grammar loads, uncolored."""
+    end = time.time() + timeout
+    while t.out.count(b"Ln 1, Col 1") < 2 and time.time() < end:
+        t.read(timeout=0.05)
+    return t.out.count(b"Ln 1, Col 1") >= 2
+
+
 def sgr(hexcolor):
     r, g, b = (int(hexcolor[i:i + 2], 16) for i in (1, 3, 5))
     return f"\x1b[38;2;{r};{g};{b}m"
@@ -112,7 +120,7 @@ def run_tsx(tmp):
     file = os.path.join(tmp, "App.tsx")
     open(file, "w").write(TSX)
     t = Term(file)
-    assert t.read("Ln 1, Col 1"), "no first frame"
+    assert colored_frame(t), "no colored frame"
     screen = t.out.decode("utf8", "replace")
     assert "TypeScript JSX" in screen and "Spaces: 2" in screen and "UTF-8" in screen and "LF" in screen
     assert "\x1b[?1049h" in screen and "\x1b[?2004h" in screen and "\x1b[?1006h" in screen
@@ -139,7 +147,7 @@ def run_go(tmp):
     file = os.path.join(tmp, "main.go")
     open(file, "w").write(GO)
     t = Term(file)
-    assert t.read("Ln 1, Col 1"), "no first frame"
+    assert colored_frame(t), "no colored frame"
     screen = t.out.decode("utf8", "replace")
     assert "Go" in screen and "Tab Size: 4" in screen
     check_colors(screen, file, [("package", "#C678DD"), ("func", "#C678DD"), ("Println", "#61AFEF")])
