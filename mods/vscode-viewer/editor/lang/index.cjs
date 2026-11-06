@@ -35,6 +35,8 @@ const SERVERS = {
 const pool = new Map(); // "kind:root" -> server | Error
 let applyEdit = () => false; // where workspace/applyEdit from a server goes (set by the editor)
 const setApplyEdit = (fn) => { applyEdit = fn; };
+let onDiagnostics = () => {}; // told the file whose diagnostics a server changed (set by the editor)
+const setOnDiagnostics = (fn) => { onDiagnostics = fn; };
 
 function startServer(kind, file, root) {
   const key = `${kind}:${root}`;
@@ -50,6 +52,7 @@ function startServer(kind, file, root) {
         s.applyEdit = (ws) => applyEdit(ws);
       }
     } catch (e) { s = e; }
+    if (!(s instanceof Error)) s.onDiagnostics = (f) => onDiagnostics(f);
     pool.set(key, s);
   }
   return s instanceof Error ? null : s;
@@ -91,12 +94,18 @@ class Session {
   }
   // Go to Symbol / breadcrumbs: { source (the provider's label), items } from the server when it has them, else (or when
   // it fails) the regex outline.
+  // The server (started here) also gets the current text, which keeps its diagnostics current.
   async symbols(ctx) {
-    const p = this.provider("symbols");
-    if (p && p !== this.fallback) {
-      try { await p.sync(ctx.file, ctx.lines.join("\n")); return { source: p.label, items: await p.symbols(ctx) }; } catch {}
+    const s = this.kind ? startServer(this.kind, this.file, this.root) : null;
+    if (s) {
+      try { await s.sync(ctx.file, ctx.lines.join("\n")); if (s.can("symbols")) return { source: s.label, items: await s.symbols(ctx) }; } catch {}
     }
     return { source: this.fallback.label, items: await this.fallback.symbols(ctx) };
+  }
+  // What the running server last reported for this file (nothing without one).
+  diagnostics() {
+    const s = this.kind && pool.get(`${this.kind}:${this.root}`);
+    return (s && !(s instanceof Error) && s.diags?.get(this.file)) || [];
   }
   saved(file) { const s = this.kind && pool.get(`${this.kind}:${this.root}`); if (s && !(s instanceof Error)) s.saved(file); }
 }
@@ -104,4 +113,4 @@ class Session {
 // Kills every server (called on exit; must be synchronous).
 function shutdown() { for (const s of pool.values()) if (s && !(s instanceof Error)) { try { s.dispose(); s.kill(); } catch {} } pool.clear(); }
 
-module.exports = { Session, shutdown, setApplyEdit, SCOPES };
+module.exports = { Session, shutdown, setApplyEdit, setOnDiagnostics, SCOPES };

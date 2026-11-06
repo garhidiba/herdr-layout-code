@@ -70,6 +70,8 @@ const COMMANDS = [
   C("editor.action.nextMatchFindAction", "Find Next", ["cmd+g", "f3"], "findAgain", { args: [1] }),
   C("editor.action.previousMatchFindAction", "Find Previous", ["cmd+shift+g", "shift+f3"], "findAgain", { args: [-1] }),
   C("workbench.action.gotoSymbol", "Go to Symbol in Editor...", ["cmd+shift+o", "ctrl+shift+o"], "goToSymbol"),
+  C("editor.action.marker.next", "Go to Next Problem (Error, Warning, Info)", ["f8", "alt+f8"], "nextProblem", { args: [1] }),
+  C("editor.action.marker.prev", "Go to Previous Problem (Error, Warning, Info)", ["shift+f8", "alt+shift+f8"], "nextProblem", { args: [-1] }),
   C("workbench.action.gotoLine", "Go to Line/Column...", ["ctrl+g"], "openGoto"),
   C("editor.action.deleteLines", "Delete Line", ["cmd+shift+k", "ctrl+shift+k"], "deleteLines"),
   C("editor.action.moveLinesUpAction", "Move Line Up", ["alt+up"], "moveLines", { args: [-1] }),

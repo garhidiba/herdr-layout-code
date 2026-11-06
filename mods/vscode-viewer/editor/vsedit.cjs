@@ -604,7 +604,8 @@ class Editor {
     st.outline = { version, source, items };
     return st.outline;
   }
-  // The outline again 300 ms after the text last changed (breadcrumbs follow the cursor through it).
+  // The outline again 300 ms after the text last changed (breadcrumbs follow the cursor through it); asking for it gives
+  // the language server the current text, so its diagnostics follow too.
   queueOutline() {
     if (this.outlineTimer) return;
     this.outlineTimer = setTimeout(() => {
@@ -616,9 +617,41 @@ class Editor {
   // Breadcrumbs: the file's folders and name, then the symbols around the cursor; only the name when they are off.
   crumbText() {
     if (!this.settings["breadcrumbs.enabled"]) return " " + this.crumbs.at(-1);
-    if (this.outline?.version !== this.buf.version) this.queueOutline();
     const names = [...this.crumbs, ...SYM.symbolPath(this.outline?.items ?? [], this.head).map(s => s.name)];
     return " " + names.join(" › ");
+  }
+  // ----- diagnostics (from the language server: tsserver's geterr events, LSP publishDiagnostics) -----
+  // Errors, warnings and information (hints aren't drawn) in document order, clamped to the text.
+  problems() {
+    const list = this.session?.diagnostics() ?? [];
+    if (this._problems?.list === list && this._problems.version === this.buf.version) return this._problems.items;
+    const items = list.filter(d => d.severity <= 3).map(d => ({ ...d, start: this.buf.clamp(d.start), end: this.buf.clamp(d.end) }))
+      .sort((a, b) => cmp(a.start, b.start) || a.severity - b.severity);
+    this._problems = { list, version: this.buf.version, items };
+    return items;
+  }
+  // The columns [from, to) a problem underlines on `line` (an empty range takes the character at it, or before it at the end).
+  static problemSpan(d, line, text) {
+    if (line < d.start.line || line > d.end.line) return null;
+    let from = line === d.start.line ? d.start.col : 0, to = line === d.end.line ? d.end.col : text.length;
+    if (from >= to && d.start.line === d.end.line) { if (from < text.length) to = from + 1; else { from = Math.max(0, text.length - 1); to = text.length; } }
+    return from < to ? { from, to } : null;
+  }
+  // The most severe problem at the cursor (its range, ends included).
+  problemAtCursor() {
+    const { line, col } = this.head;
+    return this.problems().filter(d => { const s = Editor.problemSpan(d, line, this.lines[line]); return s && col >= s.from && col <= s.to; })
+      .sort((a, b) => a.severity - b.severity)[0] ?? null;
+  }
+  // F8 / ⇧F8: the next / previous problem's start (wrapping); its message shows in the status bar.
+  nextProblem(dir) {
+    const ps = this.problems();
+    if (!ps.length) return this.say("No problems in this file");
+    const h = this.head;
+    const d = dir > 0 ? ps.find(p => cmp(p.start, h) > 0) ?? ps[0] : ps.findLast(p => cmp(p.start, h) < 0) ?? ps.at(-1);
+    this.pushNav();
+    this.moveTo(d.start);
+    this.top = Math.max(0, d.start.line - Math.floor(this.height / 3));
   }
   // Files of the git root (git ls-files), else up to 20,000 files found under the file's folder.
   projectFiles() {
@@ -978,10 +1011,11 @@ class Editor {
   }
   // Overview ruler marks on the vertical bar, like VS Code's: find matches, word / selection occurrences, the selection's
   // other end, the cursor line.
-  rulerMarks(ms, hits) {
+  rulerMarks(ms, hits, problems = []) {
     const n = this.lines.length, len = this.vbar.length, marks = new Array(len).fill(null), c = this.colors;
     for (const m of ms) marks[SB.markCell(m.line, n, len)] = c.rulerFind;
     for (const h of hits?.list ?? []) marks[SB.markCell(h.line, n, len)] = hits.ruler;
+    for (const d of [...problems].sort((a, b) => b.severity - a.severity)) marks[SB.markCell(d.start.line, n, len)] = c.rulerDiag[d.severity]; // errors win
     if (!this.empty) marks[SB.markCell(this.sel.anchor.line, n, len)] = c.rulerSelection;
     marks[SB.markCell(this.head.line, n, len)] = c.rulerCursor;
     return marks;
@@ -1073,6 +1107,8 @@ class Editor {
     const ms = showMatches ? this.matches() : [];
     const guides = this.guidesFor(height), brackets = this.bracketPair() ?? [];
     const hits = showMatches ? null : this.highlights(height), occ = hits?.list ?? []; // Find shows its own matches
+    if (this.outline?.version !== this.buf.version) this.queueOutline();
+    const problems = this.problems();
     let mi = 0, hi = 0;
 
     // breadcrumbs
@@ -1086,7 +1122,12 @@ class Editor {
       P.move(r + 2, 1);
       if (l >= this.lines.length) { P.text(" ".repeat(this.cols), c.fg, c.bg); continue; }
       const active = l === this.head.line;
-      P.text(String(l + 1).padStart(gw - 2) + "  ", active ? c.lineNumberActive : c.lineNumber, c.bg);
+      const spans = []; // this line's squiggles, the most severe first
+      for (const d of problems) { if (d.start.line > l) break; const s = Editor.problemSpan(d, l, this.lines[l]); if (s) spans.push({ ...s, color: c.diag[d.severity], severity: d.severity }); }
+      spans.sort((a, b) => a.severity - b.severity);
+      // a problem's mark in the glyph margin (the gutter's first column), then the number
+      P.text(spans.length ? "●" : " ", spans.length ? spans[0].color : c.lineNumber, c.bg);
+      P.text(String(l + 1).padStart(gw - 3) + "  ", active ? c.lineNumberActive : c.lineNumber, c.bg);
       const lineBg = active && empty ? c.currentLine : c.bg;
       while (mi < ms.length && ms[mi].line < l) mi++;
       const lineMatches = [];
@@ -1094,9 +1135,9 @@ class Editor {
       while (hi < occ.length && occ[hi].line < l) hi++;
       const lineHits = [];
       for (let k = hi; k < occ.length && occ[k].line === l; k++) lineHits.push(occ[k]);
-      this.paintLine(P, l, lineBg, ss, se, lineMatches, width, { guide: guides[r], brackets: brackets.filter(b => b.line === l), hits: lineHits, hitBg: hits?.bg });
+      this.paintLine(P, l, lineBg, ss, se, lineMatches, width, { guide: guides[r], brackets: brackets.filter(b => b.line === l), hits: lineHits, hitBg: hits?.bg, problems: spans });
     }
-    this.marks = this.vbar.shown ? this.rulerMarks(ms, hits) : null;
+    this.marks = this.vbar.shown ? this.rulerMarks(ms, hits, problems) : null;
     this.vbar.paint(P, c, this.marks);
     if (this.hbar.shown) { P.move(height + 2, 1); P.text(" ".repeat(this.cols), c.fg, c.bg); this.hbar.paint(P, c); }
 
@@ -1165,7 +1206,7 @@ class Editor {
     }
     return this._hits;
   }
-  // deco: { guide: { count, active }, brackets: [{ col }], hits: [{ col, len }], hitBg } for this line.
+  // deco: { guide: { count, active }, brackets: [{ col }], hits: [{ col, len }], hitBg, problems: [{ from, to, color }] } for this line.
   paintLine(P, l, lineBg, ss, se, lineMatches, width, deco = {}) {
     const c = this.colors, text = this.lines[l], g = deco.guide, size = this.tab;
     const selFrom = l < ss.line || l > se.line ? -1 : l === ss.line ? ss.col : 0;
@@ -1180,7 +1221,8 @@ class Editor {
     };
     // a guide at every indent step the line has, the active block's in its own color
     const guideAt = g?.count ? (k) => (k % size === 0 && k / size < g.count ? (k / size === g.active ? c.guideActive : c.guide) : null) : null;
-    let { x, col } = this.paintText(P, text, this.hl.tokens[l] ?? null, width, this.left, lineBg, bgAt, this.tab, guideAt);
+    const curlyAt = deco.problems?.length ? (i) => deco.problems.find(s => i >= s.from && i < s.to)?.color ?? null : null;
+    let { x, col } = this.paintText(P, text, this.hl.tokens[l] ?? null, width, this.left, lineBg, bgAt, this.tab, guideAt, curlyAt);
     // Selection past the line end shows one cell for the line break, like VS Code.
     if (x < width && selFrom !== -1 && selTo > text.length && col >= this.left) { P.text(" ", c.fg, c.selection); x++; }
     if (x >= width) return;
@@ -1196,8 +1238,8 @@ class Editor {
   }
   // Paints a line's visible part [left, left+width) with token colors; bgAt(i) overrides the background at UTF-16 index i,
   // guideAt(col) gives an indent guide's color at a display column of the leading whitespace (not over a selection).
-  // Returns { x: cells painted, col: the line's display width }.
-  paintText(P, text, tokens, width, left, lineBg, bgAt, tab, guideAt = null) {
+  // curlyAt(i) the squiggle color under UTF-16 index i. Returns { x: cells painted, col: the line's display width }.
+  paintText(P, text, tokens, width, left, lineBg, bgAt, tab, guideAt = null, curlyAt = null) {
     const c = this.colors;
     let col = 0, ti = 0, x = 0, i = 0, lead = !!guideAt;
     const right = left + width;
@@ -1211,7 +1253,7 @@ class Editor {
       while (tokens && ti + 2 < tokens.length && tokens[ti + 2] <= i) ti += 2;
       const meta = tokens ? tokens[ti + 1] : 0;
       let fg = tokens ? this.colorMap[H.foregroundOf(meta)] ?? c.fg : c.fg;
-      const style = tokens ? H.fontStyleOf(meta) : 0, bg = bgAt(i) ?? lineBg;
+      const style = tokens ? H.fontStyleOf(meta) : 0, bg = bgAt(i) ?? lineBg, curly = curlyAt?.(i) ?? null;
       const cp = ch.codePointAt(0);
       let w, glyph = ch;
       if (ch === "\t") { w = tab - (col % tab); glyph = " ".repeat(w); }
@@ -1223,8 +1265,8 @@ class Editor {
         if (gc) { glyph = g; fg = gc; }
       }
       if (w === 0) { if (col > left && col <= right) P.out += ch; }
-      else if (col >= left && col + w <= right) { P.text(glyph, fg, bg, style); x += w; }
-      else if (col + w > left) { const vis = Math.min(col + w, right) - Math.max(col, left); P.text(" ".repeat(vis), fg, bg, style); x += vis; }
+      else if (col >= left && col + w <= right) { P.text(glyph, fg, bg, style, curly); x += w; }
+      else if (col + w > left) { const vis = Math.min(col + w, right) - Math.max(col, left); P.text(" ".repeat(vis), fg, bg, style, curly); x += vis; }
       col += w; i += ch.length;
     }
     return { x, col };
@@ -1252,6 +1294,14 @@ class Editor {
     let leftText = "", leftColor = c.barFg;
     if (this.message && this.message.until > Date.now()) { leftText = this.message.text; leftColor = this.message.color; }
     else this.message = null;
+    if (!leftText) { // the problem at the cursor, else the file's problem counts
+      const d = this.problemAtCursor(), ps = d ? [] : this.problems();
+      if (d) { leftText = d.message.split("\n")[0] + (d.source ? `  ${d.source}` : ""); leftColor = c.diag[d.severity]; }
+      else if (ps.length) {
+        const n = (sev) => ps.filter(p => p.severity === sev).length;
+        leftText = `⊗ ${n(1)}  ⚠ ${n(2)}` + (n(3) ? `  ℹ ${n(3)}` : "");
+      }
+    }
     if (this.prompt?.kind === "find" && this.find.query) {
       const n = this.matches().length, k = this.currentMatch();
       leftText = n ? `Find: ${k === -1 ? "?" : k + 1} of ${n}${n >= 20000 ? "+" : ""}` : "Find: No results";
@@ -1414,6 +1464,7 @@ async function main() {
   ed.redraw = () => { ed.afterEvent(); schedule(); };
   ed.onExit = () => { restore(); process.exit(0); };
   Lang.setApplyEdit((ws) => { ed.applyEdit(ws); schedule(); return true; });
+  Lang.setOnDiagnostics(() => schedule());
   setInterval(() => {
     const rebound = keys.poll();
     if (rebound) { ed.keymap = keys.keymap; if (keys.error) ed.say(keys.error, ed.colors.warn, 6000); }

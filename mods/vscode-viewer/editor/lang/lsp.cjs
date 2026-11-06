@@ -30,6 +30,12 @@ function workspaceEdit(we) {
   return ws;
 }
 
+// publishDiagnostics params -> [{ start, end, severity (1 error, 2 warning, 3 information, 4 hint), message, source }]
+function diagnosticsOf(params) {
+  return (params?.diagnostics ?? []).filter(d => d?.range && d.message).map(d => ({ start: pos(d.range.start), end: pos(d.range.end),
+    severity: d.severity >= 1 && d.severity <= 4 ? d.severity : 1, message: String(d.message), source: d.source ? `${d.source}${d.code != null ? `(${d.code})` : ""}` : "" }));
+}
+
 const OPS = { definition: "definitionProvider", typeDefinition: "typeDefinitionProvider", implementation: "implementationProvider",
   references: "referencesProvider", rename: "renameProvider", format: "documentFormattingProvider", refactor: "codeActionProvider",
   source: "codeActionProvider", callHierarchy: "callHierarchyProvider", symbols: "documentSymbolProvider" };
@@ -55,6 +61,7 @@ class Lsp {
   constructor(spec, root) {
     this.spec = spec; this.label = spec.label ?? spec.cmd.split("/").pop(); this.root = root; this.id = 0; this.docs = new Map(); // file -> { version, text }
     this.caps = null; this.applyEdit = () => false;
+    this.diags = new Map(); this.onDiagnostics = () => {}; // file -> diagnostics, as the server last published them
     this.child = new Child(spec.cmd, spec.args, root, (m) => this.onMessage(m));
     this.ready = this.request("initialize", {
       processId: process.pid, rootUri: uri(root), rootPath: root, workspaceFolders: [{ uri: uri(root), name: root.split("/").pop() }],
@@ -75,7 +82,11 @@ class Lsp {
 
   onMessage(m) {
     if (m.id != null && m.method) return this.serverRequest(m);
-    if (m.id != null) this.child.settle(m.id, m.error ? new Error(m.error.message) : null, m.result);
+    if (m.id != null) return this.child.settle(m.id, m.error ? new Error(m.error.message) : null, m.result);
+    if (m.method === "textDocument/publishDiagnostics") {
+      const file = fileOf(m.params?.uri);
+      if (file) { this.diags.set(file, diagnosticsOf(m.params)); this.onDiagnostics(file); }
+    }
   }
   // Requests from the server: configuration, dynamic registration, progress, applyEdit.
   serverRequest(m) {
@@ -153,4 +164,4 @@ class Lsp {
   kill() { this.child.kill(); }
 }
 
-module.exports = { Lsp, locations, workspaceEdit, uri, fileOf };
+module.exports = { Lsp, locations, workspaceEdit, diagnosticsOf, uri, fileOf };

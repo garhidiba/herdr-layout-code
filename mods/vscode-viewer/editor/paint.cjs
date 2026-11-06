@@ -44,6 +44,12 @@ function paletteOf(colors = {}) {
     bracketMatch: blend(colors["editorBracketMatch.background"] ?? colors["editorBracketMatch.border"] ?? "#515a6b", bg),
     wordHighlight: blend(colors["editor.wordHighlightBackground"] ?? "#d2e0ff2f", bg),
     selectionHighlight: blend(colors["editor.selectionHighlightBackground"] ?? "#add6ff26", bg),
+    // diagnostics by severity (1 error, 2 warning, 3 information): squiggles, gutter marks, overview ruler (VS Code's
+    // dark defaults; One Dark doesn't set them)
+    diag: [null, opaque(colors["editorError.foreground"]) ?? "#f14c4c", opaque(colors["editorWarning.foreground"]) ?? "#cca700",
+      opaque(colors["editorInfo.foreground"]) ?? "#3794ff"],
+    rulerDiag: [null, blend(colors["editorOverviewRuler.errorForeground"] ?? "#ff1212b3", bg),
+      blend(colors["editorOverviewRuler.warningForeground"] ?? "#cca700", bg), blend(colors["editorOverviewRuler.infoForeground"] ?? "#3794ff", bg)],
   };
 }
 // The palette of the installed theme.json (the defaults when it can't be read).
@@ -52,15 +58,22 @@ const fgSGR = (c) => { const [r, g, b] = hex(c); return `\x1b[38;2;${r};${g};${b
 const bgSGR = (c) => { const [r, g, b] = hex(c); return `\x1b[48;2;${r};${g};${b}m`; };
 const styleSGR = (s) => "\x1b[22;23;24;29m" + (s & 1 ? "\x1b[3m" : "") + (s & 2 ? "\x1b[1m" : "") + (s & 4 ? "\x1b[4m" : "") + (s & 8 ? "\x1b[9m" : "");
 
-// Paints cells, emitting SGR only when an attribute changes.
+// A curly underline in a color (diagnostics): plain underline first for terminals without SGR 4:3, then curly, then the
+// color (SGR 58); 59 puts the underline color back.
+const curlySGR = (c) => { const [r, g, b] = hex(c); return `\x1b[4m\x1b[4:3m\x1b[58:2::${r}:${g}:${b}m`; };
+
+// Paints cells, emitting SGR only when an attribute changes. curly: a squiggle color for these cells, or null.
 class Painter {
-  constructor() { this.out = ""; this.fg = this.bg = null; this.style = -1; }
-  set(fg, bg, style = 0) {
-    if (style !== this.style) { this.out += styleSGR(style); this.style = style; }
+  constructor() { this.out = ""; this.fg = this.bg = null; this.style = -1; this.curly = null; }
+  set(fg, bg, style = 0, curly = null) {
+    if (style !== this.style || curly !== this.curly) {
+      this.out += styleSGR(style) + (curly ? curlySGR(curly) : this.curly ? "\x1b[59m" : "");
+      this.style = style; this.curly = curly;
+    }
     if (fg !== this.fg) { this.out += fgSGR(fg); this.fg = fg; }
     if (bg !== this.bg) { this.out += bgSGR(bg); this.bg = bg; }
   }
-  text(s, fg, bg, style = 0) { this.set(fg, bg, style); this.out += s; }
+  text(s, fg, bg, style = 0, curly = null) { this.set(fg, bg, style, curly); this.out += s; }
   move(row, col) { this.out += `\x1b[${row};${col}H`; }
 }
 

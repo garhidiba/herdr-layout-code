@@ -31,6 +31,10 @@ function wsEdit(fileEdits) {
   for (const fe of fileEdits ?? []) (ws[fe.fileName] ??= []).push(...fe.textChanges.map(c => ({ start: toPos(c.start), end: toPos(c.end), text: c.newText })));
   return ws;
 }
+// syntaxDiag / semanticDiag event bodies -> the LSP shape (see lsp.cjs diagnosticsOf); suggestions count as hints.
+const SEVERITY = { error: 1, warning: 2, message: 3, suggestion: 4 };
+const tsDiagnostics = (list) => (list ?? []).filter(d => d?.start && d.text).map(d => ({ start: toPos(d.start), end: toPos(d.end ?? d.start),
+  severity: SEVERITY[d.category] ?? 1, message: d.text, source: d.code != null ? `ts(${d.code})` : "ts" }));
 const EMPTY = /no content|could not find|cannot|not found/i;
 
 class TsServer {
@@ -41,11 +45,19 @@ class TsServer {
     const server = findTsserver(file, root);
     if (!server) throw new Error("tsserver not found");
     this.root = root; this.seq = 0; this.sent = new Map(); // file -> text tsserver has
+    this.diags = new Map(); this.parts = new Map(); this.onDiagnostics = () => {}; // file -> diagnostics; file -> { syntaxDiag, semanticDiag }
     this.child = new Child(process.execPath, [server, "--disableAutomaticTypingAcquisition", "--locale", "en"], root, (m) => {
       if (m.type === "response") this.child.settle(m.request_seq, m.success ? null : new Error(m.message || m.command), m.body);
+      else if (m.type === "event" && (m.event === "syntaxDiag" || m.event === "semanticDiag") && m.body?.file) this.diagnosed(m.event, m.body);
     });
   }
   can(op) { return TsServer.CAPS.includes(op); }
+  diagnosed(kind, { file, diagnostics }) {
+    const parts = { ...this.parts.get(file), [kind]: tsDiagnostics(diagnostics) };
+    this.parts.set(file, parts);
+    this.diags.set(file, [...parts.syntaxDiag ?? [], ...parts.semanticDiag ?? []]);
+    this.onDiagnostics(file);
+  }
   get dead() { return this.child.dead; }
   send(command, args) { const seq = ++this.seq; this.child.write(JSON.stringify({ seq, type: "request", command, arguments: args }) + "\n"); return seq; }
   request(command, args, timeout = 30000) { const seq = this.send(command, args); return this.child.wait(seq, timeout); }
@@ -64,6 +76,7 @@ class TsServer {
       this.send("change", { file, line: 1, offset: 1, endLine: lines.length, endOffset: lines[lines.length - 1].length + 1, insertString: text });
     }
     this.sent.set(file, text);
+    this.send("geterr", { files: [file], delay: 0 }); // answered with syntaxDiag / semanticDiag events
   }
   saved() {}
 
@@ -129,4 +142,4 @@ class TsServer {
   kill() { this.child.kill(); }
 }
 
-module.exports = { TsServer, findTsserver };
+module.exports = { TsServer, findTsserver, tsDiagnostics };

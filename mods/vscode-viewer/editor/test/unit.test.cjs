@@ -691,3 +691,60 @@ test("breadcrumbs.enabled defaults to true and only takes a boolean", () => {
   assert.equal(S.normalize({ "breadcrumbs.enabled": false })["breadcrumbs.enabled"], false);
   assert.equal(S.normalize({ "breadcrumbs.enabled": "no" })["breadcrumbs.enabled"], true);
 });
+
+const { diagnosticsOf } = require("../lang/lsp.cjs");
+const { tsDiagnostics } = require("../lang/tsserver.cjs");
+
+test("diagnostics: LSP publishDiagnostics and tsserver's diag events become the same shape", () => {
+  const r = { start: { line: 1, character: 2 }, end: { line: 1, character: 5 } };
+  assert.deepEqual(diagnosticsOf({ diagnostics: [{ range: r, severity: 2, message: "unused", source: "rustc", code: "E1" }, { range: r, message: "no severity" }, { message: "no range" }] }), [
+    { start: { line: 1, col: 2 }, end: { line: 1, col: 5 }, severity: 2, message: "unused", source: "rustc(E1)" },
+    { start: { line: 1, col: 2 }, end: { line: 1, col: 5 }, severity: 1, message: "no severity", source: "" }]);
+  assert.deepEqual(tsDiagnostics([{ start: { line: 1, offset: 19 }, end: { line: 1, offset: 26 }, text: "Cannot find module", code: 2307, category: "error" },
+    { start: { line: 3, offset: 1 }, end: { line: 3, offset: 2 }, text: "unused", code: 6133, category: "suggestion" }]), [
+    { start: { line: 0, col: 18 }, end: { line: 0, col: 25 }, severity: 1, message: "Cannot find module", source: "ts(2307)" },
+    { start: { line: 2, col: 0 }, end: { line: 2, col: 1 }, severity: 4, message: "unused", source: "ts(6133)" }]);
+});
+
+const withProblems = async (lines, list) => {
+  const ed = await plainEditor(lines);
+  ed.rows = 12; ed.cols = 100;
+  ed.session = { diagnostics: () => list, symbols: async () => ({ source: "test", items: [] }), can: () => false };
+  return ed;
+};
+const problem = (l1, c1, l2, c2, severity, message) => ({ start: { line: l1, col: c1 }, end: { line: l2, col: c2 }, severity, message, source: "ts(1)" });
+
+test("diagnostics draw curly underlines in the severity's color, a gutter mark and overview ruler marks", async () => {
+  const ed = await withProblems(["let a = b;", "ok", "warn here"], [problem(0, 8, 0, 9, 1, "Cannot find name 'b'."), problem(2, 0, 2, 4, 2, "careful"), problem(1, 0, 1, 2, 4, "a hint")]);
+  const out = ed.render(0).out;
+  assert.match(out, /\x1b\[4m\x1b\[4:3m\x1b\[58:2::241:76:76m(?:\x1b\[[\d;]*m)*b/, "no red squiggle under b");
+  assert.match(out, /\x1b\[4m\x1b\[4:3m\x1b\[58:2::204:167:0m(?:\x1b\[[\d;]*m)*warn/, "no yellow squiggle under warn");
+  assert.ok(/\x1b\[59m/.test(out), "the underline color is not reset after a squiggle");
+  assert.match(out, /\x1b\[2;1H(?:\x1b\[[\d;]*m)*●/, "no mark in the gutter of line 1");
+  assert.doesNotMatch(out, /\x1b\[3;1H(?:\x1b\[[\d;]*m)*●/, "hints get no mark");
+  const marks = ed.rulerMarks([], null, ed.problems());
+  assert.equal(marks.filter(Boolean).length >= 2, true);
+});
+
+test("the problem at the cursor shows in the status bar, else the counts; F8 / ⇧F8 walk the problems, wrapping", async () => {
+  const ed = await withProblems(["let a = b;", "ok", "warn here"], [problem(0, 8, 0, 9, 1, "Cannot find name 'b'."), problem(2, 0, 2, 4, 2, "careful")]);
+  const status = () => ed.render(0).out.split(`\x1b[${ed.rows};1H`).pop().replace(/\x1b\[[\d;:]*m/g, "");
+  assert.match(status(), /⊗ 1 {2}⚠ 1/);
+  press(ed, "f8");
+  assert.deepEqual(ed.head, { line: 0, col: 8 });
+  assert.match(status(), /Cannot find name 'b'\. {2}ts\(1\)/);
+  press(ed, "f8");
+  assert.deepEqual(ed.head, { line: 2, col: 0 });
+  assert.match(status(), /careful/);
+  press(ed, "f8");
+  assert.deepEqual(ed.head, { line: 0, col: 8 });
+  press(ed, "f8", { shift: true });
+  assert.deepEqual(ed.head, { line: 2, col: 0 });
+});
+
+test("an empty problem range underlines the character at it, or the last one at the line end", () => {
+  const span = (c, text) => Editor.problemSpan({ start: { line: 0, col: c }, end: { line: 0, col: c } }, 0, text);
+  assert.deepEqual(span(1, "abc"), { from: 1, to: 2 });
+  assert.deepEqual(span(3, "abc"), { from: 2, to: 3 });
+  assert.equal(span(0, ""), null);
+});
