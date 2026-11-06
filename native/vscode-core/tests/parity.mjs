@@ -104,7 +104,7 @@ console.log(`vscode-core: ${BIN}\n\n== no writes (vscode-core only)`);
   const before = snapshot();
   core("repos", ROOT);
   for (const [dir, expanded] of TREES) core("all", dir, "--expanded", expanded.join(","));
-  for (const r of REPOS) { core("status", r); try { core("log", r, "--graph"); } catch {} }
+  for (const r of REPOS) { core("status", r); core("repo", r); try { core("log", r, "--graph"); } catch {} }
   const after = snapshot(), changed = Object.keys(before).filter((g) => JSON.stringify(before[g]) !== JSON.stringify(after[g]) || after[g][1]);
   console.log(`  ${Object.keys(before).length} repos checked; index changed or locked: ${changed.length ? changed.join(", ") : "none"}`);
   if (changed.length) failures++;
@@ -118,7 +118,7 @@ console.log("\n== repos");
   bench.push([`repos ${ROOT}`, tj, tr]);
 }
 
-console.log("\n== status / log --graph / commit-files");
+console.log("\n== status / log --graph / repo / commit-files");
 for (const path of REPOS) {
   const { repos } = await scm.scanRepos(path, null), repo = repos.find((r) => r.path === path);
   const [js, tj] = await time(() => scm.readRepo(repo, path, null));
@@ -129,6 +129,11 @@ for (const path of REPOS) {
   same(`status ${path} (${js.files.length} files)`, { files: js.files, limited: js.limited, hasHead: js.hasHead }, { files: rust.files, limited: rust.limited, hasHead: rust.hasHead });
   same(`log --graph ${path} (${js.commits.length} commits, ${js.commits.filter((c) => c.merge).length} merges)`, js.commits, rust.commits);
   bench.push([`status+log ${path.slice(ROOT.length + 1)}`, tj, tr]);
+  // `repo`: the same in one call, in readRepo()'s exact shape.
+  const up = repo?.ahead !== null && repo?.upstream ? ["--upstream", repo.upstream] : [];
+  const [one, t1] = await time(() => core("repo", path, ...up));
+  same(`repo ${path}`, js, one);
+  bench.push([`repo ${path.slice(ROOT.length + 1)}`, tj, t1]);
   // A sample of commits: merges first, then the newest.
   const sample = [...js.commits.filter((c) => c.merge).slice(0, 5), ...js.commits.slice(0, 10)];
   let ok = 0;

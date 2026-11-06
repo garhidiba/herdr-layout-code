@@ -21,6 +21,7 @@ const USAGE: &str = "usage: vscode-core <command>
   repos <root>
   status <repo>
   log <repo> [--upstream <ref>] [-n 300] [--graph]
+  repo <repo> [--upstream <ref>]
   commit-files <repo> <hash>
   tree <dir> [--expanded p1,p2,...]
   all <root> [--expanded p1,p2,...] [--repo <current>]
@@ -63,6 +64,24 @@ struct Change {
 fn changes(s: &Status) -> Value {
     let files: Vec<Change> = s.entries.iter().take(FILES).map(|(xy, path)| Change { path: path.clone(), status: git::git_letter(xy) }).collect();
     json!({ "files": files, "limited": s.entries.len() > FILES })
+}
+
+/// vscode-scm's `readRepo()`: `changes` with `hasHead` and the graph (none without a HEAD).
+fn repo_data(mut changes: Value, has_head: bool, commits: Vec<graph::Row>) -> Value {
+    changes["hasHead"] = has_head.into();
+    changes["commits"] = json!(if has_head { commits } else { vec![] });
+    changes
+}
+
+/// One repo's changes and graph, status and log read in parallel. A failed status fails the read; a
+/// failed log (no HEAD yet) is an empty graph, as in the mod.
+fn repo_cmd(root: &str, upstream: Option<&str>) -> Result<Value, String> {
+    let (status, commits) = thread::scope(|s| {
+        let commits = s.spawn(|| git::log(root, upstream, COMMITS).map(graph::graph).unwrap_or_default());
+        (git::status(root, "all", false), commits.join().unwrap_or_default())
+    });
+    let status = status?;
+    Ok(repo_data(changes(&status), status.oid != "(initial)", commits))
 }
 
 fn log_value(repo: &str, upstream: Option<&str>, n: usize, with_graph: bool) -> Result<Value, String> {
@@ -141,11 +160,7 @@ fn all_cmd(root: &str, expanded: &[String], current: Option<&str>) -> Result<Val
             let status = if r.path == top { own.as_ref().map(|s| Ok(changes(s))).unwrap_or_else(|| Err("no status".into())) } else { git::status(&r.path, "all", false).map(|s| changes(&s)) };
             (status, commits.join().unwrap_or_default())
         });
-        status.map(|mut v| {
-            v["hasHead"] = has_head.into();
-            v["commits"] = json!(commits);
-            v
-        })
+        status.map(|v| repo_data(v, has_head, commits))
     });
     let mut out = json!({ "tree": tree, "repos": repos::Repos { top, repos: rows }, "selected": picked.map(|r| r.path), "repo": Value::Null });
     match repo {
@@ -173,6 +188,7 @@ fn run(a: Args) -> Result<Value, String> {
             Ok(v)
         }
         "log" => log_value(p(1)?, a.upstream.as_deref(), a.n, a.graph),
+        "repo" => repo_cmd(p(1)?, a.upstream.as_deref()),
         "commit-files" => Ok(json!(git::commit_files(p(1)?, p(2)?)?.into_iter().take(FILES).collect::<Vec<_>>())),
         "tree" => tree_cmd(p(1)?, &a.expanded),
         "all" => all_cmd(p(1)?, &a.expanded, a.repo.as_deref()),
