@@ -4,10 +4,11 @@
 // (menu.js), which runs as an overlay of this same mod.
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, window, run, appHome, props, shared } from "herdr";
+import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, window, run, appHome, props, shared, setShared, notify } from "herdr";
 import { openArgs } from "./paths.js";
 import { freshRoot, encode, decode } from "./cache.js";
 import { ExplorerMenu, ExplorerDialog, openMenu, refreshKey } from "./menu.js";
+import { createCore } from "./core.js";
 // Herdr starts with PATH=/usr/bin:/bin, so Homebrew/user tools (node, code, codex, trash) are looked up here too.
 const userExec = (cmd, args, opts) => exec("sh", ["-c", 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; exec "$0" "$@"', cmd, ...args], opts);
 
@@ -95,6 +96,12 @@ async function gitMarks(cwd, on) {
   return marks;
 }
 
+// With "core.engine": "rust", the folder listings and git marks come from one `vscode-core tree` call; null means
+// the JS path (directory() per folder, then gitMarks()). `--expanded` splits on commas, so such a folder takes JS.
+const core = createCore({ exec, readTextFile, notify, appHome, shared, setShared });
+const coreTree = (cwd, on, folders) => [...folders].some(f => f.includes(",")) ? null
+  : core(["tree", cwd, ...(folders.size ? ["--expanded", [...folders].join(",")] : [])], on);
+
 export default class Files extends View {
   init(_props, cx) {
     const p = props();
@@ -160,10 +167,12 @@ export default class Files extends View {
   async preload(keys) {
     const { cwd, on } = JSON.parse(keys[0]), context = { key: keys[0], cwd, on };
     const tree = { entries: new Map(), folders: new Set(keys.flatMap(k => [...this.saved.get(k)?.folders ?? []])), limited: false };
-    for (const path of ["", ...tree.folders]) {
+    const fast = await coreTree(cwd, on, tree.folders);
+    if (fast) tree.entries = new Map(Object.entries(fast.entries));
+    else for (const path of ["", ...tree.folders]) {
       await this.loadFolder(path, context, tree).catch(e => { if (!path) throw e; tree.folders.delete(path); });
     }
-    const marks = await gitMarks(cwd, on), dirty = dirtyOf(marks), at = Date.now();
+    const marks = fast?.marks ?? await gitMarks(cwd, on), dirty = dirtyOf(marks), at = Date.now();
     for (const k of keys) if (k !== this.context?.key) {
       this.saved.set(k, { folders: new Set(this.saved.get(k)?.folders), entries: tree.entries, marks, dirty, at });
     }
@@ -221,11 +230,16 @@ export default class Files extends View {
     this.limited = false;
     cx.spawn(async cx => {
       try {
-        for (const path of ["", ...this.folders]) {
+        const fast = await coreTree(cwd, on, this.folders);
+        if (fast && !this.current(context)) return;
+        if (fast) {
+          for (const [path, list] of Object.entries(fast.entries)) if (!path || this.folders.has(path)) this.entries.set(path, list);
+          this.limited = fast.limited;
+        } else for (const path of ["", ...this.folders]) {
           if (!this.current(context)) return;
           await this.loadFolder(path, context);
         }
-        const marks = await gitMarks(cwd, on);
+        const marks = fast?.marks ?? await gitMarks(cwd, on);
         if (!this.current(context)) return;
         this.marks = marks; this.dirty = dirtyOf(marks); this.error = null; this.watch(cwd, cx);
         this.saved.set(context.key, { folders: this.folders, entries: this.entries, marks, dirty: this.dirty, at: Date.now() });
