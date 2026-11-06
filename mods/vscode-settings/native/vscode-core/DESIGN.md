@@ -1,8 +1,9 @@
 # vscode-core design
 
 `vscode-core` does the reads that vscode-explorer and vscode-scm run through many `sh`/`find`/`git`
-processes, in one process, and prints the JSON the mods already build. Phase 1 (this crate) is done;
-phase 2 is wiring it into the mods behind the `core.engine` setting.
+processes, in one process, and prints the JSON the mods already build. Phase 1 (this crate) and
+phase 2 (the mods use it behind the `core.engine` setting) are done. The crate lives in
+`mods/vscode-settings/native/` so a gallery install, which copies only `layouts/` and `mods/`, carries it.
 
 ## Phase 1: what exists
 
@@ -11,10 +12,11 @@ phase 2 is wiring it into the mods behind the `core.engine` setting.
 | `repos <root>` | scm `scanRepos()` (REPOS script + `parseRepos`) | `{ top, repos: [{path,name,branch,oid,dirty,ahead,behind,upstream}] }` |
 | `status <repo>` | the status half of scm `readRepo()` | `{ files: [{path,status}], limited, hasHead }` |
 | `log <repo> [--upstream r] [-n 300] [--graph]` | the log half of `readRepo()` (`parseLog`, `graph`) | commit rows; with `--graph` plus `col, lines, links, width, merge` |
+| `repo <repo> [--upstream r]` | scm `readRepo()` in one call (phase 2): status and log in parallel | `{ files, limited, hasHead, commits }` with the graph, exactly `readRepo()`'s shape |
 | `commit-files <repo> <hash>` | `toggleCommit()`'s `git show` + `parseNameStatus` | `[{status, oldPath?, path}]` (1,000 at most) |
 | `tree <dir> [--expanded a,b]` | explorer `loadFolder()` ×N + `gitMarks()` + `dirtyOf()` | `{ entries: {"": [...], "a": [...]}, limited, marks, dirty }` |
 | `all <root> [--expanded …] [--repo cur]` | a whole space: tree + repos + the picked repo's `readRepo()` | `{ tree, repos, selected, repo: {files,limited,hasHead,commits} \| null, repoError? }` |
-| `--version` | – | `{ version, backend: "git", git: "2.x" }` |
+| `--version` | – | `{ version, backend: "git", git: "2.x" }`; the mods accept major version 1 |
 
 Errors print `{ "error": "…" }` and exit 1. Parity with the mods' JS is checked by
 `tests/parity.mjs` on real folders (84-repo parent, merges, far-ahead upstream, unborn branch,
@@ -57,6 +59,9 @@ Baseline from the preload task: 12 single-repo spaces ≈ 0.75 s per panel; the 
 | `all` on /Volumes/exusb/project (tree + repos + changes + graph) | 6.5 s | 0.9 s (0.66 s warm) | ×7 |
 | `all` on 12 project folders, one after another | 9.1–11.8 s | 2.2–2.5 s | ×4.5 |
 | one repo's status + log (two calls) | 8–370 ms | same | ×1 |
+| `repo` (status + log in one call) | 7–354 ms | 10–341 ms | ×1–1.5 |
+| Mods' background preload of 12 project folders, Explorer (phase 2, `node` harness) | 2.6–2.8 s, 47 spawns | 0.77–0.85 s, 12 spawns | ×3.4 |
+| Same, Source Control | 2.8–3.0 s, 34 spawns | 0.81–0.98 s, 12 spawns | ×3.3 |
 
 A single small repo gains nothing (both are one or two git spawns); the gain is on folders with many
 repos and on loading a whole space in one call.
@@ -78,42 +83,51 @@ repos and on loading a whole space in one call.
   shell globs do. Folder entries sort as QuickJS's `localeCompare` (NFC, then code point), which is
   what Herdr's engine does (assumed from QuickJS's source; Node's ICU collation differs, so the
   harness emulates QuickJS).
-- `--expanded` splits on commas: a folder name containing a comma cannot be passed (phase 2 should
-  pass those through the JS path or a daemon request body).
+- `--expanded` splits on commas: a folder name containing a comma cannot be passed, so the Explorer
+  takes the JS path when an expanded folder's path has one.
+- `repo` takes `hasHead` from its own status (`branch.oid`), `readRepo()` from the repo row it was
+  given; they differ only when `readRepo()` gets no row (it then assumes a HEAD; the log fails on an
+  unborn branch either way, so `commits` is `[]` in both).
 
-## Phase 2: engine selection
+## Phase 2: engine selection (done)
 
-`<herdr home>/vscode-settings.json` (shared with the editor; JSONC with `//` comment lines) gets
+`<herdr home>/vscode-settings.json` (shared with the editor; JSONC with `//` comment lines) has
 `"core.engine": "js" | "rust"`. **Absent means `js`.** The Settings dialog mod writes it; so does
-`native/install.sh --engine rust|js`.
+`install.sh --engine rust|js`.
 
-- `js`: the mods never run the binary. Today's code path, unchanged.
-- `rust`: the mods run `${appHome()}/vscode-core/vscode-core` with `exec` for **local** spaces only
-  (`on` set → JS; a remote machine has no binary). Any failure of a call — `exec` rejecting (binary
-  missing), a non-zero exit, unparsable JSON, a `{error}` — runs the JS path for that call, and the
-  first such failure per session shows one toast: *"Rust core not built — using JS"* with the hint
-  *"Build it from Settings"* (`notify({ …, action })` can open the Settings dialog). Missing binary
-  is remembered for the session so later calls skip straight to JS.
-- Version handshake: the mods ask `vscode-core --version` once per session and accept the binary
-  when its major version matches the mods' expected `CORE_API` (start at 0 → 1 when wired); a
-  mismatch is treated as "not built" (toast says "rebuild").
-- Switching later: the Settings dialog (engine picker + **Build Rust core** button, which runs
-  `native/install.sh` in a terminal tab), or `native/install.sh --engine rust|js`, or editing the
-  setting by hand. Mods re-read the setting on their 10 s refresh timer (one small file read), so a
-  switch applies without restarting.
-- The Settings dialog shows *"Rust core: built (v0.1.0, git 2.54)"* from `--version`, or *"not
-  built"* when `exec` rejects.
+- `js` (or absent, invalid, or the file unreadable): the mods never run the binary. Today's code path, unchanged.
+- `rust`: `core.js` (the same file in vscode-explorer and vscode-scm, since a mod can't import
+  another mod's files; a test checks the copies match) runs `${appHome()}/vscode-core/vscode-core`
+  with `exec` for **local** spaces only (`on` set → JS; a remote machine has no binary).
+  - Failures are split in two. A call the binary answers with `{error}` (exit 1: a folder git can't
+    read, a bad hash) takes JS for that call only; the JS path then shows its own message. A core
+    that is unusable — `exec` rejecting (missing), a `--version` whose major is not `CORE_API` (1),
+    output that isn't JSON — takes JS and shows one warning toast: *"Rust core not built — using
+    JavaScript"* / *"Build it in Settings."* (or *"Rust core is out of date — using JavaScript"* /
+    *"Rebuild it in Settings."*), whose action is `mod.open vscode-settings`. The two panels share
+    the toast through the shared value `vscode-core.toast` (a toast within 10 s is not repeated).
+  - After that the mod stays on JS until the settings file's text changes or a minute passes; the
+    minute is what picks up a build from Settings, which doesn't change the file. No second toast
+    until the file changes.
+- Version handshake: `--version` once per settings-file version (and after each retry), shared by
+  concurrent calls. The crate became 1.0.0 with `repo`; a 0.x binary is "out of date".
+- The setting is re-read at most every 2 s on the next call (one small file read), like the editor,
+  so a switch applies on the next refresh without restarting.
+- The Settings dialog shows *"Rust core: built (v1.0.0)"*, *"Rust core: v0.1.0 is out of date
+  (rebuild it)"*, or *"not built"* when `exec` rejects; **Build Rust core** shows while Rust is chosen
+  and the binary isn't a current one.
 
 ### Swap points (the JS is already factored for this)
 
 | Mod | JS function | With `rust` |
 | --- | --- | --- |
-| Explorer | `loadFolder(path, context, tree)` ×N and `gitMarks(cwd)` in `refresh()`/`preload()` | one `tree <cwd> --expanded <folders>`; fill `tree.entries`, `tree.limited`, `marks` from it. `dirtyOf()` can take `dirty` from the output or stay in JS (cheap). |
-| Explorer | `loadFolder` from `toggle()` (one folder) | keep JS (a single `sh` listing) or `tree <cwd> --expanded <path>` and take one key |
+| Explorer | `loadFolder(path, context, tree)` ×N and `gitMarks(cwd)` in `refresh()` | one `tree <cwd> --expanded <folders>`; `entries` (only folders still expanded), `limited`, `marks` from it; `dirtyOf()` stays in JS |
+| Explorer | `loadFolder` from `toggle()` (one folder) | JS (a single `sh` listing) |
 | SCM | `scanRepos(cwd, on)` | `repos <cwd>` (same `{top, repos}`) |
-| SCM | `readRepo(repo, root, on)` | `status <root>` + `log <root> --graph [--upstream]`; better a small `repo <root> [--upstream r]` command returning `readRepo()`'s exact `{files, limited, hasHead, commits}` in one exec (add in phase 2) |
+| SCM | `readRepo(repo, root, on)` from `loadRepo()` | `repo <root> [--upstream r]` (upstream when the row has `ahead`, as `readRepo()`) |
 | SCM | `toggleCommit()` | `commit-files <root> <hash>` |
-| both | `preload()` of other spaces | `all <cwd> [--expanded …] [--repo <chosen>]` once per space; each mod keeps its half (or one mod preloads and shares through `setShared`, keyed by root) |
+| Explorer | `preload()` of other spaces | `tree <cwd> --expanded <saved folders>` (its half only: `all` would also read the picked repo's log) |
+| SCM | `preload()` of other spaces | `all <cwd> [--repo <chosen>]`: repos plus the picked repo's changes and graph in one call; the repo data is used only when the mod's own `pickRepo()` picks the same repo and its cache isn't fresh |
 
 `cache.js` (localStorage, `freshRoot`) is unchanged: it stores the same shapes. The graph rows are
 stored without lanes and `graph()` reruns on restore, as today.
@@ -121,7 +135,7 @@ stored without lanes and `graph()` reruns on restore, as today.
 Limits to respect: `exec` has a 30 s limit and 8 MiB of output. `all` on the 84-repo parent prints
 83 KB, `tree` 43 KB; the caps (5,000 entries, 1,000 files, 300 commits, 200 repos) bound it.
 
-### One-shot exec (recommended for phase 2) vs a daemon (later, if needed)
+### One-shot exec (what phase 2 uses) vs a daemon (later, if needed)
 
 One-shot `exec` is a drop-in: same call sites, no lifecycle, and it already removes most of the
 cost. A daemon is worth it only if the 10 s refresh and the folder watch still cost too much.
@@ -160,9 +174,24 @@ Rust)."*
 | Trust | the user builds what they can read | a downloaded executable: checksums, macOS signing/notarization (browser downloads get quarantined) |
 | Upkeep | none | release CI per version; binary/mod version skew to handle |
 
-Recommendation: build from source now (Settings button → `native/install.sh` in a terminal tab).
-Gallery installs copy only `mods/*`, so the Settings mod must be able to reach the source: ship
-`native/` inside the Settings mod's folder (copied with the mods), or have the button run
-`git clone --depth 1 <repo> && native/install.sh` into a temp folder. Prebuilt binaries can come
-later as `install.sh --prebuilt` (download the release asset for `uname -sm`, verify its SHA-256,
-same install path), with the `--version` handshake guarding skew either way.
+Decision (phase 2): build from source, with the sources inside the Settings mod. `native/` moved
+to `mods/vscode-settings/native/`, so copying `mods/` (all a gallery install does) carries the
+Cargo workspace, `Cargo.lock` and `install.sh`. No clone, no network for the sources.
+
+- **Build button** → `mods/vscode-settings/build-core.sh <herdr home>` in a terminal tab → the mod's
+  own `native/install.sh` (so the binary matches the installed mods), else the
+  `<herdr home>/vscode-core/install.sh` wrapper an earlier build wrote.
+- **`install.sh`** puts `~/.cargo/bin` in front of PATH (Herdr starts programs with
+  `/usr/bin:/bin`), runs `cargo fetch --locked --offline` and only when that fails a plain
+  `cargo fetch --locked` (the one network use: the 17 crates, first build on a machine without
+  them in cargo's cache), then `cargo build --release --locked --offline` with
+  `--target-dir <herdr home>/vscode-core/target` — never under `mods/`, which Herdr watches and
+  hot-reloads. It copies the binary to `<herdr home>/vscode-core/vscode-core` (copy then rename) and
+  writes `<herdr home>/vscode-core/install.sh`, a two-line wrapper (`exec sh '<that install.sh>' "$@"`)
+  for rebuilding from a shell. Tested with `HERDR_APP_HOME=<temp>` holding only `layouts/` + `mods/`
+  and `PATH=/usr/bin:/bin`: ~9 s release build, nothing written under `mods/`.
+- Vendoring the crates (`cargo vendor`, ~4 MB incl. `syn`) into the mod was rejected: it would ship
+  in every install and Herdr watches the folder.
+
+Prebuilt binaries can come later as `install.sh --prebuilt` (download the release asset for
+`uname -sm`, verify its SHA-256, same install path), with the `--version` handshake guarding skew.

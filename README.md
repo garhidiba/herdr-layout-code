@@ -28,12 +28,12 @@ To install by hand:
 
 The Explorer and Source Control read folders and git with a **JavaScript core** that works out of the box: nothing to build.
 
-The optional **Rust core** (`native/vscode-core`) does the same reads in one parallel process, about 4× faster on folders with many repos (an 84-repo folder: 6.5 s → 0.9 s). It needs Rust (`cargo`, from [rustup.rs](https://rustup.rs)) to build, and runs on this machine only (remote spaces keep the JavaScript core). To use it, either:
+The optional **Rust core** (`vscode-core`) does the same reads in one parallel process, about 3–4× faster (12 project folders preloaded in the background: 2.7 s → 0.8 s per panel; an 84-repo folder: 6.5 s → 0.9 s). Its sources ship inside the Settings mod (`mods/vscode-settings/native/`), so a layout installed by copying `layouts/` and `mods/` can build it. It needs Rust (`cargo`, from [rustup.rs](https://rustup.rs); `~/.cargo/bin` is found even when it isn't on Herdr's PATH) and runs on this machine only (remote spaces keep the JavaScript core). Cargo's cache is used when it has the crates; otherwise the first build downloads them from crates.io. To use it, either:
 
-- open the layout's Settings and press **Build Rust core**, then pick **Rust** as the core engine, or
-- run `native/install.sh --engine rust` from this repo (builds the binary into `~/.config/herdr-app/vscode-core/` and sets `"core.engine": "rust"` in `vscode-settings.json`).
+- open the layout's Settings (gear, `cmd-,`), pick **Rust** as the core engine and press **Build Rust core** (a terminal tab shows the build), or
+- run `sh ~/.config/herdr-app/mods/vscode-settings/native/install.sh --engine rust` (or the same script in this repo): it builds into `~/.config/herdr-app/vscode-core/` (binary, `target/` build folder, and an `install.sh` wrapper to build again) and sets `"core.engine": "rust"` in `vscode-settings.json`.
 
-`native/install.sh` alone only builds and installs the binary; `--engine js` switches back without building. If the Rust core is chosen but missing, the mods fall back to JavaScript and say so once.
+`install.sh` alone only builds and installs the binary; `--engine js` switches back without building. If Rust is chosen but the binary is missing, out of date or broken, the Explorer and Source Control use JavaScript and say so once (the toast opens Settings); they try the binary again when `vscode-settings.json` changes or a minute later.
 
 Optional Claude meter: set Claude Code's `statusLine.command` to `sh ~/.config/herdr-app/mods/vscode-status/claude-usage-tap.sh`. If you already had a status line command, save it as `~/.config/herdr-app/claude-statusline-orig.sh`; the tap passes the input on to it.
 
@@ -45,7 +45,8 @@ Optional Claude meter: set Claude Code's `statusLine.command` to `sh ~/.config/h
 - Language servers, started on first use and stopped when the editor closes: `tsserver` (TypeScript/JavaScript; the project's `node_modules/typescript` first, else the one on PATH), `rust-analyzer`, `clangd`, `sourcekit-lsp`, and VS Code's JSON/CSS/HTML servers bundled in Devin.app (`node …/json-language-features/server/dist/node/jsonServerMain.js --stdio`, likewise css and html)
 - Without a server: `git grep` / `grep -r` (Go to Definition and references by word), `gofmt`, `rustfmt`, `prettier` (Format Document)
 - `cp`, `mv`, `mkdir`, `test`, `pbcopy`, `trash` or `osascript` (Explorer menu)
-- `<herdr home>/vscode-core/vscode-core --version` (Settings: Rust core status), `sh` + `<herdr home>/vscode-core/install.sh` (Build Rust core, only when you click it)
+- With `"core.engine": "rust"` only: `<herdr home>/vscode-core/vscode-core` (`--version`, `tree`, `repos`, `repo`, `commit-files`, `all`; it runs `git` itself), instead of the Explorer's and Source Control's `sh`/`find`/`git` reads
+- `<herdr home>/vscode-core/vscode-core --version` (Settings: Rust core status), `sh` + `mods/vscode-settings/native/install.sh` → `cargo` (Build Rust core, only when you click it)
 - `code` (Open in VS Code), `open` (Finder, Reveal in Finder, System Default)
 - `stat`, `cp`, `sips` (image preview: copies the image into `mods/vscode-viewer/.cache/`)
 - `node` + `codex app-server` (Codex usage and limit resets, with your Codex login: it reads every 5 min and redeems a reset only when you click Use a reset and confirm)
