@@ -1,0 +1,7 @@
+[workspace]
+members = ["vscode-core"]
+resolver = "2"
+
+[profile.release]
+strip = true
+lto = "thin"

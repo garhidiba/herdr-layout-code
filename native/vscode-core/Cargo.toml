@@ -1,0 +1,12 @@
+[package]
+name = "vscode-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.92"
+description = "Read-only git and folder data for the herdr-layout-vscode mods, as JSON"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+unicode-normalization = "0.1"
