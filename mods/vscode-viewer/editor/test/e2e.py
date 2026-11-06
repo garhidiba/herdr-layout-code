@@ -2,7 +2,9 @@
 """End-to-end: runs vsedit.cjs in a 100x30 pseudo-terminal, types, saves, quits, and checks colors against tokenize.cjs;
 scrollbars (editor and hex viewer), the context menu, Kitty ⌘ keys, user keybindings, tsserver definition/references/rename, gofmt, the save dialog, auto save and hot exit;
 find widget toggles, status bar items, symbol breadcrumbs, Go to Symbol and diagnostics; Expand Line Selection, Go to Bracket,
-Toggle Block Comment, Save As, Join Lines and Save All; Go to File with several files, Go Back / Forward and the settings JSON.
+Toggle Block Comment, Save As, Join Lines and Save All; Go to File with several files, Go Back / Forward and the settings JSON;
+through tsserver Show Hover (keys and mouse), Quick Fix, Expand / Shrink Selection, Format Selection and Go to Symbol in
+Workspace; line comments and Cursor Undo.
 usage: python3 -I mods/vscode-viewer/editor/test/e2e.py [scenario ...]
 VSEDIT_BIN=<path to the Rust vsedit> runs the same scenarios against the Rust editor through the launcher (vsedit.sh);
 the language-feature scenarios (phase 3, still JS-only) are skipped then, and each result says which editor ran."""
@@ -13,7 +15,8 @@ EDITOR = os.path.join(HERE, "..", "vsedit.cjs")
 LAUNCHER = os.path.join(HERE, "..", "vsedit.sh")
 RUST_BIN = os.environ.get("VSEDIT_BIN")
 # Scenarios of features that stay in the JS editor until phase 3 (language servers, context menu, command palette).
-PHASE3 = {"run_menu_and_cmd_save", "run_typescript", "run_format", "run_symbols_and_problems"}
+PHASE3 = {"run_menu_and_cmd_save", "run_typescript", "run_format", "run_symbols_and_problems", "run_medium_language",
+          "run_medium_editing"}
 TOKENIZE = os.path.join(HERE, "..", "..", "vscode", "tokenize.cjs")
 
 TSX = '''import React from "react";
@@ -893,6 +896,117 @@ def run_folding(tmp):
     print("folding: ok")
 
 
+MED = ('export function greet(name: string) {\n  return "hi " + name;\n}\nconst n = greet("a").length;\nconst m = gret("b");\n'
+       'const msg = "hi there";\nconst   y  =  1 ;\nconst   z  =  2 ;\n')
+OTHER = "export function farewell() {\n  return 1;\n}\n"
+
+
+def run_medium_language(tmp):
+    """Through tsserver, on Windows/Linux keys: Ctrl+K Ctrl+I shows greet's signature, the mouse resting on `n` shows its
+    type, Ctrl+. offers "Change spelling to 'greet'" and applies it, Shift+Alt+→ / ← grow and shrink the selection in a
+    string, Ctrl+K Ctrl+F formats only the selected line, Ctrl+T finds `farewell` in the other file and opens it."""
+    proj = os.path.join(tmp, "medproj")
+    os.makedirs(proj)
+    subprocess.run(["git", "init", "-q"], cwd=proj, check=True)
+    open(os.path.join(proj, "tsconfig.json"), "w").write('{"compilerOptions":{"strict":true}}')
+    file = os.path.join(proj, "m.ts")
+    open(file, "w").write(MED)
+    open(os.path.join(proj, "other.ts"), "w").write(OTHER)
+    t = Term(file)
+    assert t.read("Ln 1, Col 1")
+    t.send("\x07"); t.send("1:18\r")                     # on greet
+    t.send("\x0b"); t.send("\x1b[105;5u", wait=0.3)      # Ctrl+K Ctrl+I (Kitty: Ctrl+I is Tab in legacy bytes)
+    assert t.read("function greet(name: string): string", timeout=20), "no hover:\n" + plain(t)[-400:]
+    t.send("\x1b[27u")                                   # Esc closes it
+    t.out = b""
+    t.send("\x1b[<35;13;5M", wait=0.6)                   # the pointer rests on `n` (line 4, column 7)
+    assert t.read("const n: number", timeout=20), "no mouse hover:\n" + plain(t)[-400:]
+    t.send("\x1b[<35;60;12M")                            # off the text: it closes
+    t.send("\x07"); t.send("5:12\r")                     # on gret
+    assert t.read("Did you mean 'greet'", timeout=20), "no diagnostic for gret"
+    t.out = b""
+    t.send("\x1b[46;5u", wait=0.5)                       # Ctrl+.
+    assert t.read("Change spelling to 'greet'", timeout=20), "no quick fix menu:\n" + plain(t)[-400:]
+    t.send("\r", wait=0.5)
+    t.send("\x07"); t.send("6:18\r")                     # in "there"
+    t.out = b""
+    t.send("\x1b[1;4C", wait=0.5)                        # Shift+Alt+→: the word
+    assert t.read("(5 selected)", timeout=20), "Expand Selection did not select the word:\n" + plain(t)[-300:]
+    t.send("\x1b[1;4C", wait=0.3)                        # the string's contents
+    assert t.read("(8 selected)", timeout=5), "Expand Selection did not select the string's contents"
+    t.out = b""
+    t.send("\x1b[1;4D", wait=0.3)                        # Shift+Alt+←: back to the word
+    assert t.read("(5 selected)", timeout=5), "Shrink Selection did not go back"
+    t.send("\x07"); t.send("7:1\r")
+    t.send("\x1b[1;2B")                                  # Shift+Down: line 7 selected
+    t.send("\x0b"); t.send("\x1b[102;5u", wait=1.0)      # Ctrl+K Ctrl+F
+    t.send("\x13")
+    assert t.read("Saved", timeout=5)
+    got = open(file).read()
+    assert 'const m = greet("b");' in got, "the quick fix was not applied:\n" + got
+    assert "\nconst y = 1;\nconst   z  =  2 ;\n" in got, "Format Selection:\n" + got
+    t.out = b""
+    t.send("\x14"); t.send("farewell", wait=0.5)         # Ctrl+T
+    assert t.read("other.ts", timeout=20), "no workspace symbol:\n" + plain(t)[-400:]
+    t.out = b""
+    t.send("\r", wait=0.5)                               # tsserver's span starts at the declaration, as in VS Code
+    assert t.read("other.ts › farewell", timeout=10) and "Ln 1, Col 1" in plain(t), "did not open other.ts at farewell:\n" + plain(t)[-600:]
+    t.send(QUIT)
+    assert t.wait_exit() == 0
+    print("hover, quick fix, smart select, format selection, workspace symbols (tsserver): ok")
+
+
+def run_medium_editing(tmp):
+    """Line comments on Windows/Linux keys (Ctrl+/ toggles, Ctrl+K Ctrl+C adds, Ctrl+K Ctrl+U removes; CSS gets a block
+    comment) and Cursor Undo (Ctrl+U); on macOS keys ⌘U undoes the cursor while ⌃U (Herdr's ⌘⌫) still deletes to the line start."""
+    file = os.path.join(tmp, "cm.js")
+    open(file, "w").write("a();\n// b();\nc();\n")
+    t = Term(file)
+    assert t.read("Ln 1, Col 1")
+    t.send("\x1b[1;6F")                                  # Ctrl+Shift+End: all selected
+    t.send("\x1b[47;5u")                                 # Ctrl+/: not all commented -> comments every line
+    t.send("\x0b"); t.send("\x1b[117;5u")                # Ctrl+K Ctrl+U: removes one level
+    t.send("\x0b"); t.send("\x1b[117;5u")                # again: b's own comment goes
+    t.send("\x1b[1;5H")                                  # Ctrl+Home
+    t.send("\x0b"); t.send("\x1b[99;5u")                 # Ctrl+K Ctrl+C on line 1
+    t.send("\x07"); t.send("3:3\r")
+    assert t.read("Ln 3, Col 3", timeout=2)
+    t.out = b""
+    t.send("\x15")                                       # Ctrl+U: Cursor Undo
+    assert t.read("Ln 1, Col 4", timeout=2), "Ctrl+U did not bring the cursor back:\n" + plain(t)[-300:]
+    t.send("\x13"); assert t.read("Saved", timeout=2)
+    assert open(file).read() == "// a();\nb();\nc();\n", repr(open(file).read())
+    t.send(QUIT)
+    assert t.wait_exit() == 0
+    css = os.path.join(tmp, "s.css")
+    open(css, "w").write("a { color: red; }\n")
+    t = Term(css)
+    assert t.read("Ln 1, Col 1")
+    t.send("\x1b[47;5u")                                 # Ctrl+/ in CSS: a block comment around the line
+    t.send("\x13"); assert t.read("Saved", timeout=2)
+    assert open(css).read() == "/* a { color: red; } */\n", repr(open(css).read())
+    t.send(QUIT)
+    assert t.wait_exit() == 0
+    file = os.path.join(tmp, "mu.txt")
+    open(file, "w").write("one two\nthree\n")
+    t = Term(file, env=MAC)
+    assert t.read("Ln 1, Col 1")
+    t.send("\x1b[B"); t.send("\x05")                     # ↓, ⌃E (⌘→): Ln 2, Col 6
+    assert t.read("Ln 2, Col 6", timeout=2)
+    t.out = b""
+    t.send("\x1b[117;9u")                                # ⌘U
+    assert t.read("Ln 2, Col 1", timeout=2), "⌘U did not undo the cursor"
+    t.out = b""
+    t.send("\x1b[117;9u")
+    assert t.read("Ln 1, Col 1", timeout=2), "the second ⌘U did not go back to the start"
+    t.send("\x05"); t.send("\x15")                       # ⌃E, ⌃U: deletes to the line start
+    t.send("\x1b[115;9u"); assert t.read("Saved", timeout=2)
+    assert open(file).read() == "\nthree\n", repr(open(file).read())
+    t.send(MAC_QUIT)
+    assert t.wait_exit() == 0
+    print("line comments, cursor undo: ok")
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="vsedit-e2e-")
     ISOLATED.update(VSEDIT_SETTINGS=os.path.join(tmp, "settings", "vscode-settings.json"), VSEDIT_BACKUPS=os.path.join(tmp, "backups"),
@@ -902,7 +1016,7 @@ def main():
     scenarios = [run_tsx, run_go, run_crlf, run_hex, run_error_page, run_drag_scroll, run_minified, run_scrollbars, run_decorations,
                  run_autoclose, run_git_gutter, run_folding, run_menu_and_cmd_save, run_save_dialog, run_auto_save, run_hot_exit,
                  run_keybindings, run_mac_keys, run_format, run_typescript, run_find_and_status, run_symbols_and_problems, run_small_batch,
-                 run_files_and_navigation]
+                 run_files_and_navigation, run_medium_language, run_medium_editing]
     only = set(sys.argv[1:])
     results = []
     try:
