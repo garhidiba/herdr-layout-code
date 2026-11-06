@@ -1,0 +1,65 @@
+// Terminal session shared by the editor and the hex viewer: the alternate screen and input modes, Herdr right-click
+// routing, and a raw-input loop that turns keys/mouse into events for a full-screen app.
+const os = require("os");
+const { spawn, spawnSync } = require("child_process");
+const { parse } = require("./keys.cjs");
+const { which } = require("./lang/proc.cjs");
+
+// Alternate screen, bracketed paste, SGR mouse, focus reports (1004), Kitty keyboard "disambiguate" (CSI > 1 u: ⌘ keys
+// arrive as CSI-u with the super bit), bar cursor; LEAVE undoes each.
+const ENTER = "\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?1004h\x1b[>1u\x1b[5 q";
+const LEAVE = "\x1b[0m\x1b[<u\x1b[?1004l\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[?2004l\x1b[0 q\x1b]112\x07\x1b[?25h\x1b[?1049l";
+
+// `herdr-app <args>` (PATH plus the usual tool folders); `wait` blocks until it ends (at most 1.5 s).
+function herdr(args, wait) {
+  const bin = which("herdr-app");
+  if (!bin) return;
+  try {
+    if (wait) spawnSync(bin, args, { stdio: "ignore", timeout: 1500 });
+    else spawn(bin, args, { stdio: "ignore", detached: true }).on("error", () => {}).unref();
+  } catch {}
+}
+
+// Inside a Herdr terminal, right-clicks go to the program (Shift+right-click stays Herdr's menu) while it runs.
+function rightClicksTo(to, wait) {
+  const id = process.env.HC_TERMINAL_ID;
+  if (id) herdr(["do", "terminal.right_click", "--to", to, "--terminal", id], wait);
+}
+
+// Runs a full-screen app: { render(rows, cols) -> ANSI text, handle(ev) }. Each input batch is parsed (keys.cjs) and
+// handed over, then a frame is drawn; a split escape sequence that never completes is a plain Esc. Returns
+// { draw, end }: draw() schedules a frame; end() restores the terminal and stops listening (idempotent; it also runs
+// on exit, and signals or a closed input end the session and exit).
+function session(app) {
+  let scheduled = false, pending = "", ended = false;
+  const frame = () => { scheduled = false; if (!ended) process.stdout.write("\x1b[?25l" + app.render(process.stdout.rows || 24, process.stdout.columns || 80)); };
+  const draw = () => { if (!scheduled) { scheduled = true; setImmediate(frame); } };
+  const onData = (chunk) => {
+    const { events, rest } = parse(pending + chunk);
+    pending = rest;
+    for (const ev of events) app.handle(ev);
+    if (pending) setTimeout(() => { if (pending === rest) { pending = ""; app.handle({ type: "key", name: "escape" }); draw(); } }, 50);
+    draw();
+  };
+  const quit = (code) => () => { end(); process.exit(code); };
+  const handlers = [[process, "exit", () => end()], [process.stdin, "data", onData], [process.stdout, "resize", draw],
+    [process.stdin, "end", quit(129)], [process.stdin, "error", quit(129)], [process.stdout, "error", quit(129)],
+    ...["SIGTERM", "SIGHUP", "SIGINT"].map(sig => [process, sig, quit(128 + (os.constants.signals[sig] ?? 1))])];
+  function end() {
+    if (ended) return;
+    ended = true;
+    for (const [target, name, fn] of handlers) target.off(name, fn);
+    try { process.stdout.write(LEAVE); } catch {}
+    try { process.stdin.setRawMode(false); } catch {}
+    rightClicksTo("menu", true);
+  }
+  process.stdin.setRawMode(true);
+  process.stdin.setEncoding("utf8");
+  for (const [target, name, fn] of handlers) target.on(name, fn);
+  process.stdout.write(ENTER);
+  rightClicksTo("program", false);
+  frame();
+  return { draw, end };
+}
+
+module.exports = { ENTER, LEAVE, herdr, rightClicksTo, session };

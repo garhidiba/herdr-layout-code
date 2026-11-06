@@ -4,10 +4,12 @@ const path = require("path");
 
 const MAX_BYTES = 50 * 1024 * 1024;
 
-// "binary" / "too large" refuse to open; otherwise the document's text facts.
-function decode(bytes) {
+const BINARY = { error: "File seems to be binary (contains NUL bytes).", binary: true };
+
+// "binary" / "too large" refuse to open; otherwise the document's text facts. `lossy` decodes binary bytes anyway.
+function decode(bytes, { lossy = false } = {}) {
   if (bytes.length > MAX_BYTES) return { error: `File is larger than 50 MB (${(bytes.length / 1048576).toFixed(1)} MB).` };
-  if (bytes.includes(0)) return { error: "File seems to be binary (contains NUL bytes)." };
+  if (!lossy && bytes.includes(0)) return { ...BINARY };
   let text = bytes.toString("utf8");
   const bom = text.startsWith("﻿");
   if (bom) text = text.slice(1);
@@ -40,11 +42,18 @@ function detectIndent(lines, fallback = { useTabs: false, size: 4 }) {
 const stamp = (st) => ({ mtimeMs: st.mtimeMs, size: st.size });
 const sameStamp = (a, b) => !!a && !!b && a.mtimeMs === b.mtimeMs && a.size === b.size;
 
-function load(file) {
+// True when the first 8 KB hold a NUL byte (how a too-large file still counts as binary).
+function headIsBinary(file) {
+  const fd = fs.openSync(file, "r");
+  try { const head = Buffer.alloc(8192); return head.subarray(0, fs.readSync(fd, head, 0, head.length, 0)).includes(0); }
+  finally { fs.closeSync(fd); }
+}
+
+function load(file, { lossy = false } = {}) {
   const size = fs.statSync(file).size;
-  if (size > MAX_BYTES) return decode({ length: size });
+  if (size > MAX_BYTES) return !lossy && headIsBinary(file) ? { ...BINARY } : decode({ length: size });
   const bytes = fs.readFileSync(file);
-  const doc = decode(bytes);
+  const doc = decode(bytes, { lossy });
   if (!doc.error) doc.stamp = stamp(fs.statSync(file));
   return doc;
 }

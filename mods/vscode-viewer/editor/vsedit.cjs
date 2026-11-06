@@ -22,6 +22,8 @@ const Lang = require("./lang/index.cjs");
 const { applyWorkspaceEdit, lastFirst } = require("./lang/edits.cjs");
 const { wordOccurrences, Fallback } = require("./lang/fallback.cjs");
 const { gitRoot, run, which } = require("./lang/proc.cjs");
+const T = require("./terminal.cjs");
+const HV = require("./hexview.cjs");
 
 // VS Code's "Col": characters before the cursor, tabs counted to the next tab stop.
 function visibleColumn(line, index, tab) {
@@ -985,34 +987,23 @@ function readClipboard() {
 }
 
 // ---------- terminal ----------
-// Alternate screen, bracketed paste, SGR mouse, focus reports (1004), Kitty keyboard "disambiguate" (CSI > 1 u: ⌘ keys
-// arrive as CSI-u with the super bit), bar cursor; LEAVE undoes each.
-const ENTER = "\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?1004h\x1b[>1u\x1b[5 q";
-const LEAVE = "\x1b[0m\x1b[<u\x1b[?1004l\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[?2004l\x1b[0 q\x1b]112\x07\x1b[?25h\x1b[?1049l";
-
-// Inside a Herdr terminal, right-clicks go to the program (Shift+right-click stays Herdr's menu) while the editor runs.
-function rightClicksTo(to, wait) {
-  const id = process.env.HC_TERMINAL_ID, bin = id && which("herdr-app");
-  if (!bin) return;
-  const args = ["do", "terminal.right_click", "--to", to, "--terminal", id];
-  try {
-    if (wait) require("child_process").spawnSync(bin, args, { stdio: "ignore", timeout: 1500 });
-    else require("child_process").spawn(bin, args, { stdio: "ignore", detached: true }).on("error", () => {}).unref();
-  } catch {}
-}
+const { ENTER, LEAVE, rightClicksTo } = T;
 
 async function main() {
   const arg = process.argv[2];
   if (!arg) { process.stderr.write("usage: node vsedit.cjs <file>\n"); process.exit(2); }
   const file = path.resolve(arg);
+  if (!process.stdin.isTTY || !process.stdout.isTTY) { process.stderr.write("vsedit: needs a terminal\n"); process.exit(1); }
   let doc;
-  try { doc = F.load(file); }
-  catch (e) {
+  try {
+    // Binary: straight to hex for known binary names, else ask first (Open Anyway decodes it as text, lossy).
+    doc = HV.binaryName(file) ? { binary: true } : F.load(file);
+    if (doc.binary && (await HV.open(file, { ask: !HV.binaryName(file), crumbs: breadcrumbs(file), clipboard: writeClipboard })) === "text") doc = F.load(file, { lossy: true });
+  } catch (e) {
     if (e.code !== "ENOENT") { process.stderr.write(`vsedit: ${e.message}\n`); process.exit(1); }
     doc = { lines: [""], eol: "\n", finalNewline: true, bom: false, stamp: null };
   }
   if (doc.error) { process.stderr.write(`vsedit: ${path.basename(file)}: ${doc.error}\n`); process.exit(1); }
-  if (!process.stdin.isTTY || !process.stdout.isTTY) { process.stderr.write("vsedit: needs a terminal\n"); process.exit(1); }
 
   const settings = S.load();
   const index = H.loadIndex(), theme = H.loadTheme(), scope = L.scopeOf(index, path.basename(file));
