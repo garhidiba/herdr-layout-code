@@ -1,0 +1,68 @@
+{
+ "c": {
+  "operator": "#c678dd",
+  "variable": "#61afef"
+ },
+ "cpp": {
+  "operator": "#c678dd",
+  "variable": "#61afef"
+ },
+ "css": {
+  "constant": "#56b6c2",
+  "type": "#abb2bf"
+ },
+ "go": {
+  "operator": "#c678dd"
+ },
+ "gradle": {
+  "operator": "#c678dd",
+  "punctuation": "#98c379"
+ },
+ "java": {
+  "constant": "#e06c75",
+  "function": "#e5c07b",
+  "operator": "#c678dd",
+  "variable": "#61afef"
+ },
+ "js": {
+  "type": "#abb2bf"
+ },
+ "json": {
+  "constant": "#56b6c2"
+ },
+ "jsx": {
+  "type": "#abb2bf"
+ },
+ "kt": {
+  "function": "#98c379",
+  "operator": "#c678dd",
+  "variable": "#abb2bf"
+ },
+ "py": {
+  "operator": "#c678dd",
+  "type": "#56b6c2",
+  "variable": "#abb2bf"
+ },
+ "rs": {
+  "operator": "#c678dd"
+ },
+ "sh": {
+  "function": "#56b6c2",
+  "operator": "#c678dd",
+  "punctuation": "#98c379"
+ },
+ "sql": {
+  "punctuation": "#98c379"
+ },
+ "toml": {
+  "boolean": "#98c379",
+  "punctuation": "#98c379",
+  "string.escape": "#e06c75"
+ },
+ "ts": {
+  "type": "#abb2bf"
+ },
+ "xml": {
+  "punctuation": "#98c379"
+ }
+}
