@@ -1,5 +1,5 @@
 // Terminal session shared by the editor, the hex viewer and the error page: the alternate screen and input modes, Herdr
-// right-click routing, a raw-input loop that turns keys/mouse into events for a full-screen app, closing the tab on exit.
+// right-click routing, and a raw-input loop that turns keys/mouse into events for a full-screen app.
 const os = require("os");
 const { spawn, spawnSync } = require("child_process");
 const { parse } = require("./keys.cjs");
@@ -62,14 +62,8 @@ function session(app) {
   return { draw, end };
 }
 
-// Opened from the Explorer (`--close-on-exit`) inside a Herdr terminal: leaving the program also closes its tab, instead
-// of leaving the shell Herdr keeps open after the program ends.
-const closesTab = () => process.argv.includes("--close-on-exit") && !!process.env.HC_TERMINAL_ID;
+// Started by the Explorer as `exec node vsedit.cjs <file> --close-on-exit`: the program replaced the tab's shell, so the
+// tab closes when it exits, and a file that isn't there is an error rather than a new file.
+const closeOnExit = () => process.argv.includes("--close-on-exit");
 
-// Exits; when closesTab(), first kills the Herdr terminal (its pane, and so the tab, closes). Restore the terminal first.
-function exit(code = 0) {
-  if (closesTab()) herdr(["do", "terminal.kill", "--terminal", process.env.HC_TERMINAL_ID], true);
-  process.exit(code);
-}
-
-module.exports = { ENTER, LEAVE, herdr, rightClicksTo, session, closesTab, exit };
+module.exports = { ENTER, LEAVE, herdr, rightClicksTo, session, closeOnExit };

@@ -219,7 +219,6 @@ def run_menu_and_cmd_save(tmp):
     assert "do terminal.right_click --to program --terminal term-7" in calls, calls
     assert "do terminal.right_click --to menu --terminal term-7" in calls, calls
     assert "do mod.open --name vscode-settings" in calls, calls
-    assert "terminal.kill" not in calls, "started by hand (no --close-on-exit): the terminal stays"
     print("menu + ⌘S: ok")
 
 
@@ -386,8 +385,8 @@ def run_hex(tmp):
 
 
 def run_error_page(tmp):
-    """From the Explorer (--close-on-exit): a missing file shows the error page, Try Again opens it once it exists,
-    quitting kills the terminal; an unreadable file says Permission denied and Esc closes the tab, printing nothing."""
+    """From the Explorer (--close-on-exit): a missing file shows the error page and Try Again opens it once it exists;
+    an unreadable file says Permission denied and Esc closes it, printing nothing into the shell."""
     env, log = herdr_stub(tmp)
     file = os.path.join(tmp, "later.txt")
     t = Term(file, env=env, args=["--close-on-exit"])
@@ -403,7 +402,6 @@ def run_error_page(tmp):
     assert t.read("Ln 1, Col 1", timeout=5), "Try Again did not open the file:\n" + plain(t)[-400:]
     t.send("\x11")
     assert t.wait_exit() == 0
-    assert open(log).read().count("do terminal.kill --terminal term-7") == 1, open(log).read()
 
     env, log = herdr_stub(tmp)
     locked = os.path.join(tmp, "locked.txt")
@@ -413,11 +411,10 @@ def run_error_page(tmp):
     assert t.read("Permission denied", timeout=3), "no Permission denied:\n" + plain(t)[-400:]
     t.send("\x1b[27u")                            # Esc = Close
     assert t.wait_exit() == 1
-    assert "do terminal.kill --terminal term-7" in open(log).read()
     tail = plain(t)[plain(t).rfind("\x1b[?1049l"):]
     assert "vsedit" not in tail and "Permission" not in tail, "error printed into the shell: " + repr(tail)
     os.chmod(locked, 0o644)
-    print("error page + close on exit: ok")
+    print("error page: ok")
 
 
 def run_drag_scroll(tmp):

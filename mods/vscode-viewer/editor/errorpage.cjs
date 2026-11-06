@@ -80,8 +80,8 @@ function show(file, reason, crumbs) {
     const page = new ErrorPage(file, reason, crumbs, (choice) => {
       s.end();
       if (choice === "retry") return resolve("retry");
-      if (!T.closesTab()) process.stderr.write(`vsedit: ${path.basename(file)}: ${reason}\n`);
-      T.exit(1);
+      if (!T.closeOnExit()) process.stderr.write(`vsedit: ${path.basename(file)}: ${reason}\n`);
+      process.exit(1);
     });
     const s = T.session({ render: (r, c) => page.render(r, c), handle: (ev) => page.handle(ev) });
     page.redraw = s.draw;

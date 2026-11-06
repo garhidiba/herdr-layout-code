@@ -11,7 +11,8 @@ export const parentOf = (p) => p.slice(0, p.lastIndexOf("/")) || "/";
 export function openArgs(file, { on = null, appHome, how = "auto", folder = parentOf(file) }) {
   const name = baseName(file);
   if (how === "viewer" || on || (how === "auto" && VIEWER_EXT.test(name))) return { name, mod: "vscode-viewer", props: { file, on } };
-  return { name, folder, argv: ["node", `${appHome}/${EDITOR}`, file, "--close-on-exit"] };
+  // exec: the editor replaces the tab's shell, so the tab closes when it exits (see vsedit's --close-on-exit)
+  return { name, folder, argv: ["exec", "node", `${appHome}/${EDITOR}`, file, "--close-on-exit"] };
 }
 
 export const relativeTo = (root, abs) => (abs === root ? "." : abs.startsWith(root + "/") ? abs.slice(root.length + 1) : abs);

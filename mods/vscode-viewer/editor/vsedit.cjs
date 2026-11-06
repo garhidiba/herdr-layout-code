@@ -1040,7 +1040,7 @@ async function main() {
       if (doc.binary && (await HV.open(file, { ask: !HV.binaryName(file), crumbs: breadcrumbs(file), clipboard: writeClipboard })) === "text") doc = F.load(file, { lossy: true });
     } catch (e) {
       // Started by hand, a missing file is a new one; the Explorer only opens files that exist.
-      doc = e.code === "ENOENT" && !T.closesTab() ? { lines: [""], eol: "\n", finalNewline: true, bom: false, stamp: null } : { error: E.reasonOf(e) };
+      doc = e.code === "ENOENT" && !T.closeOnExit() ? { lines: [""], eol: "\n", finalNewline: true, bom: false, stamp: null } : { error: E.reasonOf(e) };
     }
     if (!doc.error) break;
     await E.show(file, doc.error, breadcrumbs(file));
@@ -1088,7 +1088,7 @@ async function main() {
   };
   const schedule = () => { if (!scheduled) { scheduled = true; setImmediate(draw); } };
   ed.redraw = () => { ed.afterEvent(); schedule(); };
-  ed.onExit = () => { restore(); T.exit(0); };
+  ed.onExit = () => { restore(); process.exit(0); };
   Lang.setApplyEdit((ws) => { ed.applyEdit(ws); schedule(); return true; });
   setInterval(() => { if (ed.pollSettings()) schedule(); }, 2000).unref();
 

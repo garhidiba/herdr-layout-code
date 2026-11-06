@@ -298,7 +298,7 @@ function open(file, { ask = false, crumbs, clipboard }) {
   return new Promise((resolve, reject) => {
     const viewer = new HexView(reader, env);
     let s = null, app = viewer;
-    viewer.onExit = () => { s.end(); T.exit(0); };
+    viewer.onExit = () => { s.end(); process.exit(0); };
     if (ask) app = new BinaryPrompt(env, () => { app = viewer; }, () => { s.end(); fs.closeSync(fd); resolve("text"); }, viewer.onExit);
     // A read error later on (file removed, disk gone) ends the session and goes to the caller like an open error.
     const guard = (fn) => (...a) => { try { return fn(...a); } catch (e) { s.end(); try { fs.closeSync(fd); } catch {} reject(e); return ""; } };

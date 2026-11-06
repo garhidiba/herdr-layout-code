@@ -7,11 +7,11 @@ const home = "/Users/me/.config/herdr-app";
 
 test("code opens in the terminal editor, images/markdown/remote files in the viewer", () => {
   assert.deepEqual(openArgs("/p/src/a.ts", { appHome: home }),
-    { name: "a.ts", folder: "/p/src", argv: ["node", `${home}/mods/vscode-viewer/editor/vsedit.cjs`, "/p/src/a.ts", "--close-on-exit"] });
+    { name: "a.ts", folder: "/p/src", argv: ["exec", "node", `${home}/mods/vscode-viewer/editor/vsedit.cjs`, "/p/src/a.ts", "--close-on-exit"] });
   assert.equal(openArgs("/p/README.md", { appHome: home }).mod, "vscode-viewer");
   assert.equal(openArgs("/p/logo.PNG", { appHome: home }).mod, "vscode-viewer");
   assert.deepEqual(openArgs("/p/a.ts", { on: "box", appHome: home }), { name: "a.ts", mod: "vscode-viewer", props: { file: "/p/a.ts", on: "box" } });
-  assert.equal(openArgs("/p/README.md", { appHome: home, how: "editor" }).argv[0], "node");
+  assert.equal(openArgs("/p/README.md", { appHome: home, how: "editor" }).argv[1], "node");
   assert.equal(openArgs("/p/a.ts", { appHome: home, how: "viewer" }).mod, "vscode-viewer");
   assert.equal(parentOf("/a"), "/");
   assert.equal(openArgs("/p/src/a.ts", { appHome: home, folder: "/p" }).folder, "/p"); // the tree's root, not src

@@ -95,7 +95,7 @@ export default class Settings extends View {
 
   openJson() {
     closeOverlay(props().overlay);
-    run("tab.new", { name: FILE, folder: appHome(), argv: ["node", `${appHome()}/${EDITOR}`, settingsPath()] });
+    run("tab.new", { name: FILE, folder: appHome(), argv: ["exec", "node", `${appHome()}/${EDITOR}`, settingsPath()] }); // exec: the tab closes with the editor
   }
 
   // ----- controls -----

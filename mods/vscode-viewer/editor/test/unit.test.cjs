@@ -399,27 +399,6 @@ test("closing with unsaved changes asks Save / Don't Save / Cancel; hot exit kee
   delete process.env.VSEDIT_BACKUPS;
 });
 
-// A herdr-app stub on PATH that records its arguments; runs `code` in a child node with `args` and env.
-function withHerdrStub(code, args, env) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vsedit-herdr-")), log = path.join(dir, "log");
-  fs.writeFileSync(path.join(dir, "herdr-app"), `#!/bin/sh\necho "$@" >> "${log}"\n`, { mode: 0o755 });
-  const r = require("child_process").spawnSync(process.execPath, ["-e", code, "--", ...args],
-    { env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, ...env }, cwd: path.join(__dirname, "..") });
-  return { status: r.status, calls: fs.existsSync(log) ? fs.readFileSync(log, "utf8") : "" };
-}
-const EXIT = `require("./terminal.cjs").exit(0)`;
-
-test("leaving a program the Explorer opened in Herdr kills its terminal, so the tab closes", () => {
-  const r = withHerdrStub(EXIT, ["a.txt", "--close-on-exit"], { HC_TERMINAL_ID: "term-3" });
-  assert.equal(r.status, 0);
-  assert.equal(r.calls, "do terminal.kill --terminal term-3\n");
-});
-
-test("started by hand, or outside Herdr, leaving keeps the terminal", () => {
-  assert.equal(withHerdrStub(EXIT, ["a.txt"], { HC_TERMINAL_ID: "term-3" }).calls, "");
-  assert.equal(withHerdrStub(EXIT, ["a.txt", "--close-on-exit"], { HC_TERMINAL_ID: "" }).calls, "");
-});
-
 test("the error page names fs errors in words and maps Esc/⌘W/Ctrl+Q to Close, Enter to Try Again", () => {
   const E = require("../errorpage.cjs");
   assert.equal(E.reasonOf(Object.assign(new Error("x"), { code: "ENOENT" })), "File not found");
