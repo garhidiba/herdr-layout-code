@@ -38,6 +38,7 @@
   },
   "layout:vscode": {
     "cmd-e": "layout.toggle:panel",
-    "cmd-s": "vscode-viewer.save"
+    "cmd-s": "vscode-viewer.save",
+    "cmd-,": "mod.open:vscode-settings"
   }
 }
