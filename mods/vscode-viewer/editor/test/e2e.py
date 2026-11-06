@@ -4,11 +4,12 @@ scrollbars (editor and hex viewer), the context menu, Kitty ⌘ keys, user keybi
 find widget toggles, status bar items, symbol breadcrumbs, Go to Symbol and diagnostics; Expand Line Selection, Go to Bracket,
 Toggle Block Comment, Save As, Join Lines and Save All; Go to File with several files, Go Back / Forward and the settings JSON;
 through tsserver Show Hover (keys and mouse), Quick Fix, Expand / Shrink Selection, Format Selection and Go to Symbol in
-Workspace; line comments and Cursor Undo.
+Workspace; line comments and Cursor Undo; inline suggestions from a fake Ollama (ghost text, Tab, typing through,
+accept next word, Esc, a deny-listed file).
 usage: python3 -I mods/vscode-viewer/editor/test/e2e.py [scenario ...]
 VSEDIT_BIN=<path to the Rust vsedit> runs the same scenarios against the Rust editor through the launcher (vsedit.sh);
 each result says which editor ran, and a scenario the Rust editor didn't run alone (a fallback to JS) fails."""
-import fcntl, json, os, pty, re, select, shutil, signal, struct, subprocess, sys, tempfile, termios, time
+import fcntl, http.server, json, os, pty, re, select, shutil, signal, struct, subprocess, sys, tempfile, termios, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 EDITOR = os.path.join(HERE, "..", "vsedit.cjs")
@@ -384,7 +385,7 @@ def run_auto_save(tmp):
     """files.autoSave afterDelay with files.autoSaveDelay in seconds saves without Ctrl+S."""
     settings = os.path.join(tmp, "auto", "vscode-settings.json")
     os.makedirs(os.path.dirname(settings))
-    open(settings, "w").write('{"files.autoSave": "afterDelay", "files.autoSaveDelay": 0.3, "keep.me": 1}')
+    open(settings, "w").write('{"files.autoSave": "afterDelay", "files.autoSaveDelay": 0.3, "keep.me": 1, "editor.inlineSuggest.provider": "off"}')
     file = os.path.join(tmp, "auto.txt")
     open(file, "w").write("one\n")
     t = Term(file, env={"VSEDIT_SETTINGS": settings})
@@ -1004,16 +1005,102 @@ def run_medium_editing(tmp):
     print("line comments, cursor undo: ok")
 
 
+class FakeOllama(http.server.ThreadingHTTPServer):
+    """/api/generate on 127.0.0.1: the reply depends on how the prompt ends; every request but the warm-up is kept."""
+    def __init__(self):
+        self.requests, self.warmups = [], 0
+        server = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                if body.get("prompt") == "" and body.get("options", {}).get("num_predict") == 1:
+                    server.warmups += 1
+                    reply = {"response": "", "done": True}
+                else:
+                    server.requests.append(body)
+                    p = body["prompt"]
+                    reply = {"response": " a + b;" if p.endswith("return") else "onsole.log(a + b);" if p.endswith("c") else "", "done": True}
+                data = json.dumps(reply).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+        super().__init__(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.serve_forever, daemon=True).start()
+
+
+def run_inline_suggest(tmp):
+    """Ghost text from a fake Ollama after typing pauses (one request for a burst), Tab accepts, typing its own
+    characters keeps the rest without asking again, Ctrl+→ takes a word, Esc hides it; a .env file sends nothing."""
+    stub = FakeOllama()
+    settings = os.path.join(tmp, "inline", "vscode-settings.json")
+    os.makedirs(os.path.dirname(settings))
+    json.dump({"editor.inlineSuggest.provider": "ollama", "editor.inlineSuggest.endpoint": f"http://127.0.0.1:{stub.server_port}",
+               "editor.inlineSuggest.debounce": 80}, open(settings, "w"))
+    env = {"VSEDIT_SETTINGS": settings}
+    file = os.path.join(tmp, "add.js")
+    open(file, "w").write("function add(a, b) {\n  \n}\n")
+    t = Term(file, env=env)
+    assert colored_frame(t), "no colored frame"
+    t.send("\x07"); t.send("2:3\r")
+    t.out = b""
+    t.send("return", wait=0.02)
+    assert t.read(" a + b;", timeout=3), "no ghost text:\n" + plain(t)[-400:]
+    assert sgr("#717378") + " a + b;" in screen_of(t), "the ghost text isn't in editorGhostText's color"
+    assert len(stub.requests) == 1, f"{len(stub.requests)} requests for one burst of typing"
+    assert stub.requests[0]["suffix"].startswith("\n}") and stub.requests[0]["options"]["stop"] == ["\n"]
+    t.send("\t")                                         # Tab accepts
+    t.send("\r"); t.read(timeout=0.4)                    # a new line (its empty reply shows nothing)
+    asked = len(stub.requests)
+    t.out = b""
+    t.send("c")
+    assert t.read("onsole.log(a + b);", timeout=3), "no ghost text after c"
+    t.out = b""
+    t.send("ons", wait=0.05)
+    assert t.read("ole.log(a + b);", timeout=2), "the rest of the suggestion doesn't show after typing through"
+    t.read(timeout=0.4)
+    assert len(stub.requests) == asked + 1, "typing through the suggestion asked again"
+    t.send("\x1b[1;5C")                                  # Ctrl+→: accept next word ("ole")
+    t.send("\x1b", wait=0.3)                             # Esc hides the rest
+    t.send("\x13"); assert t.read("Saved", timeout=2)
+    assert open(file).read() == "function add(a, b) {\n  return a + b;\n  console\n}\n", repr(open(file).read())
+    t.send(QUIT)
+    assert t.wait_exit() == 0
+    assert stub.warmups == 1, f"{stub.warmups} warm-ups"
+    secret = os.path.join(tmp, ".env")
+    open(secret, "w").write("TOKEN=\n")
+    asked = len(stub.requests)
+    t = Term(secret, env=env)
+    assert t.read("Ln 1, Col 1")
+    t.send("\x1b[1;5F"); t.send("x"); t.read(timeout=0.5)
+    t.send("\x1b\\")                                    # Alt+\ (Trigger Inline Suggestion) says why not
+    assert t.read("No inline suggestions for this file", timeout=2)
+    assert len(stub.requests) == asked, "a deny-listed file was sent"
+    t.send(QUIT); t.send("d")
+    t.wait_exit()
+    stub.shutdown()
+    print("inline suggestions: ok")
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="vsedit-e2e-")
     ISOLATED.update(VSEDIT_SETTINGS=os.path.join(tmp, "settings", "vscode-settings.json"), VSEDIT_BACKUPS=os.path.join(tmp, "backups"),
                     VSEDIT_KEYBINDINGS=os.path.join(tmp, "settings", "vscode-keybindings.json"), VSEDIT_OS="linux")
+    # No scenario but run_inline_suggest asks a model (Ollama may run on this machine): the provider is off.
+    os.makedirs(os.path.join(tmp, "settings"))
+    open(ISOLATED["VSEDIT_SETTINGS"], "w").write('{"files.autoSave": "off", "files.autoSaveDelay": 1, "editor.inlineSuggest.provider": "off"}\n')
     engines = os.path.join(tmp, "engines.log")
-    ISOLATED.update(VSEDIT_ENGINE_LOG=engines)
+    ISOLATED.update(VSEDIT_ENGINE_LOG=engines, VSEDIT_INLINE_USAGE=os.path.join(tmp, "inline-usage.json"))
     scenarios = [run_tsx, run_go, run_crlf, run_hex, run_error_page, run_drag_scroll, run_minified, run_scrollbars, run_decorations,
                  run_autoclose, run_git_gutter, run_folding, run_menu_and_cmd_save, run_save_dialog, run_auto_save, run_hot_exit,
                  run_keybindings, run_mac_keys, run_format, run_typescript, run_find_and_status, run_symbols_and_problems, run_small_batch,
-                 run_files_and_navigation, run_medium_language, run_medium_editing]
+                 run_files_and_navigation, run_medium_language, run_medium_editing, run_inline_suggest]
     only = set(sys.argv[1:])
     results = []
     try:

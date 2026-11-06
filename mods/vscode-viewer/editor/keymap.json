@@ -1,5 +1,5 @@
 {
-  "about": "The editor's commands and their default keys per OS (VS Code's defaults for macOS, Windows and Linux; a key is VS Code's spelling with modifiers in the order ctrl+alt+shift+cmd, cmd = ⌘ / the Windows / Super key, and a space between the two steps of a chord). `note` explains each key that differs from VS Code. Read by commands.cjs (Node) and the Rust port; the order is the palette's and the Keyboard Shortcuts page's.",
+  "about": "The editor's commands and their default keys per OS (VS Code's defaults for macOS, Windows and Linux; a key is VS Code's spelling with modifiers in the order ctrl+alt+shift+cmd, cmd = ⌘ / the Windows / Super key, and a space between the two steps of a chord). `note` explains each key that differs from VS Code. `when: \"inlineSuggestionVisible\"` (VS Code's context key) makes a command's keys apply only while an inline suggestion shows; otherwise the key does what else is bound to it. Read by commands.cjs (Node) and the Rust port; the order is the palette's and the Keyboard Shortcuts page's.",
   "commands": [
     {"id":"editor.action.revealDefinition","title":"Go to Definition","keys":{"mac":["f12"],"win":["f12"],"linux":["f12"]}},
     {"id":"editor.action.goToTypeDefinition","title":"Go to Type Definition","keys":{"mac":[],"win":[],"linux":[]}},
@@ -19,6 +19,12 @@
     {"id":"editor.action.formatSelection","title":"Format Selection","keys":{"mac":["cmd+k cmd+f"],"win":["ctrl+k ctrl+f"],"linux":["ctrl+k ctrl+f"]}},
     {"id":"editor.action.refactor","title":"Refactor...","keys":{"mac":["ctrl+shift+r"],"win":["ctrl+shift+r"],"linux":["ctrl+shift+r"]}},
     {"id":"editor.action.sourceAction","title":"Source Action...","keys":{"mac":[],"win":[],"linux":[]}},
+    {"id":"editor.action.inlineSuggest.trigger","title":"Trigger Inline Suggestion","keys":{"mac":["alt+\\"],"win":["alt+\\"],"linux":["alt+\\"]}},
+    {"id":"editor.action.inlineSuggest.commit","title":"Accept Inline Suggestion","when":"inlineSuggestionVisible","keys":{"mac":["tab"],"win":["tab"],"linux":["tab"]}},
+    {"id":"editor.action.inlineSuggest.acceptNextWord","title":"Accept Next Word Of Inline Suggestion","when":"inlineSuggestionVisible","keys":{"mac":["cmd+right"],"win":["ctrl+right"],"linux":["ctrl+right"]}},
+    {"id":"editor.action.inlineSuggest.hide","title":"Hide Inline Suggestion","when":"inlineSuggestionVisible","keys":{"mac":["escape"],"win":["escape"],"linux":["escape"]}},
+    {"id":"editor.action.inlineSuggest.showNext","title":"Show Next Inline Suggestion","when":"inlineSuggestionVisible","keys":{"mac":["alt+]"],"win":["alt+]"],"linux":["alt+]"]}},
+    {"id":"editor.action.inlineSuggest.showPrevious","title":"Show Previous Inline Suggestion","when":"inlineSuggestionVisible","keys":{"mac":["alt+["],"win":["alt+["],"linux":["alt+["]}},
     {"id":"editor.action.quickFix","title":"Quick Fix...","keys":{"mac":["cmd+."],"win":["ctrl+."],"linux":["ctrl+."]}},
     {"id":"editor.action.clipboardCutAction","title":"Cut","keys":{"mac":["cmd+x"],"win":["ctrl+x","shift+delete"],"linux":["ctrl+x","shift+delete"]}},
     {"id":"editor.action.clipboardCopyAction","title":"Copy","keys":{"mac":["cmd+c"],"win":["ctrl+c","ctrl+insert"],"linux":["ctrl+c","ctrl+insert"]}},

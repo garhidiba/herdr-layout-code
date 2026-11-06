@@ -31,8 +31,9 @@ function canon(key) {
 }
 
 // User entries (the file's array) -> the keymap of an OS: { os, bindings: [{ key, command, source: "default" | "user" }]
-// (in order), byChord: Map key -> command id (the last binding wins), prefixes: Set of the first steps of the two-step
-// keys in effect, label(id) (the key shown in menus, "" when none), keyLabel(key) }.
+// (in order), byChord: Map key -> command id (the last binding wins), whenSuggest: the same for the commands whose keys
+// apply only while an inline suggestion shows (keymap.json's `when`), prefixes: Set of the first steps of the two-step
+// keys in effect, label(id) (the key shown in menus, "" when none), keyLabel(key), live(binding) (still in effect) }.
 // Entries that aren't { key?, command } objects, or whose key can't be read, are skipped.
 function resolve(user = [], os = C.OS) {
   let bindings = C.defaults(os).map(b => ({ ...b, source: "default" }));
@@ -45,16 +46,19 @@ function resolve(user = [], os = C.OS) {
       bindings = bindings.filter(b => b.command !== id || (key !== null && b.key !== key));
     } else if (key) bindings.push({ key, command: e.command, source: "user" });
   }
-  const byChord = new Map(bindings.map(b => [b.key, b.command]));
+  const conditional = (id) => !!C.BY_ID.get(id)?.when;
+  const byChord = new Map(bindings.filter(b => !conditional(b.command)).map(b => [b.key, b.command]));
+  const whenSuggest = new Map(bindings.filter(b => conditional(b.command)).map(b => [b.key, b.command]));
   const prefixes = new Set([...byChord.keys()].filter(k => k.includes(" ")).map(k => k.split(" ")[0]));
   const keyLabel = (key) => C.label(key, os);
+  const live = (b) => (conditional(b.command) ? whenSuggest : byChord).get(b.key) === b.command;
   // A key still running this command; the user's newest one first, else the command's first default.
   const label = (id) => {
-    const live = bindings.filter(b => b.command === id && byChord.get(b.key) === id);
-    const b = live.filter(x => x.source === "user").pop() ?? live[0];
+    const own = bindings.filter(b => b.command === id && live(b));
+    const b = own.filter(x => x.source === "user").pop() ?? own[0];
     return b ? keyLabel(b.key) : "";
   };
-  return { os, bindings, byChord, prefixes, label, keyLabel };
+  return { os, bindings, byChord, whenSuggest, prefixes, label, keyLabel, live };
 }
 
 // File text -> { user (entries), error }. Missing or empty -> no entries; invalid -> no entries and the error.
@@ -89,13 +93,13 @@ function live(file = keybindingsFile()) {
 function table(keymap) {
   const rows = [], seen = new Set();
   for (const c of C.COMMANDS) {
-    const own = keymap.bindings.filter(b => b.command === c.id && keymap.byChord.get(b.key) === c.id);
+    const own = keymap.bindings.filter(b => b.command === c.id && keymap.live(b));
     for (const b of own) rows.push({ id: c.id, title: c.title, key: b.key, source: b.source === "user" ? "User" : "Default" });
     if (!own.length) rows.push({ id: c.id, title: c.title, key: "", source: "" });
     seen.add(c.id);
   }
   for (const b of keymap.bindings)
-    if (!seen.has(b.command) && keymap.byChord.get(b.key) === b.command) rows.push({ id: b.command, title: "", key: b.key, source: "User" });
+    if (!seen.has(b.command) && keymap.live(b)) rows.push({ id: b.command, title: "", key: b.key, source: "User" });
   return rows;
 }
 

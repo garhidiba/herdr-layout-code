@@ -5,6 +5,7 @@ const os = require("os");
 const path = require("path");
 const F = require("./file.cjs");
 const { loose } = require("./highlight.cjs");
+const I = require("./inline.cjs");
 
 const DEFAULTS = {
   "files.autoSave": "off",            // "off" | "afterDelay" | "onFocusChange"
@@ -23,9 +24,10 @@ const settingsFile = () => process.env.VSEDIT_SETTINGS
   ?? path.join(process.env.HERDR_APP_HOME ?? path.join(os.homedir(), ".config", "herdr-app"), "vscode-settings.json");
 
 const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
-// Raw object -> every setting with a valid value (invalid ones fall back to the default).
+// Raw object -> every setting with a valid value (invalid ones fall back to the default), the inline suggestion ones
+// (editor.inlineSuggest.*, inline.cjs) included; those aren't written into a new file.
 function normalize(raw = {}) {
-  const v = { ...DEFAULTS };
+  const v = { ...DEFAULTS, ...I.normalize(raw) };
   if (AUTO_SAVE.includes(raw["files.autoSave"])) v["files.autoSave"] = raw["files.autoSave"];
   const d = Number(raw["files.autoSaveDelay"]);
   if (raw["files.autoSaveDelay"] != null && Number.isFinite(d)) v["files.autoSaveDelay"] = clamp(d, 0.1, 3600);

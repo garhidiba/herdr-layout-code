@@ -37,6 +37,7 @@ const G = require("./gitgutter.cjs");
 const FD = require("./folding.cjs");
 const SS = require("./smartselect.cjs");
 const { editsWithin } = require("./lang/edits.cjs");
+const I = require("./inline.cjs");
 
 // VS Code's "Col": characters before the cursor, tabs counted to the next tab stop.
 function visibleColumn(line, index, tab) {
@@ -95,6 +96,9 @@ class Editor {
     this.rows = 24; this.cols = 80;
     this.vbar = new SB.Bar(true); this.hbar = new SB.Bar(false); this.marks = null; // scrollbars, laid out each frame
     this.redraw = () => {}; this.onExit = null; this.autoTimer = null;
+    // inline suggestions: the ghost text shown, the debounce timer, the request in flight (abort), replies per position
+    this.inline = { ghost: null, timer: null, abort: null, gen: 0, busy: false, error: null, cache: new Map(), health: new Map(),
+      warmed: new Set(), seen: null, editing: false };
   }
 
   // Everything that belongs to one open file; switching files swaps these fields.
@@ -1243,6 +1247,160 @@ class Editor {
     return !!r && this.collapse([r]);
   }
 
+  // ----- inline suggestions (inline.cjs): ghost text from a provider after typing pauses -----
+  get inlineCfg() {
+    if (this._inlineCfg?.settings !== this.settings) this._inlineCfg = { settings: this.settings, cfg: I.config(this.settings, inlineUsable) };
+    return this._inlineCfg.cfg;
+  }
+  inlineHealth(cfg) {
+    let h = this.inline.health.get(cfg.key);
+    if (!h) this.inline.health.set(cfg.key, (h = new I.Health(cfg.stopAfter)));
+    return h;
+  }
+  // Why no request may go now: null when one may; "ui" (an overlay or a selection) and "position" go unsaid.
+  inlineBlocked(cfg, manual) {
+    if (!cfg.enabled) return "Inline suggestions are off (click their status bar item to turn them on)";
+    const paused = this.inlineHealth(cfg).paused;
+    if (paused) return `${cfg.label} is paused: ${paused} (click its status bar item to resume)`;
+    if (this.popup || this.prompt || this.peek || !this.empty) return "ui";
+    if (I.denied(this.file, cfg.exclude)) return "No inline suggestions for this file (editor.inlineSuggest.exclude)";
+    if (this.textLength() > I.MAX_FILE_CHARS) return "The file is too large for inline suggestions";
+    if (!manual && !I.atSuggestable(this.lines[this.head.line], this.head.col)) return "position";
+    if (cfg.limit && I.usageOf(cfg.key).requests >= cfg.limit) return `${cfg.label}: today's limit of ${cfg.limit} requests is reached (editor.inlineSuggest.dailyRequestLimit)`;
+    return null;
+  }
+  textLength() {
+    if (this._length?.buf !== this.buf || this._length.version !== this.buf.version) {
+      let n = 0;
+      for (const t of this.lines) { n += t.length + 1; if (n > I.MAX_FILE_CHARS) break; }
+      this._length = { buf: this.buf, version: this.buf.version, n };
+    }
+    return this._length.n;
+  }
+  inlineCancel() {
+    clearTimeout(this.inline.timer); this.inline.timer = null;
+    if (this.inline.abort) { this.inline.abort.abort(); this.inline.abort = null; this.inline.gen++; }
+    this.inline.busy = false;
+  }
+  // After each event: the ghost goes when the text, the cursor or the file changed under it; an edit by typing asks
+  // again once typing pauses (auto trigger), any other change cancels what is pending.
+  inlineAfterEvent() {
+    const s = this.inline, g = s.ghost, now = `${this.file}\0${this.buf.version}\0${this.head.line}\0${this.head.col}`;
+    if (g && (g.file !== this.file || g.version !== this.buf.version || cmp(g.at, this.head) !== 0 || !this.empty || this.popup || this.prompt)) s.ghost = null;
+    const editing = s.editing;
+    s.editing = false;
+    if (now === s.seen) return;
+    const versionChanged = !s.seen || s.seen.split("\0")[1] !== String(this.buf.version);
+    s.seen = now;
+    if (s.ghost) return;
+    if (editing && versionChanged) this.inlineSchedule(); else this.inlineCancel();
+  }
+  inlineSchedule() {
+    this.inlineCancel();
+    const cfg = this.inlineCfg;
+    if (cfg.trigger !== "auto" || this.inlineBlocked(cfg, false)) return;
+    this.inline.timer = setTimeout(() => this.inlineRequest(false), cfg.debounce);
+  }
+  // Asks the provider for the cursor's position (manual: Trigger Inline Suggestion, which says why it can't).
+  async inlineRequest(manual) {
+    const cfg = this.inlineCfg, why = this.inlineBlocked(cfg, manual);
+    if (why) { if (manual && why !== "ui") this.say(why, this.colors.warn, 5000); return; }
+    const at = { ...this.head }, file = this.file, version = this.buf.version;
+    const key = `${file}\0${version}\0${at.line}\0${at.col}\0${cfg.key}\0${cfg.multiline}`;
+    if (this.inline.cache.has(key)) return this.inlineShow(this.inline.cache.get(key), at, version);
+    const ctx = I.contextAt(this.lines, at.line, at.col, cfg.prefixChars, cfg.suffixChars);
+    this.inlineCancel();
+    const ac = new AbortController(), gen = ++this.inline.gen;
+    Object.assign(this.inline, { abort: ac, busy: true });
+    this.redraw();
+    const t0 = Date.now();
+    let texts = [], error = null;
+    try { const { status, json } = await I.post(I.request(cfg, ctx), ac.signal); texts = I.reply(cfg, status, json); }
+    catch (e) { error = I.failure(cfg, e); if (error === null) return; } // aborted: a newer request or an edit
+    if (gen !== this.inline.gen) return;
+    Object.assign(this.inline, { abort: null, busy: false, error });
+    const results = texts.map(t => I.clean(t, { ...ctx, multiline: cfg.multiline })), good = results.filter(r => r.text).map(r => r.text);
+    I.recordUsage(cfg.key, { inChars: ctx.prefix.length + ctx.suffix.length, outChars: texts.join("").length, ms: error ? null : Date.now() - t0 });
+    const anomaly = error ? null : results.some(r => r.anomaly === "fim") ? "fim" : results.find(r => r.anomaly)?.anomaly ?? (results.length ? null : "empty");
+    const paused = this.inlineHealth(cfg).record(anomaly, error);
+    if (paused) this.say(`${cfg.label} paused: ${paused}`, this.colors.warn, 8000);
+    else if (error) this.say(error, this.colors.warn, 6000);
+    if (good.length) {
+      if (this.inline.cache.size >= 50) this.inline.cache.delete(this.inline.cache.keys().next().value);
+      this.inline.cache.set(key, good);
+      this.inlineShow(good, at, version);
+    }
+    this.redraw();
+  }
+  inlineShow(items, at, version) {
+    if (this.buf.version !== version || cmp(this.head, at) !== 0 || !this.empty || this.popup || this.prompt) return;
+    this.inline.ghost = { file: this.file, version, at, items, index: 0 };
+  }
+  // The ghost text to paint: { line, col, lines } (null when none shows).
+  inlineGhostView() {
+    const g = this.inline.ghost;
+    if (!g || g.file !== this.file || g.version !== this.buf.version || this.folds.isHidden(g.at.line)) return null;
+    return { line: g.at.line, col: g.at.col, lines: g.items[g.index].split("\n") };
+  }
+  // A key or typed text while a suggestion shows: its commands (Tab, Esc, ⌘→ …, keymap.json's `when` keys), or typing
+  // what it starts with, which keeps the rest without asking again. True when handled here.
+  inlineKey(ev) {
+    const g = this.inline.ghost;
+    if (ev.type === "key") {
+      const id = this.keymap.whenSuggest.get(C.chordOf(ev));
+      if (!C.BY_ID.has(id)) return false;
+      this.runCommand(id);
+      return true;
+    }
+    if (ev.type !== "text") return false;
+    const text = ev.text.replace(/\r\n?/g, "\n"), left = I.typeThrough([g.items[g.index], ...g.items.filter((_, i) => i !== g.index)], text);
+    this.typed(ev.text);
+    const { line, col } = this.head;
+    if (left && line === g.at.line && !text.includes("\n")) {
+      const rest = this.lines[line].slice(col);
+      this.inline.ghost = { ...g, version: this.buf.version, at: { line, col }, items: left.map(s => I.trimLineSuffix(s, rest)).filter(Boolean), index: 0 };
+      if (!this.inline.ghost.items.length) this.inline.ghost = null;
+      else this.inline.editing = false;
+    }
+    return true;
+  }
+  // Tab: the whole suggestion; ⌘→ / Ctrl+→: up to the end of its next word, the rest still showing.
+  inlineAccept(word) {
+    const g = this.inline.ghost;
+    if (!g) return;
+    const text = g.items[g.index], part = word ? text.slice(0, I.nextWordLength(text)) : text;
+    this.insert(part); this.buf.seal();
+    const rest = text.slice(part.length);
+    this.inline.ghost = rest ? { ...g, items: [rest], index: 0, version: this.buf.version, at: { ...this.head } } : null;
+  }
+  inlineHide() { this.inline.ghost = null; this.inlineCancel(); }
+  inlineCycle(dir) { const g = this.inline.ghost; if (g) g.index = (g.index + dir + g.items.length) % g.items.length; }
+  inlineTrigger() { this.inline.ghost = null; this.inlineRequest(true); }
+  // Loads the provider's model in the background once per provider and model (Ollama), so the first suggestion is quick.
+  inlineWarmup() {
+    const cfg = this.inlineCfg, req = cfg.enabled && !this.inline.warmed.has(cfg.key) && I.warmup(cfg);
+    if (!req) return;
+    this.inline.warmed.add(cfg.key);
+    I.post(req).catch(() => {});
+  }
+  // The status bar item: the provider and its state; a click turns suggestions on/off (and resumes a paused provider),
+  // the pointer on it shows today's usage. Hidden while the provider is off or can't run here and nothing was set.
+  inlineStatus() {
+    const cfg = this.inlineCfg;
+    if (cfg.provider === "off" || (!cfg.enabled && this.settings["editor.inlineSuggest.enabled"] == null)) return null;
+    const paused = this.inlineHealth(cfg).paused, limited = cfg.enabled && cfg.limit && I.usageOf(cfg.key).requests >= cfg.limit;
+    const state = !cfg.enabled ? ": off" : paused ? ": paused" : limited ? ": limit" : this.inline.busy ? " …" : this.inline.error ? ": error" : "";
+    return { text: cfg.label + state, run: () => this.toggleInline(), hover: () => (paused ? `${cfg.label} paused: ${paused} · ` : "") + I.usageText(cfg, I.usageOf(cfg.key)) };
+  }
+  toggleInline() {
+    const cfg = this.inlineCfg;
+    this.inline.health.delete(cfg.key); this.inline.error = null;
+    this.inlineHide();
+    try { this.applySettings(S.update("editor.inlineSuggest.enabled", !cfg.enabled)); this.say(`Inline suggestions ${cfg.enabled ? "off" : "on"}`); }
+    catch (e) { this.say(`Cannot write settings: ${e.message}`, this.colors.error, 6000); }
+    this.inlineWarmup();
+  }
+
   // ----- settings, auto save -----
   applySettings({ values, stamp }) { this.settings = values; this.settingsStamp = stamp; }
   pollSettings() {
@@ -1281,6 +1439,7 @@ class Editor {
   // After each input event: record a cursor change for Cursor Undo; restart the auto-save timer when the text changed.
   afterEvent() {
     this.noteCursor();
+    this.inlineAfterEvent();
     if (this.buf.version === this.seenVersion) return;
     this.seenVersion = this.buf.version;
     if (this.settings["files.autoSave"] !== "afterDelay" || !this.buf.dirty) return;
@@ -1298,12 +1457,14 @@ class Editor {
   handle(ev) {
     if (ev.type === "focus") return this.focusChanged(ev.focused);
     if (ev.type === "mouse") return this.mouse(ev);
+    this.inline.editing = ev.type === "text" || (ev.type === "key" && ["enter", "backspace", "tab", "delete"].includes(ev.name));
     if (this.chordPrefix) return this.chordKey(ev);
     if (this.hoverBox && !this.popup) { this.hoverBox = null; if (ev.type === "key" && ev.name === "escape") return; } // any key closes the hover; Esc only that
     if (this.popup) return void this.popup.key(ev, this);
     if (this.prompt) return this.promptKey(ev);
     if (this.peek && this.peek.key(ev, this)) return;
     if (this.panel?.focused && this.panel.key(ev, this)) return;
+    if (this.inline.ghost && this.inlineKey(ev)) return;
     if (ev.type === "text") return this.typed(ev.text);
     if (ev.type === "paste") return this.paste(ev.text);
     const chord = C.chordOf(ev);
@@ -1335,6 +1496,8 @@ class Editor {
 
   // Terminal cell -> buffer position (rows: 1 breadcrumbs, 2..rows-1 text).
   cellToPos(x, y) {
+    const ga = this.ghostArea; // rows the ghost text pushed down
+    if (ga && y > ga.row) y = Math.max(ga.row, y - ga.n);
     const line = this.fromView(Math.max(0, Math.min(this.viewCount - 1, this.toView(this.top) + y - 2)));
     return { line, col: W.indexAtCol(this.lines[line], Math.max(0, this.left + x - 1 - this.gutter), this.tab) };
   }
@@ -1391,6 +1554,10 @@ class Editor {
   // A buttonless motion: the changed bar alone, "" when nothing changed, null for a whole frame (or not a hover).
   hover(ev) {
     if (this.popup) return null; // menus highlight under the pointer
+    if (ev.type === "mouse" && ev.motion && ev.button === 3 && ev.y === this.rows) { // the inline suggestion item: today's usage
+      const h = this.statusHits?.find(h => h.hover && ev.x >= h.x && ev.x < h.x + h.w), text = h?.hover();
+      if (text && this.message?.text !== text) { this.say(text, this.colors.barFg, 6000); return null; }
+    }
     if (ev.type === "mouse" && ev.motion && ev.button === 3) { // the fold chevrons show while the pointer is on the gutter
       const over = ev.x <= this.gutter && ev.y >= 2 && ev.y <= this.height + 1;
       if (over !== !!this.gutterHover) { this.gutterHover = over; this.redraw(); }
@@ -1478,6 +1645,11 @@ class Editor {
     const deadline = Date.now() + budget;
     const rows = []; // the line on each text row (-1 past the end), folded lines skipped
     for (let r = 0, l = this.top; r < height; r++, l = this.folds.next(l)) rows.push(l < this.lines.length ? l : -1);
+    // A multi-line ghost text pushes the rows below the cursor line down: slot r shows rows[src(r)], or ghost line k.
+    const ghost = this.inlineGhostView(), r0 = ghost ? rows.indexOf(ghost.line) : -1;
+    const gn = r0 < 0 ? 0 : Math.min(ghost.lines.length - 1, height - 1 - r0);
+    this.ghostArea = gn ? { row: r0 + 2, n: gn } : null;
+    const src = (r) => (r <= r0 || !gn ? r : r <= r0 + gn ? -1 : r - gn);
     const end = Math.max(this.top, ...rows) + 1;
     // long lines get at most 25 ms a frame, so keys are handled between slices
     const done = this.hl.ensure(end, deadline) & this.hl.ensureLong(this.top, end, Math.min(deadline, Date.now() + 25));
@@ -1499,8 +1671,14 @@ class Editor {
     if (this.buf.dirty) { const w = W.textWidth(crumbs + " ", 8); if (w < this.cols) { P.move(1, w + 1); P.text("●", c.warn, c.bg); } }
 
     for (let r = 0; r < height; r++) {
-      const l = rows[r], folded = l >= 0 && this.folds.has(l);
+      const sr = src(r), l = sr < 0 ? -2 : rows[sr], folded = l >= 0 && this.folds.has(l);
       P.move(r + 2, 1);
+      if (l === -2) { // a ghost text line below the cursor line
+        P.text(" ".repeat(gw), c.fg, c.bg);
+        const x = this.paintGhostTail(P, ghost, r - r0, 0, 0, width, c.bg, () => null, null);
+        if (x < width) P.text(" ".repeat(width - x), c.fg, c.bg);
+        continue;
+      }
       if (l < 0) { P.text(" ".repeat(this.cols), c.fg, c.bg); continue; }
       const active = l === this.head.line;
       const spans = []; // this line's squiggles, the most severe first
@@ -1514,7 +1692,7 @@ class Editor {
       while (hi < occ.length && occ[hi].line < l) hi++;
       const lineHits = [];
       for (let k = hi; k < occ.length && occ[k].line === l; k++) lineHits.push(occ[k]);
-      this.paintLine(P, l, lineBg, ss, se, lineMatches, width, { guide: guides[r], brackets: brackets.filter(b => b.line === l), hits: lineHits, hitBg: hits?.bg, problems: spans, folded });
+      this.paintLine(P, l, lineBg, ss, se, lineMatches, width, { ghost: r === r0 ? ghost : null, guide: guides[sr], brackets: brackets.filter(b => b.line === l), hits: lineHits, hitBg: hits?.bg, problems: spans, folded });
     }
     this.marks = this.vbar.shown ? this.rulerMarks(ms, hits, problems) : null;
     this.vbar.paint(P, c, this.marks);
@@ -1635,6 +1813,13 @@ class Editor {
     // a guide at every indent step the line has, the active block's in its own color
     const guideAt = g?.count ? (k) => (k % size === 0 && k / size < g.count ? (k / size === g.active ? c.guideActive : c.guide) : null) : null;
     const curlyAt = deco.problems?.length ? (i) => deco.problems.find(s => i >= s.from && i < s.to)?.color ?? null : null;
+    if (deco.ghost) { // the line up to the cursor, the ghost text, then the rest of the line
+      const g = deco.ghost, cx = W.displayCol(text, g.col, size);
+      let gx = cx > this.left ? this.paintText(P, text, this.hl.tokens[l] ?? null, Math.min(width, cx - this.left), this.left, lineBg, bgAt, size, guideAt, curlyAt).x : 0;
+      gx = this.paintGhostTail(P, g, 0, cx, gx, width, lineBg, bgAt, curlyAt);
+      if (gx < width) P.text(" ".repeat(width - gx), c.fg, lineBg);
+      return;
+    }
     let { x, col } = this.paintText(P, text, this.hl.tokens[l] ?? null, width, this.left, lineBg, bgAt, this.tab, guideAt, curlyAt);
     // Selection past the line end shows one cell for the line break, like VS Code.
     if (x < width && selFrom !== -1 && selTo > text.length && col >= this.left) { P.text(" ", c.fg, c.selection); x++; }
@@ -1685,6 +1870,22 @@ class Editor {
     }
     return { x, col };
   }
+  // Paints ghost text line k from display column `start` after `x` painted cells (in the ghost color, tabs to the next
+  // stop), then on its last line the rest of the cursor line, moved after it; returns the cells painted.
+  paintGhostTail(P, g, k, start, x, width, lineBg, bgAt, curlyAt) {
+    const c = this.colors, text = this.lines[g.line], tab = this.tab, right = this.left + width;
+    let col = start;
+    for (const ch of g.lines[k]) {
+      const w = ch === "\t" ? tab - (col % tab) : W.charWidth(ch.codePointAt(0));
+      if (w && col >= this.left && col + w <= right) { P.text(ch === "\t" ? " ".repeat(w) : ch.codePointAt(0) < 0x20 ? " " : ch, c.ghost, lineBg); x += w; }
+      col += w;
+    }
+    if (k === g.lines.length - 1 && x < width) {
+      const cx = W.displayCol(text, g.col, tab);
+      x += this.paintText(P, text, this.hl.tokens[g.line] ?? null, width - x, cx + Math.max(0, this.left - col), lineBg, bgAt, tab, null, curlyAt).x;
+    }
+    return x;
+  }
   currentMatchRange() {
     if (this.prompt?.kind !== "find") return null;
     const i = this.currentMatch();
@@ -1704,6 +1905,8 @@ class Editor {
       { text: this.language, run: () => this.pickLanguage() },
     ];
     if (this.settings["files.autoSave"] !== "off") parts.unshift({ text: "Auto Save" });
+    const inline = this.inlineStatus();
+    if (inline) parts.push(inline);
     const rightText = parts.map(p => p.text).join("   ") + "  ";
     let leftText = "", leftColor = c.barFg;
     if (this.message && this.message.until > Date.now()) { leftText = this.message.text; leftColor = this.message.color; }
@@ -1728,7 +1931,7 @@ class Editor {
     if (rw > this.cols) return;
     P.text(rightText, c.barFg, c.bar);
     let x = this.cols - rw + 1;
-    for (const p of parts) { const w = W.textWidth(p.text, 8); if (p.run) this.statusHits.push({ x, w, run: p.run }); x += w + 3; }
+    for (const p of parts) { const w = W.textWidth(p.text, 8); if (p.run) this.statusHits.push({ x, w, run: p.run, hover: p.hover }); x += w + 3; }
   }
 
   // Draws the active prompt; returns [row, col] for the terminal cursor when it should sit in the prompt.
@@ -1797,6 +2000,14 @@ function breadcrumbs(file) {
   }
   const base = root ?? (file.startsWith(os.homedir() + path.sep) ? os.homedir() : "/");
   return path.relative(base, file).split(path.sep).filter(Boolean);
+}
+
+// Whether an inline suggestion provider can run here (the default of editor.inlineSuggest.enabled): Ollama installed,
+// or an endpoint set. Looked up once per provider.
+const usableSeen = new Map();
+function inlineUsable(cfg) {
+  if (!usableSeen.has(cfg.provider)) usableSeen.set(cfg.provider, cfg.provider === "ollama" ? !!which("ollama") : true);
+  return cfg.customEndpoint || usableSeen.get(cfg.provider);
 }
 
 // ---------- clipboard ----------
@@ -1882,7 +2093,9 @@ async function main() {
   setInterval(() => {
     const rebound = keys.poll();
     if (rebound) { ed.keymap = keys.keymap; if (keys.error) ed.say(keys.error, ed.colors.warn, 6000); }
-    if (ed.pollSettings() || rebound) schedule();
+    const reread = ed.pollSettings();
+    if (reread) ed.inlineWarmup();
+    if (reread || rebound) schedule();
   }, 2000).unref();
 
   let pending = "";
@@ -1906,6 +2119,7 @@ async function main() {
   draw(0); // the text at once, uncolored
   ed.useGrammar(await H.loadGrammar(scope, index, theme));
   draw(1000); // the first colored screen waits for its colors
+  ed.inlineWarmup();
 }
 
 // A crash shows the error page (unsaved text is already in a backup); Try Again starts the editor again in this terminal.

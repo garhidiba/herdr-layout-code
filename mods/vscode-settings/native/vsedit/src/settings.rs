@@ -37,6 +37,8 @@ pub struct Settings {
     pub breadcrumbs: bool,
     /// editor.hover.enabled: the hover after the pointer rests on a word
     pub hover: bool,
+    /// editor.inlineSuggest.* (not written into a new file)
+    pub inline: crate::inline::InlineSettings,
 }
 
 impl Default for Settings {
@@ -51,6 +53,7 @@ impl Default for Settings {
             insert_final_newline: false,
             breadcrumbs: true,
             hover: true,
+            inline: crate::inline::InlineSettings::default(),
         }
     }
 }
@@ -90,6 +93,7 @@ pub fn normalize(raw: &Value) -> Settings {
     v.insert_final_newline = flag("files.insertFinalNewline", false);
     v.breadcrumbs = flag("breadcrumbs.enabled", true);
     v.hover = flag("editor.hover.enabled", true);
+    v.inline = crate::inline::normalize(raw);
     v
 }
 

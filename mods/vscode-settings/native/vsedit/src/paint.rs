@@ -82,6 +82,8 @@ pub struct Palette {
     pub fold_control: Color,
     pub fold_background: Color,
     pub fold_placeholder: Color,
+    /// inline suggestions' ghost text
+    pub ghost: Color,
     pub hover_bg: Color,
     pub hover_border: Color,
     pub light_bulb: Color,
@@ -150,6 +152,7 @@ impl Palette {
             fold_control: bl("editorGutter.foldingControlForeground", "#c5c5c5"),
             fold_background: blend(Some(get("editor.foldBackground").map(str::to_string).unwrap_or(format!("{selection}4d")).as_str()), &bg),
             fold_placeholder: bl("editor.foldPlaceholderForeground", "#808080"),
+            ghost: bl("editorGhostText.foreground", "#ffffff56"),
             hover_bg: op("editorHoverWidget.background", "#21252b"),
             hover_border: op("editorHoverWidget.border", "#454545"),
             light_bulb: op("editorLightBulb.foreground", "#ffcc00"),

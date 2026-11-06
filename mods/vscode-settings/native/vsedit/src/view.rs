@@ -32,6 +32,8 @@ struct Deco<'a> {
     hits: &'a [Hit],
     hit_bg: &'a str,
     folded: bool,
+    /// On the cursor line while a suggestion shows: (byte col, its lines).
+    ghost: Option<(usize, &'a [String])>,
     /// This line's squiggles (bytes [from, to), color), the most severe first.
     problems: Vec<(usize, usize, String)>,
 }
@@ -58,6 +60,20 @@ impl Editor {
             l = self.folds.next(l);
         }
         let end = rows.iter().flatten().max().copied().unwrap_or(self.top) + 1;
+        // A multi-line ghost text pushes the rows below the cursor line down: slot r shows rows[src(r)], or ghost line k.
+        let ghost = self.ghost_view();
+        let r0 = ghost.as_ref().and_then(|g| rows.iter().position(|l| *l == Some(g.0)));
+        let gn = match (&ghost, r0) {
+            (Some(g), Some(r0)) => (g.2.len() - 1).min(height - 1 - r0),
+            _ => 0,
+        };
+        self.inline.area = (gn > 0).then(|| (r0.unwrap_or(0) as i32 + 2, gn as i32));
+        let src = |r: usize| -> Option<usize> {
+            match r0 {
+                Some(r0) if gn > 0 && r > r0 => (r > r0 + gn).then(|| r - gn),
+                _ => Some(r),
+            }
+        };
         let (ss, se) = self.range();
         let empty = self.empty();
         let show_matches = self.prompt.is_some() && !self.find.query.is_empty();
@@ -91,9 +107,20 @@ impl Editor {
 
         let no_hits: Vec<Hit> = vec![];
         let (mut mi, mut hi) = (0, 0);
-        for (r, line) in rows.iter().enumerate() {
+        for r in 0..height {
             p.move_to(r as i32 + 2, 1);
-            let Some(l) = *line else {
+            let Some(sr) = src(r) else {
+                // a ghost text line below the cursor line
+                let (g, r0) = (ghost.as_ref().unwrap(), r0.unwrap());
+                p.text(&" ".repeat(gw), &self.c.fg, &self.c.bg);
+                let bg = self.c.bg.clone();
+                let x = self.paint_ghost_tail(&mut p, g.0, g.1, &g.2, r - r0, 0, 0, width, &bg, &|_| None, None);
+                if x < width {
+                    p.text(&" ".repeat(width - x), &self.c.fg, &self.c.bg);
+                }
+                continue;
+            };
+            let Some(l) = rows[sr] else {
                 p.text(&" ".repeat(self.cols as usize), &self.c.fg, &self.c.bg);
                 continue;
             };
@@ -129,7 +156,8 @@ impl Editor {
                 kh += 1;
             }
             let deco = Deco {
-                guide: guides.get(r).copied().unwrap_or_default(),
+                ghost: ghost.as_ref().filter(|_| Some(r) == r0).map(|g| (g.1, g.2.as_slice())),
+                guide: guides.get(sr).copied().unwrap_or_default(),
                 brackets: brackets.iter().filter(|b| b.line == l).map(|b| b.col).collect(),
                 hits: &occ[hi..kh],
                 hit_bg: hits.as_ref().map_or("", |h| h.bg.as_str()),
@@ -440,6 +468,16 @@ impl Editor {
         };
         let curly_at = |i: usize| -> Option<&'a str> { deco.problems.iter().find(|s| i >= s.0 && i < s.1).map(|s| s.2.as_str()) };
         let curly: Option<&dyn Fn(usize) -> Option<&'a str>> = if deco.problems.is_empty() { None } else { Some(&curly_at) };
+        if let Some((gc, lines)) = deco.ghost {
+            // the line up to the cursor, the ghost text, then the rest of the line
+            let cx = display_col(text, gc, size);
+            let mut x = if cx > self.left { self.paint_text(p, Some(l), text, self.hl.line(l), width.min(cx - self.left), self.left, line_bg, &bg_at, size, Some(&guide_at), curly).0 } else { 0 };
+            x = self.paint_ghost_tail(p, l, gc, lines, 0, cx, x, width, line_bg, &bg_at, curly);
+            if x < width {
+                p.text(&" ".repeat(width - x), &c.fg, line_bg);
+            }
+            return;
+        }
         let (mut x, col) = self.paint_text(p, Some(l), text, self.hl.line(l), width, self.left, line_bg, &bg_at, size, Some(&guide_at), curly);
         if x < width && sel_from.is_some() && sel_to > text.len() && col >= self.left {
             p.text(" ", &c.fg, &c.selection);
@@ -567,6 +605,43 @@ impl Editor {
         (x, col)
     }
 
+    /// Paints ghost text line k (of the suggestion at line `l`, byte `gc`) from display column `start` after `x` painted
+    /// cells, in the ghost color with tabs to the next stop, then on its last line the rest of line `l`, moved after it;
+    /// returns the cells painted.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_ghost_tail<'a>(
+        &'a self,
+        p: &mut Painter,
+        l: usize,
+        gc: usize,
+        lines: &[String],
+        k: usize,
+        start: usize,
+        mut x: usize,
+        width: usize,
+        line_bg: &'a str,
+        bg_at: &dyn Fn(usize) -> Option<&'a str>,
+        curly: Option<&dyn Fn(usize) -> Option<&'a str>>,
+    ) -> usize {
+        let (tab, right) = (self.tab(), self.left + width);
+        let mut col = start;
+        for ch in lines[k].chars() {
+            let w = if ch == '\t' { tab - col % tab } else { char_width(ch) };
+            if w > 0 && col >= self.left && col + w <= right {
+                let glyph = if ch == '\t' { " ".repeat(w) } else if (ch as u32) < 0x20 { " ".into() } else { ch.to_string() };
+                p.text(&glyph, &self.c.ghost, line_bg);
+                x += w;
+            }
+            col += w;
+        }
+        if k + 1 == lines.len() && x < width {
+            let text = &self.buf.lines[l];
+            let cx = display_col(text, gc, tab);
+            x += self.paint_text(p, Some(l), text, self.hl.line(l), width - x, cx + self.left.saturating_sub(col), line_bg, bg_at, tab, None, curly).0;
+        }
+        x
+    }
+
     fn render_status(&mut self, p: &mut Painter) {
         let Pos { line, col } = self.head();
         let (s, e) = self.range();
@@ -580,6 +655,9 @@ impl Editor {
         ];
         if self.settings.auto_save != crate::settings::AutoSave::Off {
             parts.insert(0, ("Auto Save".into(), None));
+        }
+        if let Some(text) = self.inline_status() {
+            parts.push((text, Some(StatusAct::Inline)));
         }
         let right = parts.iter().map(|p| p.0.as_str()).collect::<Vec<_>>().join("   ") + "  ";
         let (mut left_text, mut left_color) = (String::new(), self.c.bar_fg.clone());
@@ -720,6 +798,14 @@ impl Editor {
         if !m.motion || m.button != 3 {
             return None;
         }
+        if m.y == self.rows && self.status_hits.iter().any(|h| matches!(h.2, StatusAct::Inline) && m.x >= h.0 && m.x < h.0 + h.1) {
+            // the inline suggestion item: today's usage
+            let text = self.inline_usage();
+            if self.message.as_ref().is_none_or(|msg| msg.text != text) {
+                self.say(text, None, 6000);
+                return None;
+            }
+        }
         let over = m.x <= self.gutter() as i32 && m.y >= 2 && m.y <= self.height() as i32 + 1;
         let mut frame = self.mouse_hover(m);
         if over != self.gutter_hover {
@@ -740,7 +826,10 @@ impl Editor {
     }
 
     /// Terminal cell -> buffer position (rows: 1 breadcrumbs, 2.. text).
-    pub fn cell_to_pos(&mut self, x: i32, y: i32) -> Pos {
+    pub fn cell_to_pos(&mut self, x: i32, mut y: i32) -> Pos {
+        if let Some((row, n)) = self.inline.area.filter(|a| y > a.0) {
+            y = row.max(y - n); // rows the ghost text pushed down
+        }
         let max = self.view_count() as i64 - 1;
         let v = (self.row_of(self.top) as i64 + y as i64 - 2).clamp(0, max.max(0)) as usize;
         let line = self.line_at_row(v);
@@ -884,6 +973,7 @@ impl Editor {
                         StatusAct::Indent => self.pick_indent(),
                         StatusAct::Eol => self.pick_eol(),
                         StatusAct::Language => self.pick_language(),
+                        StatusAct::Inline => self.toggle_inline(),
                     }
                 }
             }

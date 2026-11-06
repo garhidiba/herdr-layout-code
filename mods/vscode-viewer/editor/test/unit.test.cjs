@@ -1,5 +1,6 @@
 // node --test mods/vscode-viewer/editor/test
 process.env.VSEDIT_OS = "mac"; // the keys are macOS's unless a test resolves another OS's
+require("./no-inline.cjs");
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("fs");
@@ -298,7 +299,7 @@ const B = require("../backup.cjs");
 test("settings: defaults on first run, seconds clamped to 0.1-3600, unknown keys kept on write", () => {
   const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "vsedit-set-")), "sub", "vscode-settings.json");
   const first = S.load(file);
-  assert.deepEqual(first.values, S.DEFAULTS);
+  assert.deepEqual(first.values, { ...S.DEFAULTS, ...require("../inline.cjs").normalize({}) }); // the inline suggestion settings aren't written
   assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), S.DEFAULTS);
   fs.writeFileSync(file, '{\n  // mine\n  "files.autoSave": "afterDelay", "files.autoSaveDelay": 0.01, "workbench.colorTheme": "x", "editor.tabSize": "big",\n}');
   const v = S.load(file).values;
@@ -757,7 +758,7 @@ test("status bar: Ln/Col opens Go to Line, Spaces picks tabs and a size for this
   ed.handle({ type: "text", text: "2" }); press(ed, "enter");
   assert.deepEqual(ed.indent, { useTabs: true, size: 2 });
   ed.render(0);
-  assert.equal(ed.statusHits.length, 4); // Ln/Col, indentation, EOL, language: the encoding is display only
+  assert.equal(ed.statusHits.filter(h => !h.hover).length, 4); // Ln/Col, indentation, EOL, language: the encoding is display only (and the inline suggestion item when its provider can run here)
   click(ed, ed.statusHits[2].x, ed.rows);
   assert.deepEqual(ed.popup.items.map(i => i.label), ["LF", "CRLF"]);
   press(ed, "down"); press(ed, "enter");

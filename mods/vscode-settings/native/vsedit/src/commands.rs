@@ -39,6 +39,11 @@ pub enum Act {
     GotoSymbol,
     NextProblem(i32),
     ContextMenu,
+    /// Inline suggestions: Trigger, Accept (true: the next word only), Hide, Show Next (1) / Previous (-1).
+    InlineTrigger,
+    InlineAccept(bool),
+    InlineHide,
+    InlineCycle(i32),
     Copy(bool),
     Paste,
     QuickOpen,
@@ -140,6 +145,12 @@ pub fn act_of(id: &str) -> Option<Act> {
         "editor.action.changeAll" => ChangeAll,
         "editor.action.formatDocument" => FormatDocument,
         "editor.action.formatSelection" => FormatSelection,
+        "editor.action.inlineSuggest.trigger" => InlineTrigger,
+        "editor.action.inlineSuggest.commit" => InlineAccept(false),
+        "editor.action.inlineSuggest.acceptNextWord" => InlineAccept(true),
+        "editor.action.inlineSuggest.hide" => InlineHide,
+        "editor.action.inlineSuggest.showNext" => InlineCycle(1),
+        "editor.action.inlineSuggest.showPrevious" => InlineCycle(-1),
         "editor.action.quickFix" => QuickFix,
         "editor.action.showHover" => ShowHover,
         "editor.action.smartSelect.expand" => SmartSelect(1),
@@ -291,6 +302,8 @@ pub struct Command {
     /// Default keys (normalized) per OS: mac, win, linux.
     pub keys: [Vec<String>; 3],
     pub act: Act,
+    /// keymap.json's `when: "inlineSuggestionVisible"`: the keys apply only while an inline suggestion shows.
+    pub when_suggest: bool,
 }
 
 /// keymap.json's commands; an id with nothing to run is an error (the table and the editor are out of step).
@@ -304,7 +317,8 @@ pub fn parse_keymap(v: &Value) -> Result<Vec<Command>, String> {
                 c.pointer(&format!("/keys/{}", os.key())).and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(normalize).collect()
             });
             let title = c.get("title").and_then(Value::as_str).unwrap_or("").to_string();
-            Ok(Command { id: id.into(), title, keys, act })
+            let when_suggest = c.get("when").and_then(Value::as_str) == Some("inlineSuggestionVisible");
+            Ok(Command { id: id.into(), title, keys, act, when_suggest })
         })
         .collect()
 }
@@ -468,6 +482,8 @@ pub struct Keymap {
     pub os: Os,
     pub bindings: Vec<Binding>,
     pub by_chord: HashMap<String, String>,
+    /// The same for the commands whose keys apply only while an inline suggestion shows.
+    pub when_suggest: HashMap<String, String>,
     /// The first steps of the two-step keys in effect.
     pub prefixes: HashSet<String>,
 }
@@ -499,13 +515,23 @@ impl Keymap {
                 bindings.push(Binding { key, command: command.into(), user: true });
             }
         }
-        let by_chord: HashMap<String, String> = bindings.iter().map(|b| (b.key.clone(), b.command.clone())).collect();
+        let conditional = |id: &str| commands.iter().any(|c| c.id == id && c.when_suggest);
+        let (mut by_chord, mut when_suggest) = (HashMap::new(), HashMap::new());
+        for b in &bindings {
+            let map = if conditional(&b.command) { &mut when_suggest } else { &mut by_chord };
+            map.insert(b.key.clone(), b.command.clone());
+        }
         let prefixes = by_chord.keys().filter_map(|k| k.split_once(' ').map(|(a, _)| a.to_string())).collect();
-        Keymap { os, bindings, by_chord, prefixes }
+        Keymap { os, bindings, by_chord, when_suggest, prefixes }
     }
 
     pub fn command(&self, chord: &str) -> Option<&'static Command> {
         self.by_chord.get(chord).and_then(|id| by_id(id))
+    }
+
+    /// The command a key runs while an inline suggestion shows (Tab, Esc, ⌘→ …).
+    pub fn suggest_command(&self, chord: &str) -> Option<&'static Command> {
+        self.when_suggest.get(chord).and_then(|id| by_id(id))
     }
 
     pub fn id(&self, chord: &str) -> Option<&str> {
@@ -518,7 +544,11 @@ impl Keymap {
 
     /// The key shown for a command: the user's newest binding still in effect, else the first default.
     pub fn label(&self, id: &str) -> String {
-        let live: Vec<&Binding> = self.bindings.iter().filter(|b| b.command == id && self.by_chord.get(&b.key).map(String::as_str) == Some(id)).collect();
+        let live: Vec<&Binding> = self
+            .bindings
+            .iter()
+            .filter(|b| b.command == id && (self.by_chord.get(&b.key).map(String::as_str) == Some(id) || self.when_suggest.get(&b.key).map(String::as_str) == Some(id)))
+            .collect();
         live.iter().rev().find(|b| b.user).or(live.first()).map(|b| self.key_label(&b.key)).unwrap_or_default()
     }
 }

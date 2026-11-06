@@ -1,6 +1,7 @@
 //! The editor (vsedit.cjs's Editor): one file's buffer, selection and view, its edits and commands, prompts and
 //! overlays, save / quit / hot exit and auto save. Drawing and the mouse are in view.rs.
 
+mod inline_ui;
 mod lang_ui;
 
 pub use lang_ui::{LangDoc, LangState, MAct, Problem};
@@ -280,6 +281,8 @@ pub struct Editor {
     pub lang: LangDoc,
     /// Language results, overlays and timers.
     pub ls: LangState,
+    /// Inline suggestions: the ghost text, the debounce, the request in flight.
+    pub inline: inline_ui::InlineState,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -288,6 +291,8 @@ pub enum StatusAct {
     Indent,
     Eol,
     Language,
+    /// The inline suggestion item: on/off.
+    Inline,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -364,6 +369,7 @@ impl Editor {
             vscode,
             lang: st.lang,
             ls: LangState::new(theme),
+            inline: inline_ui::InlineState::default(),
         }
     }
 
@@ -1873,6 +1879,7 @@ impl Editor {
     /// After each input event: restart the auto-save timer when the text changed.
     pub fn after_event(&mut self) {
         self.note_cursor();
+        self.inline_after_event();
         if self.buf.version == self.seen_version {
             return;
         }
@@ -1899,12 +1906,12 @@ impl Editor {
     /// The earliest time something is due (a message to clear, the word highlight, auto save, the drag, git).
     pub fn deadline(&self) -> Option<Instant> {
         let word = self.word.as_ref().map(|w| w.1 + WORD_DELAY).filter(|t| *t > Instant::now());
-        [self.message.as_ref().map(|m| m.until), word, self.auto_at, self.drag_next, self.git.deadline(), self.lang_deadline()].into_iter().flatten().min()
+        [self.message.as_ref().map(|m| m.until), word, self.auto_at, self.drag_next, self.git.deadline(), self.lang_deadline(), self.inline_deadline()].into_iter().flatten().min()
     }
     /// Runs what is due; true when the screen should be drawn again.
     pub fn tick(&mut self) -> bool {
         let now = Instant::now();
-        let mut redraw = self.message.as_ref().is_some_and(|m| m.until <= now) | self.lang_tick();
+        let mut redraw = self.message.as_ref().is_some_and(|m| m.until <= now) | self.lang_tick() | self.inline_tick();
         if self.auto_at.is_some_and(|t| t <= now) {
             self.auto_save();
             redraw = true;
@@ -1934,6 +1941,7 @@ impl Editor {
             Ev::Mouse(m) => return self.mouse(m, term),
             _ => {}
         }
+        self.inline.editing = matches!(ev, Ev::Text(_)) || matches!(ev, Ev::Key(k) if ["enter", "backspace", "tab", "delete"].contains(&k.name.as_str()));
         if self.chord_prefix.is_some() {
             return self.chord_key(ev, term);
         }
@@ -1965,6 +1973,9 @@ impl Editor {
                 crate::overlays::PanelOutcome::Open(l) => return self.jump_to(&l),
                 crate::overlays::PanelOutcome::Toggle => return self.panel_toggle(),
             }
+        }
+        if self.inline.ghost.is_some() && self.inline_key(ev, term) {
+            return;
         }
         let k = match ev {
             Ev::Text(t) => return self.typed(t),
@@ -2094,6 +2105,10 @@ impl Editor {
             | Act::NextProblem(_)
             | Act::ContextMenu => self.run_lang(act),
             Act::QuickOpen => self.open_picker(""),
+            Act::InlineTrigger => self.inline_trigger(),
+            Act::InlineAccept(word) => self.inline_accept(word),
+            Act::InlineHide => self.inline_hide(),
+            Act::InlineCycle(dir) => self.inline_cycle(dir),
             Act::OpenSettingsJson => self.open_settings_json(),
             Act::OpenKeybindingsJson => self.open_keybindings_json(),
             Act::Navigate(dir) => self.navigate(dir),
@@ -2637,6 +2652,128 @@ mod tests {
             got.push(sel(&ed));
         }
         assert_eq!(got, [[0, 3, 0, 5], [0, 3, 0, 11], [0, 2, 0, 12], [0, 3, 0, 11]]);
+    }
+
+    /// A fake Ollama on 127.0.0.1 answering every request with `reply` (its /api/generate `response`); the count of
+    /// requests it got.
+    fn fake_ollama(reply: &'static str) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{Read, Write};
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://127.0.0.1:{}", server.local_addr().unwrap().port());
+        let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let n = count.clone();
+        std::thread::spawn(move || {
+            for mut s in server.incoming().flatten() {
+                let mut req = String::new();
+                let mut buf = vec![0; 65536];
+                while !req.contains("\r\n\r\n") || !req.trim_end().ends_with('}') {
+                    match s.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(k) => req += &String::from_utf8_lossy(&buf[..k]),
+                    }
+                }
+                n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let body = json!({ "response": reply, "done": true }).to_string();
+                let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+            }
+        });
+        (url, count)
+    }
+    /// Inline tests run one at a time: each editor has its own usage file (VSEDIT_INLINE_USAGE is the process's).
+    fn inline_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    fn inline_editor(lines: &[&str], settings: Value) -> Editor {
+        std::env::set_var("VSEDIT_INLINE_USAGE", scratch().join(format!("usage-{}.json", rand_id())));
+        let mut ed = editor("/tmp/inline.js", lines);
+        ed.settings.inline = crate::inline::normalize(&settings);
+        let last = ed.buf.lines.len() - 1;
+        ed.move_to(pos(last, ed.buf.lines[last].len()), false);
+        ed.after_event();
+        ed
+    }
+    fn rand_id() -> u128 {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    }
+    fn type_in(ed: &mut Editor, text: &str) {
+        for ch in text.chars() {
+            ed.inline.editing = true;
+            ed.typed(&ch.to_string());
+            ed.after_event();
+        }
+    }
+    /// The debounced request, as the loop's tick would run it, and its reply.
+    fn ask(ed: &mut Editor) {
+        assert!(ed.inline_deadline().is_some(), "nothing scheduled");
+        ed.inline_request(false);
+        ed.wait_jobs(5000);
+    }
+
+    #[test]
+    fn inline_suggestions_ask_once_after_typing_show_accept_and_take_a_word() {
+        let _one = inline_lock();
+        let (url, count) = fake_ollama(" a + b;");
+        let mut ed = inline_editor(&["function add(a, b) {", "  "], json!({ "editor.inlineSuggest.endpoint": url }));
+        type_in(&mut ed, "return");
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 0, "nothing asked while typing");
+        ask(&mut ed);
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(ed.ghost_view().map(|g| g.2), Some(vec![" a + b;".to_string()]));
+        ed.inline_accept(true);
+        assert_eq!(text(&ed)[1], "  return a");
+        assert_eq!(ed.ghost_view().map(|g| g.2), Some(vec![" + b;".to_string()]));
+        ed.inline_accept(false);
+        assert_eq!(text(&ed)[1], "  return a + b;");
+        assert!(ed.ghost_view().is_none());
+    }
+
+    #[test]
+    fn inline_suggestions_pause_after_empty_replies_and_stop_at_the_daily_limit() {
+        let _one = inline_lock();
+        let (url, count) = fake_ollama("");
+        let mut ed = inline_editor(&[""], json!({ "editor.inlineSuggest.endpoint": url, "editor.inlineSuggest.stopAfter": 2 }));
+        for ch in ["a", "b"] {
+            type_in(&mut ed, ch);
+            ask(&mut ed);
+        }
+        assert_eq!(ed.inline_status().as_deref(), Some("Ollama: paused"));
+        type_in(&mut ed, "c");
+        assert!(ed.inline_deadline().is_none(), "a paused provider is not asked");
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(ed.inline_usage().contains("2 empty or repeated replies in a row"));
+
+        let (url, count) = fake_ollama("1");
+        let mut ed = inline_editor(&[""], json!({ "editor.inlineSuggest.endpoint": url, "editor.inlineSuggest.dailyRequestLimit": 1 }));
+        type_in(&mut ed, "x");
+        ask(&mut ed);
+        type_in(&mut ed, "y");
+        assert!(ed.inline_deadline().is_none(), "past the daily limit nothing is scheduled");
+        ed.inline_trigger();
+        assert!(ed.message.as_ref().unwrap().text.contains("today's limit of 1 requests"));
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(ed.inline_status().as_deref(), Some("Ollama: limit"));
+    }
+
+    #[test]
+    fn manual_inline_suggestions_ask_only_on_trigger_and_secret_files_never() {
+        let _one = inline_lock();
+        let (url, count) = fake_ollama("42;");
+        let mut ed = inline_editor(&["x = "], json!({ "editor.inlineSuggest.endpoint": url, "editor.inlineSuggest.trigger": "manual" }));
+        type_in(&mut ed, " ");
+        assert!(ed.inline_deadline().is_none());
+        ed.inline_trigger();
+        ed.wait_jobs(5000);
+        assert_eq!(ed.ghost_view().map(|g| g.2), Some(vec!["42;".to_string()]));
+        ed.inline_hide();
+        ed.inline_trigger(); // the same text and position: the cached reply
+        assert_eq!(ed.ghost_view().map(|g| g.2), Some(vec!["42;".to_string()]));
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let mut env = editor_on(Path::new("/tmp/.env"), Doc { lines: vec!["TOKEN=".into()], ..Doc::empty() });
+        env.settings.inline = crate::inline::normalize(&json!({ "editor.inlineSuggest.endpoint": url }));
+        env.inline_trigger();
+        assert!(env.message.as_ref().unwrap().text.contains("No inline suggestions for this file"));
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[test]

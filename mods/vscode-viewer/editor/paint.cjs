@@ -58,6 +58,8 @@ function paletteOf(colors = {}) {
     foldControl: blend(colors["editorGutter.foldingControlForeground"] ?? "#c5c5c5", bg),
     foldBackground: blend(colors["editor.foldBackground"] ?? selection + "4d", bg),
     foldPlaceholder: blend(colors["editor.foldPlaceholderForeground"] ?? "#808080", bg),
+    // inline suggestions' ghost text (VS Code's dark default)
+    ghost: blend(colors["editorGhostText.foreground"] ?? "#ffffff56", bg),
   };
 }
 const GIT_DEFAULTS = { added: "#109868", modified: "#948b60", deleted: "#9a353d" };

@@ -1,4 +1,5 @@
 // node --test mods/vscode-viewer/editor/test
+require("./no-inline.cjs");
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const FD = require("../folding.cjs");

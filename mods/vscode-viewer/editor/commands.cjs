@@ -56,6 +56,12 @@ const RUNS = {
   "editor.action.changeAll": ["changeAll"],
   "editor.action.formatDocument": ["formatDocument", [], "format"],
   "editor.action.formatSelection": ["formatSelection"],
+  "editor.action.inlineSuggest.trigger": ["inlineTrigger"],
+  "editor.action.inlineSuggest.commit": ["inlineAccept", [false]],
+  "editor.action.inlineSuggest.acceptNextWord": ["inlineAccept", [true]],
+  "editor.action.inlineSuggest.hide": ["inlineHide"],
+  "editor.action.inlineSuggest.showNext": ["inlineCycle", [1]],
+  "editor.action.inlineSuggest.showPrevious": ["inlineCycle", [-1]],
   "editor.action.quickFix": ["quickFix"],
   "editor.action.showHover": ["showHover"],
   "editor.action.smartSelect.expand": ["smartSelect", [1]],
@@ -153,11 +159,12 @@ const RUNS = {
   "deleteAllLeft": ["deleteAll", [-1]], "deleteAllRight": ["deleteAll", [1]],
 };
 
-const COMMANDS = require("./keymap.json").commands.map(({ id, title, keys }) => {
+// when: "inlineSuggestionVisible" (keymap.json): the command's keys apply only while an inline suggestion shows.
+const COMMANDS = require("./keymap.json").commands.map(({ id, title, keys, when }) => {
   const r = RUNS[id];
   if (!r) throw new Error(`keymap.json: no Editor method for ${id}`);
   const [run, args = [], cap] = r;
-  return { id, title, keys, key: keys[OS][0] ? label(keys[OS][0]) : "", run, args, ...(cap ? { cap } : {}) };
+  return { id, title, keys, key: keys[OS][0] ? label(keys[OS][0]) : "", run, args, ...(cap ? { cap } : {}), ...(when ? { when } : {}) };
 });
 const BY_ID = new Map(COMMANDS.map(c => [c.id, c]));
 
@@ -197,8 +204,8 @@ function stepMenu(rows, i, dir) {
 
 // The default bindings of an OS, in order: [{ key (normalized), command (id) }].
 const defaults = (os = OS) => COMMANDS.flatMap(c => c.keys[os].map(k => ({ key: normalize(k), command: c.id })));
-// This OS's default keymap (no user keybindings): key -> command.
-const KEYMAP = new Map(defaults().map(b => [b.key, BY_ID.get(b.command)]));
+// This OS's default keymap (no user keybindings): key -> command (the keys of `when` commands aside).
+const KEYMAP = new Map(defaults().filter(b => !BY_ID.get(b.command).when).map(b => [b.key, BY_ID.get(b.command)]));
 
 // Subsequence match with VS Code-like bonuses (start, word starts, consecutive). Returns { score, hits } or null.
 function fuzzy(query, text) {

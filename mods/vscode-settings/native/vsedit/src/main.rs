@@ -17,6 +17,7 @@ mod folding;
 mod gitgutter;
 mod hexview;
 mod highlight;
+mod inline;
 mod keys;
 mod lang;
 mod language;
@@ -232,6 +233,7 @@ fn run(term: &mut Term, ed: &mut Editor) {
     ed.hl.wait(&lines, Instant::now() + Duration::from_millis(1000), |h| h.has_lines(top, top + rows));
     ed.buf.lines = lines;
     draw(ed, term); // the first colored screen waits for its colors
+    ed.inline_warmup();
 
     let mut pending = String::new();
     let mut raw: Vec<u8> = vec![];
@@ -294,7 +296,10 @@ fn run(term: &mut Term, ed: &mut Editor) {
         changed |= ed.tick();
         if Instant::now() >= next_poll {
             next_poll = Instant::now() + Duration::from_secs(2);
-            changed |= ed.poll_files();
+            if ed.poll_files() {
+                ed.inline_warmup();
+                changed = true;
+            }
         }
         if let Some(code) = ed.exit {
             leave(term);
