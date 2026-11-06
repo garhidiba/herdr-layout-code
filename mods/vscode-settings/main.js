@@ -19,7 +19,7 @@ const settingsPath = () => `${appHome()}/${FILE}`;
 const kbPath = () => `${appHome()}/${KB_FILE}`;
 const keysPath = () => `${appHome()}/keys.json`;
 const corePath = () => `${appHome()}/vscode-core/vscode-core`;
-const EDITOR = "mods/vscode-viewer/editor/vsedit.cjs"; // same path the Explorer opens files with
+const EDITOR = "mods/vscode-viewer/editor/vsedit.sh"; // same launcher the Explorer opens files with
 const KB_TABLE = "mods/vscode-viewer/editor/keybindings.cjs"; // `--table <file>`: the editor's commands and keys in effect
 // Herdr starts with PATH=/usr/bin:/bin, so node (Homebrew, ~/.local) is looked up there too (as the viewer does).
 const userExec = (cmd, args) => exec("sh", ["-c", 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; exec "$0" "$@"', cmd, ...args]);
@@ -181,7 +181,7 @@ export default class Settings extends View {
   async openJson(name, path, cx) {
     if (this.opening) return;
     this.opening = true;
-    try { await openTab({ name, folder: appHome(), argv: ["exec", "node", `${appHome()}/${EDITOR}`, path] }, cx); } // exec: the tab closes with the editor
+    try { await openTab({ name, folder: appHome(), argv: ["exec", "sh", `${appHome()}/${EDITOR}`, path] }, cx); } // exec: the tab closes with the editor
     finally { this.opening = false; closeOverlay(props().overlay); }
   }
   openKeysJson(cx) {

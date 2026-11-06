@@ -1,7 +1,8 @@
 // Pure rules for the Explorer: where a file opens, path text, names for new/pasted entries, the context menu's items.
 
 const VIEWER_EXT = /\.(png|jpe?g|gif|webp|bmp|ico|svg|tiff?|md|markdown|mdx|mkd)$/i;
-export const EDITOR = "mods/vscode-viewer/editor/vsedit.cjs";
+// The editor launcher: the Rust editor when vscode-settings.json picks it (and it is built), else vsedit.cjs.
+export const EDITOR = "mods/vscode-viewer/editor/vsedit.sh";
 
 export const baseName = (p) => p.slice(p.lastIndexOf("/") + 1);
 export const parentOf = (p) => p.slice(0, p.lastIndexOf("/")) || "/";
@@ -12,7 +13,7 @@ export function openArgs(file, { on = null, appHome, how = "auto", folder = pare
   const name = baseName(file);
   if (how === "viewer" || on || (how === "auto" && VIEWER_EXT.test(name))) return { name, mod: "vscode-viewer", props: { file, on } };
   // exec: the editor replaces the tab's shell, so the tab closes when it exits (see vsedit's --close-on-exit)
-  return { name, folder, argv: ["exec", "node", `${appHome}/${EDITOR}`, file, "--close-on-exit"] };
+  return { name, folder, argv: ["exec", "sh", `${appHome}/${EDITOR}`, file, "--close-on-exit"] };
 }
 
 export const relativeTo = (root, abs) => (abs === root ? "." : abs.startsWith(root + "/") ? abs.slice(root.length + 1) : abs);
