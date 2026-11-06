@@ -179,7 +179,8 @@ class Input {
 }
 
 // ---------- modal dialog ----------
-// opts: { title, detail?, buttons: [{ label, key (accelerator letter), run, cancel? }] }; Enter = focused (first), Esc = the cancel button.
+// opts: { title, detail?, buttons: [{ label, key (accelerator letter), run, cancel? }] }; Enter = focused (first),
+// Esc = the cancel button, or just closes when there is none.
 class Dialog {
   constructor(opts) { Object.assign(this, opts); this.focus = 0; this.rects = []; }
   render(P, ed) {
@@ -209,7 +210,7 @@ class Dialog {
     const n = this.buttons.length;
     if (ev.type === "text") { const i = this.buttons.findIndex(b => b.key === ev.text.toLowerCase()); if (i !== -1) this.press(i, ed); return true; }
     if (ev.type !== "key") return true;
-    if (ev.name === "escape") this.press(Math.max(0, this.buttons.findIndex(b => b.cancel)), ed);
+    if (ev.name === "escape") { const i = this.buttons.findIndex(b => b.cancel); if (i === -1) ed.closePopup(); else this.press(i, ed); }
     else if (ev.name === "enter" || ev.name === "space") this.press(this.focus, ed);
     else if (ev.name === "right" || (ev.name === "tab" && !ev.shift)) this.focus = (this.focus + 1) % n;
     else if (ev.name === "left" || ev.name === "tab") this.focus = (this.focus - 1 + n) % n;

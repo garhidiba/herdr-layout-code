@@ -383,6 +383,14 @@ test("closing with unsaved changes asks Save / Don't Save / Cancel; hot exit kee
   assert.ok(!ed.done);
   ed.hotExit();
   assert.equal(B.read(file).text, "xone");
+  ed.undo(); // the buffer differs from the backup again
+  ed.offerBackup();
+  assert.match(ed.popup.title, /^Restore unsaved changes from \d{4}-\d\d-\d\d \d\d:\d\d\?$/);
+  ed.handle({ type: "key", name: "escape" }); // Esc keeps the backup for next time
+  assert.equal(B.read(file).text, "xone");
+  ed.offerBackup();
+  ed.handle({ type: "key", name: "enter" }); // Restore
+  assert.deepEqual(ed.lines, ["xone"]);
   ed.quit();
   ed.handle({ type: "text", text: "d" });
   assert.ok(ed.done);
