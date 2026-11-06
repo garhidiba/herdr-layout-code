@@ -2,13 +2,13 @@
 // (props { menu } or { dialog }), so they share the open rule in paths.js with the tree.
 import { div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { exec, hc, run, spaces, props, openOverlay, closeOverlay, theme, shared, setShared, appHome, readTextFile, writeTextFile, notify, window } from "herdr";
+import { exec, hc, run, spaces, panes, props, openOverlay, closeOverlay, theme, shared, setShared, appHome, readTextFile, writeTextFile, notify, window } from "herdr";
 import { createOpenTab } from "./launch.js";
 import { menuItems, menuHeight, openWith, baseName, parentOf, relativeTo, nameProblem, vscodeRemoteArgs, isMarkdown } from "./paths.js";
 import { createOps } from "./ops.js";
 import { createRemote, createOpenFile, ROOT, INSTALL_COMMAND, INSTALL_REQUEST } from "./remote.js";
 
-const openTab = createOpenTab({ hc, run, spaces });
+const openTab = createOpenTab({ hc, run, spaces, panes });
 // The editor on a remote space's machine (remote.js): installing it is asked on each open with the shipped confirm dialog,
 // whose yes runs INSTALL_COMMAND for the tree (main.js), naming the machine in the shared value INSTALL_REQUEST.
 const askInstall = (machine, size) => {

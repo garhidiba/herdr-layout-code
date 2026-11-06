@@ -20,14 +20,16 @@ export function directRun({ folder, argv }, { space, tab }) {
     "--label", `herdr.tab=${tab}`, "--", "/bin/sh", "-c", FIND, ...program];
 }
 
-// `herdr`'s hc, run and spaces; `newId` makes the tab id. Returns openTab(args, cx), awaitable.
-export function createOpenTab({ hc, run, spaces, local = false, newId = () => `tb${randomUUID().replaceAll("-", "")}`, wait = 3000, step = 25 }) {
-  const hasTab = (space, tab) => spaces().some(s => s.id === space && s.tabs.some(t => t.id === tab));
+// `herdr`'s hc, run, spaces and panes; `newId` makes the tab id. Returns openTab(args, cx), awaitable.
+export function createOpenTab({ hc, run, spaces, panes, local = false, newId = () => `tb${randomUUID().replaceAll("-", "")}`, wait = 3000, step = 25 }) {
+  const tabsOf = (space) => spaces().find(s => s.id === space)?.tabs.map(t => t.id) ?? [];
+  const hasTab = (space, tab) => tabsOf(space).includes(tab);
   return async function openTab(args, cx) {
     const all = spaces(), active = all.find(s => s.active);
     const space = local && active?.machine ? all.find(s => !s.machine) : active;
     const tabNew = () => run("tab.new", local && space ? { ...args, space: space.id } : args);
-    if (!args.argv || !space || space.machine) return tabNew();
+    if (!args.argv || !space) return tabNew();
+    if (space.machine) return remoteTab(space.id, tabNew, cx);
     const tab = newId();
     const r = await hc(directRun(args, { space: space.id, tab })).catch(() => null);
     let address = null;
@@ -39,4 +41,15 @@ export function createOpenTab({ hc, run, spaces, local = false, newId = () => `t
     run("tab.rename", { id: tab, name: args.name });
     run("tab.select", { id: tab });
   };
+
+  // The editor on another machine has no herdr-app there to send its right-clicks to it: once its terminal shows up
+  // in a new tab of the space, this computer does (the tab closes with the editor, so nothing gives them back).
+  async function remoteTab(space, tabNew, cx) {
+    const before = new Set(tabsOf(space));
+    tabNew();
+    const shown = () => panes().find(p => p.terminal && tabsOf(space).includes(p.tab) && !before.has(p.tab))?.terminal;
+    for (let waited = 0; !shown() && waited < wait; waited += step) await cx.sleep(step);
+    const terminal = shown();
+    if (terminal) run("terminal.right_click", { to: "program", terminal });
+  }
 }

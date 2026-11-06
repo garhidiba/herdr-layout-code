@@ -48,10 +48,12 @@ test("a program only the login shell knows (nvm) is started through it", () => {
 function harness({ space = { id: "sp1", machine: null }, hcResult = { code: 0, stdout: '{"address":"t9"}' }, appearsAfter = 1 } = {}) {
   const calls = [], hcCalls = [];
   let polls = 0;
-  const spaces = () => [{ ...space, active: true, tabs: polls >= appearsAfter ? [{ id: "tbX" }] : [] }];
+  const shown = () => polls >= appearsAfter;
+  const spaces = () => [{ ...space, active: true, tabs: [{ id: "tbOld" }, ...(shown() ? [{ id: "tbX" }] : [])] }];
+  const panes = () => [{ tab: "tbOld", terminal: "box/t1" }, ...(shown() ? [{ tab: "tbX", terminal: "box/t9" }] : [])];
   const openTab = createOpenTab({
     hc: async (a) => { hcCalls.push(a); if (a[0] === "run" && hcResult instanceof Error) throw hcResult; return hcResult; },
-    run: (name, args) => calls.push([name, args]), spaces, newId: () => "tbX", wait: 100, step: 25,
+    run: (name, args) => calls.push([name, args]), spaces, panes, newId: () => "tbX", wait: 100, step: 25,
   });
   const cx = { sleep: async () => { polls++; } };
   return { openTab: (args) => openTab(args, cx), calls, hcCalls };
@@ -72,7 +74,17 @@ test("mod tabs and remote spaces open with tab.new as before", async () => {
   assert.deepEqual(h.calls, [["tab.new", viewer]]);
   h = harness({ space: { id: "box/sp1", machine: "box" } });
   await h.openTab(editor);
-  assert.deepEqual([h.calls, h.hcCalls], [[["tab.new", editor]], []]);
+  assert.deepEqual(h.hcCalls, []);
+  assert.equal(h.calls[0][0], "tab.new");
+});
+
+test("a remote editor (no herdr-app on its machine) gets its right-clicks from here once its tab shows up", async () => {
+  let h = harness({ space: { id: "box/sp1", machine: "box" } });
+  await h.openTab(editor);
+  assert.deepEqual(h.calls, [["tab.new", editor], ["terminal.right_click", { to: "program", terminal: "box/t9" }]]);
+  h = harness({ space: { id: "box/sp1", machine: "box" }, appearsAfter: Infinity });
+  await h.openTab(editor);
+  assert.deepEqual(h.calls, [["tab.new", editor]]);
 });
 
 // Settings' files and Rust core are on this computer: with a remote space focused it uses a local space.
