@@ -998,7 +998,7 @@ class Editor {
     // A long line of single-width characters (a minified file): start at the first visible one instead of walking there.
     if (left > 0 && text.length > 1000 && !/[^\x20-\x7e]/.test(text)) {
       i = col = Math.min(left, text.length);
-      if (tokens) { let lo = 0, hi = tokens.length / 2 - 1; while (lo < hi) { const m = (lo + hi + 1) >> 1; if (tokens[m * 2] <= i) lo = m; else hi = m - 1; } ti = lo * 2; }
+      if (tokens) ti = H.tokenIndex(tokens, i);
     }
     for (const ch of i ? text.slice(i) : text) {
       if (col >= right) break;

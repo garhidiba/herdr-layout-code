@@ -39,6 +39,13 @@ async function loadGrammar(scope, index = loadIndex(), theme = loadTheme()) {
 
 const foregroundOf = (meta) => (meta & 0x00ff8000) >>> 15;
 const fontStyleOf = (meta) => (meta & 0x00007800) >>> 11; // 1 italic, 2 bold, 4 underline, 8 strikethrough
+const tokenTypeOf = (meta) => (meta >>> 8) & 3;            // 0 code, 1 comment, 2 string, 3 regex
+// The (even) index in tokens [start, meta, ...] of the token holding UTF-16 index i.
+function tokenIndex(tokens, i) {
+  let lo = 0, hi = tokens.length / 2 - 1;
+  while (lo < hi) { const m = (lo + hi + 1) >> 1; if (tokens[m * 2] <= i) lo = m; else hi = m - 1; }
+  return lo * 2;
+}
 
 // Where the piece of `text` starting at `pos` ends: after the last `;`/`}` (else `,`/space) in its second half.
 function cutAt(text, pos) {
@@ -171,4 +178,4 @@ class Highlighter {
   }
 }
 
-module.exports = { loadGrammar, loadIndex, loadTheme, Highlighter, foregroundOf, fontStyleOf, MAX_LINE, loose };
+module.exports = { loadGrammar, loadIndex, loadTheme, Highlighter, foregroundOf, fontStyleOf, tokenTypeOf, tokenIndex, MAX_LINE, loose };
