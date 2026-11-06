@@ -7,12 +7,18 @@ export const EDITOR = "mods/vscode-viewer/editor/vsedit.sh";
 export const baseName = (p) => p.slice(p.lastIndexOf("/") + 1);
 export const parentOf = (p) => p.slice(0, p.lastIndexOf("/")) || "/";
 
+// Whether a file opens in the terminal editor (else the viewer): code and text files, or when asked.
+export const wantsEditor = (file, how = "auto") => how === "editor" || (how === "auto" && !VIEWER_EXT.test(baseName(file)));
+
 // tab.new args: the terminal editor (started in `folder`, default the file's own), or the vscode-viewer tab
-// (images, markdown, remote files, or when asked). Every way of opening a file goes through here, the remote ones too.
-export function openArgs(file, { on = null, appHome, how = "auto", folder = parentOf(file) }) {
+// (images, markdown, or when asked). Every way of opening a file goes through here, the remote ones too: a remote
+// file takes the editor only with `remote` ({launcher, args}, remote.js: the bundle installed on that machine; the
+// tab is in the remote space, so it runs there), else the viewer.
+export function openArgs(file, { on = null, appHome, how = "auto", folder = parentOf(file), remote = null }) {
   const name = baseName(file);
-  if (how === "viewer" || on || (how === "auto" && VIEWER_EXT.test(name))) return { name, mod: "vscode-viewer", props: { file, on } };
+  if (!wantsEditor(file, how) || (on && !remote)) return { name, mod: "vscode-viewer", props: { file, on } };
   // exec: the editor replaces the tab's shell, so the tab closes when it exits (see vsedit's --close-on-exit)
+  if (on) return { name, folder, argv: ["exec", "sh", remote.launcher, file, "--close-on-exit", ...remote.args] };
   return { name, folder, argv: ["exec", "sh", `${appHome}/${EDITOR}`, file, "--close-on-exit"] };
 }
 
@@ -57,10 +63,10 @@ export function menuItems({ dir, remote, canPaste }) {
   return groups.flatMap((g, i) => (i ? ["-", ...g] : g));
 }
 
-// Open With. A remote file opens in the viewer (openArgs) until the terminal editor runs on that machine: a remote
-// space's tabs hold only that machine's terminals. System Default is an app on this computer.
+// Open With. A remote file's terminal editor runs on its machine (remote.js; the viewer until it is installed there):
+// a remote space's tabs hold only that machine's terminals. System Default is an app on this computer.
 export const openWith = (remote) => remote
-  ? [["Herdr Editor (viewer)", "viewer"], ["Open in VS Code", "code"]]
+  ? [["VS Code Editor (terminal)", "editor"], ["Herdr Editor (viewer)", "viewer"], ["Open in VS Code", "code"]]
   : [["VS Code Editor (terminal)", "editor"], ["Herdr Editor (viewer)", "viewer"], ["Open in VS Code", "code"], ["System Default", "system"]];
 
 // `code` arguments opening a remote path through VS Code's Remote-SSH, from the machine's `hc machine ls` row; null

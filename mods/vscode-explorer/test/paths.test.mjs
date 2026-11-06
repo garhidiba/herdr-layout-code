@@ -5,17 +5,26 @@ import { openArgs, relativeTo, within, copyName, freeName, nameProblem, menuItem
 
 const home = "/Users/me/.config/herdr-app";
 
-test("code opens in the terminal editor, images/markdown/remote files in the viewer", () => {
+test("code opens in the terminal editor, images/markdown (and remote files without the remote editor) in the viewer", () => {
   assert.deepEqual(openArgs("/p/src/a.ts", { appHome: home }),
     { name: "a.ts", folder: "/p/src", argv: ["exec", "sh", `${home}/mods/vscode-viewer/editor/vsedit.sh`, "/p/src/a.ts", "--close-on-exit"] });
   assert.equal(openArgs("/p/README.md", { appHome: home }).mod, "vscode-viewer");
   assert.equal(openArgs("/p/logo.PNG", { appHome: home }).mod, "vscode-viewer");
   assert.deepEqual(openArgs("/p/a.ts", { on: "box", appHome: home }), { name: "a.ts", mod: "vscode-viewer", props: { file: "/p/a.ts", on: "box" } });
-  assert.equal(openArgs("/p/a.ts", { on: "box", appHome: home, how: "editor" }).mod, "vscode-viewer"); // the terminal editor is local only
+  assert.equal(openArgs("/p/a.ts", { on: "box", appHome: home, how: "editor" }).mod, "vscode-viewer"); // not installed on box
   assert.equal(openArgs("/p/README.md", { appHome: home, how: "editor" }).argv[1], "sh");
   assert.equal(openArgs("/p/a.ts", { appHome: home, how: "viewer" }).mod, "vscode-viewer");
   assert.equal(parentOf("/a"), "/");
   assert.equal(openArgs("/p/src/a.ts", { appHome: home, folder: "/p" }).folder, "/p"); // the tree's root, not src
+});
+
+test("a remote file opens in the editor installed on its machine, with the launcher's arguments", () => {
+  const remote = { launcher: "/root/.local/share/herdr-vscode/1.0.0-0123456789ab/vsedit.sh", args: ["--os", "mac"] };
+  assert.deepEqual(openArgs("/srv/a b.ts", { on: "box", appHome: home, folder: "/srv", remote }),
+    { name: "a b.ts", folder: "/srv", argv: ["exec", "sh", remote.launcher, "/srv/a b.ts", "--close-on-exit", "--os", "mac"] });
+  assert.equal(openArgs("/srv/README.md", { on: "box", appHome: home, remote }).mod, "vscode-viewer"); // still the viewer's kind
+  assert.equal(openArgs("/srv/README.md", { on: "box", appHome: home, how: "editor", remote }).argv[2], remote.launcher);
+  assert.equal(openArgs("/srv/a.ts", { on: "box", appHome: home, how: "viewer", remote }).mod, "vscode-viewer");
 });
 
 test("relative paths are relative to the Explorer root", () => {
@@ -65,9 +74,9 @@ test("the menu groups items like VS Code; a remote entry has every item but Reve
   assert.equal(menuHeight(["-", ["a"]]), 10 + 9 + 26);
 });
 
-test("Open With offers the terminal editor and system apps only for local files", () => {
+test("Open With offers system apps only for local files", () => {
   assert.deepEqual(openWith(false).map(r => r[1]), ["editor", "viewer", "code", "system"]);
-  assert.deepEqual(openWith(true).map(r => r[1]), ["viewer", "code"]);
+  assert.deepEqual(openWith(true).map(r => r[1]), ["editor", "viewer", "code"]);
 });
 
 test("VS Code opens a remote path through Remote-SSH on plain ssh machines only", () => {
