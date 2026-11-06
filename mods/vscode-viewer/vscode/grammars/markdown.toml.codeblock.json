@@ -1,0 +1,36 @@
+{
+  "fileTypes": [],
+  "scopeName": "markdown.toml.codeblock",
+  "injectionSelector": "L:markup.fenced_code.block.markdown",
+  "patterns": [
+    {
+      "include": "#toml-code-block"
+    }
+  ],
+  "repository": {
+    "toml-code-block": {
+      "begin": "(?i)(?<=[`~])[ \\t]*(toml)((?:\\s+|[^\\w\\s`~])[^`~]*)?$",
+      "end": "(^|\\G)(?=\\s*[`~]{3,}\\s*$)",
+      "beginCaptures": {
+        "1": {
+          "name": "fenced_code.block.language.markdown"
+        },
+        "2": {
+          "name": "fenced_code.block.language.attributes.markdown"
+        }
+      },
+      "patterns": [
+        {
+          "begin": "(^|\\G)(\\s*)(.*)",
+          "while": "(^|\\G)(?!\\s*([`~]{3,})\\s*$)",
+          "contentName": "meta.embedded.block.toml",
+          "patterns": [
+            {
+              "include": "source.toml"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}
