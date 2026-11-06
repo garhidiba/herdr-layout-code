@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """End-to-end: runs vsedit.cjs in a 100x30 pseudo-terminal, types, saves, quits, and checks colors against tokenize.cjs;
 scrollbars (editor and hex viewer), the context menu, Kitty ⌘ keys, user keybindings, tsserver definition/references/rename, gofmt, the save dialog, auto save and hot exit;
-find widget toggles, status bar items, symbol breadcrumbs, Go to Symbol and diagnostics.
+find widget toggles, status bar items, symbol breadcrumbs, Go to Symbol and diagnostics; Expand Line Selection, Go to Bracket,
+Toggle Block Comment, Save As, Join Lines and Save All.
 usage: python3 -I mods/vscode-viewer/editor/test/e2e.py [scenario ...]
 VSEDIT_BIN=<path to the Rust vsedit> runs the same scenarios against the Rust editor through the launcher (vsedit.sh);
 the language-feature scenarios (phase 3, still JS-only) are skipped then, and each result says which editor ran."""
@@ -423,6 +424,47 @@ def run_hot_exit(tmp):
     print("hot exit: ok")
 
 
+def run_small_batch(tmp):
+    """Windows/Linux keys: Ctrl+L selects the line and then the next, Ctrl+Shift+\\ goes to the next bracket and its partner,
+    Ctrl+Shift+A block-comments the selected line, Ctrl+Shift+S saves as another file in the folder (the original
+    unchanged); macOS keys: ⌃J joins lines, ⌥⌘S saves all."""
+    file = os.path.join(tmp, "small.js")
+    open(file, "w").write("let x = 1;\nfoo(a, [b]);\n  bar\n")
+    t = Term(file)
+    assert t.read("Ln 1, Col 1"), "no first frame"
+    t.send("\x0c")                                 # Ctrl+L: Expand Line Selection
+    assert t.read("Ln 2, Col 1 (11 selected)", timeout=2), "Ctrl+L did not select the line"
+    t.send("\x0c")
+    assert t.read("Ln 3, Col 1 (24 selected)", timeout=2), "Ctrl+L again did not add the next line"
+    t.send("\x1b[1;5H"); t.send("\x1b[B")           # Ctrl+Home, Down
+    t.send("\x1b[92;6u")                           # Ctrl+Shift+\: Go to Bracket (the next one)
+    assert t.read("Ln 2, Col 4", timeout=2), "Go to Bracket did not reach the ("
+    t.send("\x1b[92;6u")
+    assert t.read("Ln 2, Col 11", timeout=2), "Go to Bracket did not reach the )"
+    t.send("\x1b[H"); t.send("\x1b[1;2F")           # Home, Shift+End: the line selected
+    t.send("\x1b[97;6u")                           # Ctrl+Shift+A: Toggle Block Comment (Linux)
+    t.send("\x1b[115;6u")                          # Ctrl+Shift+S: Save As
+    assert t.read("Save As: " + tmp + os.sep, timeout=2), "Save As did not prefill the folder"
+    t.send("copy.js"); t.send("\r")
+    assert t.read("Saved", timeout=3), "Save As did not save"
+    t.send(QUIT)
+    assert t.wait_exit() == 0
+    got = open(os.path.join(tmp, "copy.js")).read()
+    assert got == "let x = 1;\n/* foo(a, [b]); */\n  bar\n", repr(got)
+    assert open(file).read() == "let x = 1;\nfoo(a, [b]);\n  bar\n", "the original changed"
+    file = os.path.join(tmp, "join.txt")
+    open(file, "w").write("a\n    b\nc\n")
+    t = Term(file, env=MAC)
+    assert t.read("Ln 1, Col 1"), "no first frame"
+    t.send("\x1b[106;5u")                          # ⌃J: Join Lines
+    t.send("\x1b[115;11u")                         # ⌥⌘S: Save All
+    assert t.read("Saved", timeout=2), "⌥⌘S did not save"
+    t.send(MAC_QUIT)
+    assert t.wait_exit() == 0
+    assert open(file).read() == "a b\nc\n", repr(open(file).read())
+    print("line selection, brackets, block comment, save as, join lines, save all: ok")
+
+
 def plain(t):
     """The screen text without colors."""
     return re.sub(r"\x1b\[[\d;]*m", "", screen_of(t))
@@ -813,7 +855,7 @@ def main():
     ISOLATED.update(VSEDIT_ENGINE_LOG=engines)
     scenarios = [run_tsx, run_go, run_crlf, run_hex, run_error_page, run_drag_scroll, run_minified, run_scrollbars, run_decorations,
                  run_autoclose, run_git_gutter, run_folding, run_menu_and_cmd_save, run_save_dialog, run_auto_save, run_hot_exit,
-                 run_keybindings, run_mac_keys, run_format, run_typescript, run_find_and_status, run_symbols_and_problems]
+                 run_keybindings, run_mac_keys, run_format, run_typescript, run_find_and_status, run_symbols_and_problems, run_small_batch]
     only = set(sys.argv[1:])
     results = []
     try:
