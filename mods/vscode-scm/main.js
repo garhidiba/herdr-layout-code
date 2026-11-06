@@ -4,6 +4,7 @@
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list } from "gpui-base";
 import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, run, appHome } from "herdr";
+import { freshRoot, encode, decode } from "./cache.js";
 
 // The project you work in: the focused terminal's folder. Editor and diff tabs have no folder, so focusing
 // them keeps this space's last project instead of reloading; a fresh space starts at its first terminal's folder.
@@ -14,12 +15,12 @@ function location() {
   const on = f?.pane === null ? (f.terminal?.includes("/") ? f.terminal.split("/")[0] : null) : space?.machine ?? null;
   const cwd = f?.pane === null ? f?.cwd : pane?.terminal ? pane.cwd : null;
   if (cwd) return (lastRoot[space?.id] = { cwd, on });
-  if (lastRoot[space?.id]) return lastRoot[space?.id];
-  const tabs = new Set((space?.tabs ?? []).map(t => t.id));
-  const first = panes().find(p => tabs.has(p.tab) && p.terminal && p.cwd);
-  return { cwd: first?.cwd || space?.folder, on: space?.machine ?? null };
+  return lastRoot[space?.id] ?? freshRoot(space, panes());
 }
 const key = () => JSON.stringify(location());
+// Other spaces' repos load in the background: 3s after start, 2 at a time, again every 10 minutes
+// (and when a space appears), skipping ones loaded in the last 2 minutes.
+const CACHE = "vscode-scm.cache", FRESH = 120000, PRELOAD_EVERY = 600000, SAVE_EVERY = 60000;
 // Reads write nothing under .git (no index refresh or lock, no fsmonitor cookie):
 // the folder watch would see it, and every refresh would start the next one.
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
@@ -50,6 +51,8 @@ function parseRepos(text) {
   }
   return { top, repos: repos.filter((r) => r.branch) };
 }
+
+const scanRepos = async (cwd, on) => parseRepos((await exec("sh", ["-c", REPOS, "scm", cwd], { on })).stdout);
 
 // Keeps the current choice while it exists; else the folder's own repo, the first dirty one, the first.
 const pickRepo = (repos, top, current) =>
@@ -124,9 +127,33 @@ function openDiff(repo, on, file, commit, parent) {
     props: { repo, commit, parent: commit ? parent : "HEAD", path: file.path, ...(file.oldPath ? { oldPath: file.oldPath } : {}), on } });
 }
 
+// A repo's changes and graph. `repo` is its row from the repo list (branch, upstream), if known.
+async function readRepo(repo, root, on) {
+  const git = (args) => exec("git", [...READ, ...args], { cwd: root, on });
+  const status = await git(["status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"]);
+  if (status.code !== 0) throw new Error(status.stderr);
+  const entries = status.stdout.split("\0").filter(Boolean);
+  const files = entries.slice(0, FILES).map((entry) => ({ path: entry.slice(3), status: gitLetter(entry.slice(0, 2)) }));
+  const hasHead = repo?.oid !== "(initial)";
+  let commits = [];
+  if (hasHead) {
+    // The branch and, like VS Code's graph, its upstream (only when it still exists: `branch.ab` is there).
+    const log = await git(["log", "--topo-order", "--date-order", "-n", String(COMMITS), LOG_FORMAT, "HEAD", ...(repo?.ahead !== null && repo?.upstream ? [repo.upstream] : []), "--"]);
+    if (log.code === 0) commits = graph(parseLog(log.stdout));
+  }
+  return { files, limited: entries.length > FILES, hasHead, commits };
+}
+
 export default class SourceControl extends View {
   init(_props, cx) {
-    this.repos = []; this.chosen = new Map(); this.handle = cx.focus_handle(); this.last = 0; this.icons = null;
+    // Every project's repos, changes and graph from before the restart, shown at once and refreshed behind.
+    let cache = null;
+    try { cache = localStorage.getItem(CACHE); } catch {}
+    const restored = decode(cache);
+    ({ seen: this.seen, repoCache: this.repoCache, lastSelected: this.lastSelected, chosen: this.chosen } = restored);
+    try { for (const c of this.repoCache.values()) c.commits = graph(c.commits); } catch { this.repoCache.clear(); }
+    Object.assign(lastRoot, restored.lastRoot);
+    this.repos = []; this.handle = cx.focus_handle(); this.last = 0; this.icons = null;
     cx.spawn(async (cx) => {
       try { this.icons = JSON.parse(await readTextFile(`${appHome()}/mods/vscode-explorer/icons.json`)); } catch {}
       cx.notify();
@@ -143,7 +170,55 @@ export default class SourceControl extends View {
     this.input.on("focus", (_e, cx) => { this.typing = true; cx.notify(); });
     this.input.on("blur", (_e, cx) => { this.typing = false; cx.notify(); });
     this.refresh(cx);
-    cx.timer.every(10000, (cx) => this.refresh(cx));
+    cx.timer.every(10000, (cx) => {
+      this.refresh(cx);
+      if (this.known && spaces().some((s) => !this.known.has(s.id))) this.preloadAll(cx);
+    });
+    cx.timer.after(3000, (cx) => this.preloadAll(cx));
+    cx.timer.every(PRELOAD_EVERY, (cx) => this.preloadAll(cx));
+  }
+
+  // Saves the caches 2s after a change, at most once a minute.
+  changed(cx) {
+    if (this.saving) return;
+    this.saving = true;
+    cx.timer.after(Math.max(2000, (this.savedAt ?? 0) + SAVE_EVERY - Date.now()), () => {
+      this.saving = false; this.savedAt = Date.now();
+      try { localStorage.setItem(CACHE, encode({ seen: this.seen, repoCache: this.repoCache, lastSelected: this.lastSelected, chosen: this.chosen, lastRoot })); } catch {}
+    });
+  }
+
+  // Loads every other local space's repo list and default repo into the caches, as refresh() would show them.
+  // Spaces sharing a folder share a context, so it loads once. The shown state is never touched.
+  preloadAll(cx) {
+    if (this.preloading) return;
+    const all = spaces(), list = panes(), now = Date.now(), jobs = new Map();
+    this.known = new Set(all.map((s) => s.id));
+    for (const space of all) {
+      if (space.machine) continue;
+      // Pinned, so switching there with an editor tab focused gives this same key.
+      const loc = (lastRoot[space.id] ??= freshRoot(space, list)), context = JSON.stringify(loc);
+      if (loc.cwd && context !== this.context && !(now - (this.seen.get(context)?.at ?? 0) < FRESH)) jobs.set(context, loc);
+    }
+    const queue = [...jobs];
+    if (!queue.length) return;
+    this.preloading = true;
+    cx.spawn(async (cx) => {
+      const worker = async () => {
+        for (let job; (job = queue.shift());) { await this.preload(...job).catch(() => {}); this.changed(cx); }
+      };
+      try { await Promise.all([worker(), worker()]); } finally { this.preloading = false; }
+    });
+  }
+
+  async preload(context, { cwd, on }) {
+    const { top, repos } = await scanRepos(cwd, on);
+    if (context === this.context) return;
+    const selected = pickRepo(repos, top, this.chosen.get(context) ?? this.lastSelected.get(context));
+    this.seen.set(context, { repos, at: Date.now() }); this.lastSelected.set(context, selected);
+    if (!selected || selected === this.selected || Date.now() - (this.repoCache.get(selected)?.at ?? 0) < FRESH) return;
+    const data = await readRepo(repos.find((r) => r.path === selected), selected, on), old = this.repoCache.get(selected);
+    if (selected !== this.selected) this.repoCache.set(selected, { ...data, expanded: old?.expanded ?? new Set(), commitFiles: old?.commitFiles ?? new Map(), at: Date.now() });
   }
 
   // Switching to a repo shows its last changes, graph and expanded commits at once (if seen before) while it reloads.
@@ -174,24 +249,24 @@ export default class SourceControl extends View {
     if (this.loading || this.busy) { this.queued = !this.busy; return; }
     const { cwd, on } = location(), context = key();
     if (context !== this.context) {
-      // Each project's last repo list stays, so switching back shows it at once while it refreshes.
-      (this.seen ??= new Map()).set(this.context, this.repos);
-      this.context = context; this.on = on; this.repos = this.seen.get(context) ?? [];
-      this.selected = this.chosen.get(context) ?? this.lastSelected?.get(context) ?? null;
+      // Each project's last repo list stays (set below), so switching back shows it at once while it refreshes.
+      this.context = context; this.on = on; this.repos = this.seen.get(context)?.repos ?? [];
+      this.selected = this.chosen.get(context) ?? this.lastSelected.get(context) ?? null;
       this.clearRepo(this.selected); this.error = null; this.watched = null;
     }
     if (!cwd) return;
     this.loading = true; this.queued = false; this.last = Date.now();
     cx.spawn(async (cx) => {
       try {
-        const r = await exec("sh", ["-c", REPOS, "scm", cwd], { on });
+        const { top, repos } = await scanRepos(cwd, on);
         if (key() !== context) return;
-        const { top, repos } = parseRepos(r.stdout), selected = pickRepo(repos, top, this.selected);
+        const selected = pickRepo(repos, top, this.selected);
         this.repos = repos; this.error = repos.length ? null : "No git repositories in this folder";
         if (selected !== this.selected) { this.selected = selected; this.clearRepo(selected); }
-        (this.lastSelected ??= new Map()).set(context, selected);
+        this.seen.set(context, { repos, at: Date.now() }); this.lastSelected.set(context, selected);
         this.watch(top || cwd, cx);
         if (selected) await this.loadRepo(context, selected);
+        this.changed(cx);
       } catch (e) { if (key() === context) this.error = String(e); }
       finally {
         this.loading = false;
@@ -202,21 +277,10 @@ export default class SourceControl extends View {
   }
 
   async loadRepo(context, root) {
-    const repo = this.repos.find((r) => r.path === root), on = this.on, git = (args) => exec("git", [...READ, ...args], { cwd: root, on });
-    const status = await git(["status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"]);
-    if (status.code !== 0) throw new Error(status.stderr);
-    const entries = status.stdout.split("\0").filter(Boolean);
-    const files = entries.slice(0, FILES).map((entry) => ({ path: entry.slice(3), status: gitLetter(entry.slice(0, 2)) }));
-    const hasHead = repo?.oid !== "(initial)";
-    let commits = [];
-    if (hasHead) {
-      // The branch and, like VS Code's graph, its upstream (only when it still exists: `branch.ab` is there).
-      const log = await git(["log", "--topo-order", "--date-order", "-n", String(COMMITS), LOG_FORMAT, "HEAD", ...(repo?.ahead !== null && repo?.upstream ? [repo.upstream] : []), "--"]);
-      if (log.code === 0) commits = graph(parseLog(log.stdout));
-    }
+    const data = await readRepo(this.repos.find((r) => r.path === root), root, this.on);
     if (key() !== context || this.selected !== root) return;
-    this.files = files; this.limited = entries.length > FILES; this.hasHead = hasHead; this.commits = commits;
-    (this.repoCache ??= new Map()).set(root, { files, commits, limited: this.limited, hasHead, expanded: this.expanded, commitFiles: this.commitFiles });
+    Object.assign(this, data);
+    this.repoCache.set(root, { ...data, expanded: this.expanded, commitFiles: this.commitFiles, at: Date.now() });
   }
 
   select(path, cx) {
