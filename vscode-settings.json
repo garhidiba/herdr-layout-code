@@ -47,5 +47,11 @@
   // Ollama keeps the model loaded this long after each request (and the editor loads it when it starts).
   "editor.inlineSuggest.keepAlive": "30m",
   // File patterns never sent, on top of the built-in list (.env*, *.pem, *.key, id_rsa*, .npmrc, **/.ssh/**, …).
-  "editor.inlineSuggest.exclude": []
+  "editor.inlineSuggest.exclude": [],
+  // "N references" on a row above each declaration while a language server runs (a click peeks them).
+  "editor.codeLens": true,
+  // What ⌘F / Ctrl+F starts with: "always" (the selection, else the word at the cursor) | "selection" | "never".
+  "editor.find.seedSearchStringFromSelection": "always",
+  // Find in Selection when Find opens with a selection: "never" | "always" | "multiline" (a selection of several lines).
+  "editor.find.autoFindInSelection": "never"
 }
