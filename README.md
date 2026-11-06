@@ -3,7 +3,8 @@
 A VS Code–style layout for [Herdr](https://herdr.dev):
 
 - **Explorer:** Material Icon Theme icons and VS Code git colors, including repos nested in the folder.
-- **Source Control:** every repo under the folder, changes with diff and commit, and a commit graph.
+- **Source Control:** every repo under the folder, changes and commit, and a commit graph whose commits expand to their files.
+- **Diff tab:** VS Code-style inline diff with VS Code's own syntax colors.
 - **Editor:** files open in their own tab as an Atom One Dark editor; images open as a preview, markdown opens rendered with an Edit toggle.
 - **Pane menu:** Open in VS Code / Finder.
 - **Status bar:** Claude and Codex usage meters.
@@ -25,7 +26,8 @@ Optional Claude meter: set Claude Code's `statusLine.command` to `sh ~/.config/h
 
 ## What it runs
 
-- `sh`, `git`, `find` (Explorer listing and git status; Source Control repos, status, log, diff, and `git add -A` + `git commit` when you commit)
+- `sh`, `git`, `find` (Explorer listing and git status; Source Control repos, status, log, a commit's files, and `git add -A` + `git commit` when you commit; the diff tab's `git cat-file blob`)
+- `node` (diff tab colors: `mods/vscode-diff/tokens.cjs` with the engine in `mods/vscode-viewer/vscode/`)
 - `code` (Open in VS Code), `open` (Finder)
 - `stat`, `cp`, `sips` (image preview: copies the image into `mods/vscode-viewer/.cache/`)
 - `grep` over `~/.codex/sessions` (Codex usage)
