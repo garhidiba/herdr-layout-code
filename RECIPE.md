@@ -7,7 +7,7 @@ Herdr's main layout turned into a VS Code–style workbench: a file explorer wit
 ## What you see
 
 - **Left sidebar** (268px, 44–480): Herdr's own brand row (46px), spaces and agents lists (equal weights, min 90px each), footer (69px). Unchanged from Herdr's main layout.
-- **Tab bar** (42px, `vscode-tabs`): Herdr's tabs, then on the right `+`, **Explorer** (folder icon) and **Source Control** (Herdr's changes icon) buttons; the active panel's button has the `selected` background.
+- **Tab bar** (42px, `vscode-tabs`): Herdr's tabs, then on the right `+`, icon-only **Explorer** (Codicon `files`) and **Source Control** (Codicon `source-control`) buttons (28px, icon 18px, muted; the label is the tooltip); the shown panel's button is `foreground` on `selected` with a 2px `accent` underline.
 - **Work area** (padding 8, gap 8): the active tab's panes (radius 10, 1px `border`, `accent` focus ring, 30px pane header).
 - **Right panel** (368px, 280–900, a stack):
   - **Explorer** (`vscode-explorer`): header "Explorer" + folder name (36px, semibold 13px). A tree of the project you work in: the focused terminal's folder, 22px rows, 12px indent per level, chevron 12px, Material Icon Theme icon 16px (file name → extension → default; folders have open/closed icons).
@@ -158,7 +158,7 @@ Herdr's main layout turned into a VS Code–style workbench: a file explorer wit
 ## Built from
 
 - **Layout** `layouts/vscode.json`: Herdr's main tree with `terminal_menu: "vscode-menu"`, `tabs` → `vscode-tabs`, `status` → `vscode-status`, and `panel-body` children `explorer` (`vscode-explorer`) and `changes` (`vscode-scm`). Shipped mods used as is: `workspace-chrome`, `spaces`, `agents`, `pane`. Keys: `keys.json` section `layout:vscode` (`cmd-e` → `layout.toggle:panel`, `cmd-s` → `vscode-viewer.save`, `cmd-,` → `mod.open:vscode-settings`) and section `terminal` passing the terminal editor's keys that Herdr doesn't use to the program (`"terminal"`): `cmd-a`, `cmd-x`, `cmd-z`, `cmd-shift-z`, `cmd-g`, `cmd-shift-g`, `cmd-alt-f`, `cmd-shift-k`, `cmd-enter`, `cmd-up`, `cmd-down`, `cmd-shift-up`, `cmd-shift-down`, `cmd-shift-left`, `cmd-shift-right`, `cmd-delete`, `cmd-f2`, `cmd-f12`, `f12`, `shift-f12`, `alt-f12`, `alt-shift-f12`, `shift-f10`, `ctrl--`, `ctrl-shift--`. `vscode-settings.json` at the repo root is a commented example of the settings file; `vscode-keybindings.json` an empty user keybindings file (`[]`).
-- **`vscode-tabs`:** the shipped tabs mod plus an `explorer` panel button; the `changes` button reads "Source Control" (icon `mods/changes/changes.svg`).
+- **`vscode-tabs`:** the shipped tabs mod plus an `explorer` panel button; both are icon-only buttons with a tooltip (Codicons `files.svg` and `source-control.svg` in the mod, CC BY 4.0, `LICENSE-codicons.txt`).
   - It treats an empty `workspace.panels` as unset (an old uninstalled layout can leave `[]`, which otherwise hides every panel button).
   - It never shows a `files` button.
 - **`vscode-explorer`:**

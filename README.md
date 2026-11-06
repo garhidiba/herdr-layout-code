@@ -61,5 +61,6 @@ Only `codex app-server` reaches the network (OpenAI, as Codex itself does).
 ## Credits
 
 - Icons from [Material Icon Theme](https://github.com/material-extensions/vscode-material-icon-theme) (MIT).
+- Tab bar panel icons (`files`, `source-control`) from [VS Code Codicons](https://github.com/microsoft/vscode-codicons) (CC BY 4.0, see `mods/vscode-tabs/LICENSE-codicons.txt`).
 - Colors from [Atom One Dark](https://github.com/akamud/vscode-theme-onedark) (MIT).
 - File-type data and TextMate grammars from VS Code's built-in extensions (MIT); [vscode-textmate](https://github.com/microsoft/vscode-textmate) and [vscode-oniguruma](https://github.com/microsoft/vscode-oniguruma) (MIT).
