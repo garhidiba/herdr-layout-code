@@ -458,7 +458,17 @@ pub enum Provider {
 impl Session {
     pub fn new(file: &Path, scope: Option<&str>) -> Session {
         let root = git_root(file);
-        Session { file: file.to_path_buf(), kind: scope.and_then(kind_of_scope), fallback: Arc::new(Fallback::new(file, scope, &root)), root }
+        let kind = scope.and_then(kind_of_scope);
+        // A server that isn't installed counts as failed from the start, so `can` answers with the fallback at once.
+        if let Some(k) = kind.filter(|k| *k != "ts") {
+            if let Ok(mut pool) = pool().lock() {
+                let key = format!("{k}:{}", root.display());
+                if !pool.contains_key(&key) && !found(k) {
+                    pool.insert(key, Slot::Failed);
+                }
+            }
+        }
+        Session { file: file.to_path_buf(), kind, fallback: Arc::new(Fallback::new(file, scope, &root)), root }
     }
     /// Without starting anything: does some provider offer `op`?
     pub fn can(&self, op: &str) -> bool {

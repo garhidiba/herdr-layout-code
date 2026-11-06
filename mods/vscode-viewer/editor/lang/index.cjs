@@ -113,6 +113,9 @@ function startServer(kind, file, root) {
 class Session {
   constructor(file, scope) {
     this.file = file; this.scope = scope; this.kind = SCOPES[scope] ?? null; this.root = gitRoot(file);
+    // A server that isn't installed counts as failed from the start, so can() answers with the fallback at once.
+    const key = `${this.kind}:${this.root}`;
+    if (this.kind && this.kind !== "ts" && !pool.has(key) && !found(this.kind)) pool.set(key, new Error(`${this.kind} language server not found`));
     this.fallback = new Fallback(file, scope, this.root);
     this.server = null;
   }
