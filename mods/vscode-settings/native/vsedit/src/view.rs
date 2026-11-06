@@ -8,7 +8,7 @@ use crate::decorations::{self, Guide, Hit};
 use crate::editor::{selected_chars, visible_column, word_left, word_right, Editor, FindAct, Field, Popup, StatusAct};
 use crate::folding;
 use crate::gitgutter::{self, Mark};
-use crate::highlight::{font_style_of, foreground_of, token_index, token_type_of, Tokens};
+use crate::highlight::{font_style_of, foreground_of, token_index, Tokens};
 use crate::keys::{Ev, Mouse};
 use crate::overlays::Area;
 use crate::paint::{fit, Painter};
@@ -262,9 +262,8 @@ impl Editor {
 
     /// The bracket at the cursor and its partner, brackets in strings and comments not counting.
     fn bracket_pair(&self) -> Vec<Pos> {
-        let hl = &self.hl;
-        let code = |line: usize, col: usize| hl.line(line).is_none_or(|t| t.is_empty() || token_type_of(t[token_index(t, col)].1) == 0);
-        decorations::match_bracket(&self.buf.lines, self.head(), &code, 20000).map_or(vec![], |(a, b)| vec![a, b])
+        let code = self.is_code();
+        decorations::match_bracket(&self.buf.lines, self.head(), &code, 20000, false).map_or(vec![], |(a, b)| vec![a, b])
     }
 
     /// The word whose occurrences highlight once the cursor rested on it WORD_DELAY.

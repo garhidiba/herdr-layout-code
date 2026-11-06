@@ -5,12 +5,12 @@ use crate::autoclose::{self, Typed};
 use crate::backup;
 use crate::buffer::{caret, edit, end_of, insert_at, pos, Buffer, Change, Edit, Pos, Sel};
 use crate::commands::{Act, FindOption, LiveKeys};
-use crate::decorations::{is_word_char, Hit};
+use crate::decorations::{self, is_word_char, Hit};
 use crate::file::{self, detect_indent, Doc, Indent};
 use crate::find::{self, Opts};
 use crate::folding::{self, Folds, Range};
 use crate::gitgutter::{self, GitGutter};
-use crate::highlight::{Highlight, SemanticLayer};
+use crate::highlight::{token_index, token_type_of, Highlight, SemanticLayer};
 use crate::keys::{Ev, Key};
 use crate::language::{comment_of, language_name};
 use crate::overlays::{button, Dialog, Input, InputOutcome, Outcome, Picker};
@@ -85,6 +85,8 @@ pub enum DAct {
     QuitDiscard,
     Cancel,
     Overwrite { then_quit: bool },
+    /// Save As onto an existing file.
+    Replace(PathBuf),
     Reload,
     Restore,
     Discard,
@@ -94,6 +96,7 @@ pub enum DAct {
 pub enum IAct {
     Goto,
     AutoSaveDelay,
+    SaveAs,
 }
 
 #[derive(Clone, Debug)]
@@ -102,6 +105,10 @@ pub enum PAct {
     TabSize(bool, usize),
     Eol(bool),
     Language(Option<String>),
+    /// Go to File: a path relative to the project root.
+    Open(String),
+    /// Go to File's ":<line>".
+    GotoLine(String),
 }
 
 pub enum Popup {
@@ -137,6 +144,63 @@ pub struct Message {
     pub color: Color,
     pub until: Instant,
 }
+
+/// Everything that belongs to one open file (vsedit.cjs DOC_FIELDS); showing another file swaps these with the editor's.
+pub struct DocState {
+    file: PathBuf,
+    doc: Doc,
+    buf: Buffer,
+    hl: Highlight,
+    semantic: SemanticLayer,
+    indent: Indent,
+    scope: Option<String>,
+    language: String,
+    crumbs: Vec<String>,
+    sel: Sel,
+    goal: Option<usize>,
+    top: usize,
+    left: usize,
+    folds: Folds,
+    ranges: Option<(u64, usize, Vec<Range>)>,
+    git: GitGutter,
+    seen_version: u64,
+    closers: (u64, Vec<Pos>),
+}
+
+impl DocState {
+    fn new(file: PathBuf, doc: Doc, hl: Highlight, index: &Value, settings: &Settings) -> DocState {
+        let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let scope = crate::language::scope_of(index, &name);
+        let known = scope.as_deref().filter(|s| index["scopes"].get(*s).is_some());
+        let buf = Buffer::new(doc.lines.clone());
+        let indent = detect_indent(&buf.lines, Indent { use_tabs: !settings.insert_spaces, size: settings.tab_size });
+        let mut semantic = SemanticLayer::default();
+        semantic.reset(buf.lines.len());
+        DocState {
+            crumbs: breadcrumbs(&file),
+            language: language_name(known),
+            git: GitGutter::new(&file),
+            file,
+            doc,
+            buf,
+            hl,
+            semantic,
+            indent,
+            scope,
+            sel: Sel::default(),
+            goal: None,
+            top: 0,
+            left: 0,
+            folds: Folds::default(),
+            ranges: None,
+            seen_version: 0,
+            closers: (0, vec![]),
+        }
+    }
+}
+
+/// Where Go Back / Go Forward return to: (file, cursor, top line).
+type NavEntry = (PathBuf, Pos, usize);
 
 pub struct Editor {
     pub file: PathBuf,
@@ -187,6 +251,13 @@ pub struct Editor {
     seen_version: u64,
     auto_at: Option<Instant>,
     pub exit: Option<i32>,
+    /// The other open files (Go to File, Open Settings JSON, Save All, quit and hot exit go through them).
+    docs: Vec<DocState>,
+    back: Vec<NavEntry>,
+    forward: Vec<NavEntry>,
+    /// Go to File's list: (root, files relative to it).
+    project: Option<(PathBuf, Vec<String>)>,
+    vscode: PathBuf,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -210,32 +281,26 @@ pub enum FindAct {
 }
 
 impl Editor {
-    pub fn new(file: PathBuf, doc: Doc, hl: Highlight, index: Value, colors: &Value) -> Editor {
+    pub fn new(file: PathBuf, doc: Doc, hl: Highlight, index: Value, colors: &Value, vscode: PathBuf) -> Editor {
         let settings_path = settings::settings_file();
         let (settings, settings_stamp) = settings::load(&settings_path);
-        let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let scope = crate::language::scope_of(&index, &name);
-        let known = scope.as_deref().filter(|s| index["scopes"].get(*s).is_some());
-        let buf = Buffer::new(doc.lines.clone());
-        let indent = detect_indent(&buf.lines, Indent { use_tabs: !settings.insert_spaces, size: settings.tab_size });
-        let mut semantic = SemanticLayer::default();
-        semantic.reset(buf.lines.len());
+        let st = DocState::new(file, doc, hl, &index, &settings);
         let now = Instant::now();
         Editor {
-            crumbs: breadcrumbs(&file),
-            language: language_name(known),
-            git: GitGutter::new(&file),
-            file,
-            doc,
-            buf,
-            hl,
-            semantic,
-            indent,
-            scope,
-            sel: Sel::default(),
-            goal: None,
-            top: 0,
-            left: 0,
+            crumbs: st.crumbs,
+            language: st.language,
+            git: st.git,
+            file: st.file,
+            doc: st.doc,
+            buf: st.buf,
+            hl: st.hl,
+            semantic: st.semantic,
+            indent: st.indent,
+            scope: st.scope,
+            sel: st.sel,
+            goal: st.goal,
+            top: st.top,
+            left: st.left,
             rows: 24,
             cols: 80,
             c: Palette::of(colors),
@@ -249,9 +314,9 @@ impl Editor {
             chord_prefix: None,
             find: Find { query: String::new(), replace: String::new(), field: Field::Query, opts: Opts::default(), matches: vec![], error: None, searched: None },
             clip: (String::new(), false),
-            closers: (0, vec![]),
-            folds: Folds::default(),
-            ranges: None,
+            closers: st.closers,
+            folds: st.folds,
+            ranges: st.ranges,
             vbar: Bar::new(true),
             hbar: Bar::new(false),
             marks: None,
@@ -266,10 +331,38 @@ impl Editor {
             find_hits: vec![],
             word: None,
             hits_cache: None,
-            seen_version: 0,
+            seen_version: st.seen_version,
             auto_at: None,
             exit: None,
+            docs: vec![],
+            back: vec![],
+            forward: vec![],
+            project: None,
+            vscode,
         }
+    }
+
+    /// Swaps the editor's file fields with `st` (vsedit.cjs activate).
+    fn swap_doc(&mut self, st: &mut DocState) {
+        use std::mem::swap;
+        swap(&mut self.file, &mut st.file);
+        swap(&mut self.doc, &mut st.doc);
+        swap(&mut self.buf, &mut st.buf);
+        swap(&mut self.hl, &mut st.hl);
+        swap(&mut self.semantic, &mut st.semantic);
+        swap(&mut self.indent, &mut st.indent);
+        swap(&mut self.scope, &mut st.scope);
+        swap(&mut self.language, &mut st.language);
+        swap(&mut self.crumbs, &mut st.crumbs);
+        swap(&mut self.sel, &mut st.sel);
+        swap(&mut self.goal, &mut st.goal);
+        swap(&mut self.top, &mut st.top);
+        swap(&mut self.left, &mut st.left);
+        swap(&mut self.folds, &mut st.folds);
+        swap(&mut self.ranges, &mut st.ranges);
+        swap(&mut self.git, &mut st.git);
+        swap(&mut self.seen_version, &mut st.seen_version);
+        swap(&mut self.closers, &mut st.closers);
     }
 
     pub fn lines(&self) -> &[String] {
@@ -854,6 +947,145 @@ impl Editor {
         self.move_to(p, false);
     }
 
+    /// Join Lines (VS Code's JoinLinesAction): the selected lines, else the cursor line and the next, become one; each
+    /// joined line loses its indent and gets one space before it (none after an empty line, trailing whitespace becomes
+    /// that space; blank lines vanish). The cursor goes to the last join, a multi-line selection keeps its distance
+    /// from the end.
+    fn join_lines(&mut self) {
+        let (s, e) = self.range();
+        let last = self.buf.lines.len() - 1;
+        let single = s.line == e.line;
+        let end = if single { (s.line + 1).min(last) } else { e.line };
+        let end_len = self.buf.lines[end].len();
+        let (mut text, mut back) = (self.buf.lines[s.line].clone(), 0);
+        for t in &self.buf.lines[s.line + 1..=end] {
+            let Some(i) = t.find(|c| c != ' ' && c != '\t') else {
+                back = 0;
+                continue;
+            };
+            let mut space = !text.is_empty();
+            if space && text.ends_with([' ', '\t']) {
+                space = false;
+                text = text.trim_end_matches(|c: char| c.is_whitespace() || c == '\u{feff}').to_string() + " ";
+            }
+            if space {
+                text.push(' ');
+            }
+            text.push_str(&t[i..]);
+            back = t.len() - i + space as usize;
+        }
+        let after = if self.empty() {
+            caret(pos(s.line, text.len() - back))
+        } else if single {
+            Sel { anchor: s, head: e }
+        } else {
+            Sel { anchor: s, head: pos(s.line, text.len() - (end_len - e.col)) }
+        };
+        if end > s.line {
+            let before = self.sel;
+            self.apply(vec![edit(pos(s.line, 0), pos(end, end_len), text)], before, Some(after), false);
+        }
+        self.sel = after;
+        self.buf.seal();
+        self.reveal();
+    }
+    /// Expand Line Selection (⌘L): from the selection's first line start to the start of the line after its last line
+    /// (the end of the file on the last line), so pressing it again adds the next line.
+    fn expand_line_selection(&mut self) {
+        let (s, e) = self.range();
+        let last = self.buf.lines.len() - 1;
+        let head = if e.line < last { pos(e.line + 1, 0) } else { pos(last, self.buf.lines[last].len()) };
+        self.sel = Sel { anchor: pos(s.line, 0), head };
+        self.buf.seal();
+        self.reveal();
+    }
+    /// Toggle Block Comment (VS Code's BlockCommentCommand): with the selection between the language's block comment
+    /// tokens (on its first and last line) they go, with one space inside each; else they wrap the selection with a
+    /// space inside, the text staying selected; an empty selection gets `/*  */` with the cursor in the middle.
+    fn block_comment(&mut self) {
+        let Some((open, close)) = crate::language::block_comment_of(self.scope.as_deref()) else {
+            return self.warn(format!("No block comment syntax known for {}", self.language));
+        };
+        let (s, e) = self.range();
+        let (first, last) = (&self.buf.lines[s.line], &self.buf.lines[e.line]);
+        let mut a = last_index_of(first, open, s.col + open.len());
+        let from = e.col.saturating_sub(close.len()).max(if s.line == e.line { a.map_or(0, |a| a + open.len()) } else { 0 });
+        let mut b = index_of(last, close, from);
+        if let (Some(i), Some(j)) = (a, b) {
+            let inside = if s.line == e.line { first[i + open.len()..j].to_string() } else { format!("{}\n{}", &first[i + open.len()..], &last[..j]) };
+            if inside.contains(close) {
+                (a, b) = (None, None); // `/* a */ b /* c */`: not one comment
+            }
+        }
+        let before = self.sel;
+        let (edits, after) = match (a, b) {
+            (Some(a), Some(mut b)) => {
+                let open_n = open.len() + (first.as_bytes().get(a + open.len()) == Some(&b' ')) as usize;
+                let mut close_n = close.len();
+                if b > 0 && last.as_bytes()[b - 1] == b' ' {
+                    close_n += 1;
+                    b -= 1;
+                }
+                if s.line == e.line && a + open_n >= b {
+                    // nothing inside (`/*  */`): the whole comment goes
+                    (vec![edit(pos(s.line, a), pos(s.line, (a + open_n).max(b + close_n)), "")], caret(pos(s.line, a)))
+                } else {
+                    let shift = if s.line == e.line { open_n } else { 0 };
+                    let edits = vec![edit(pos(e.line, b), pos(e.line, b + close_n), ""), edit(pos(s.line, a), pos(s.line, a + open_n), "")];
+                    (edits, Sel { anchor: pos(s.line, a), head: pos(e.line, b - shift) })
+                }
+            }
+            _ if self.empty() => (vec![insert_at(s, format!("{open}  {close}"))], caret(pos(s.line, s.col + open.len() + 1))),
+            _ => {
+                let shift = if s.line == e.line { open.len() + 1 } else { 0 };
+                let edits = vec![insert_at(e, format!(" {close}")), insert_at(s, format!("{open} "))];
+                (edits, Sel { anchor: pos(s.line, s.col + open.len() + 1), head: pos(e.line, e.col + shift) })
+            }
+        };
+        self.apply(edits, before, Some(after), false);
+        self.sel = after;
+        self.buf.seal();
+        self.reveal();
+    }
+    /// False inside strings, comments and regexes (by the token type); lines not tokenized yet count as code.
+    pub fn is_code(&self) -> impl Fn(usize, usize) -> bool + '_ {
+        let hl = &self.hl;
+        move |line: usize, col: usize| hl.line(line).is_none_or(|t| t.is_empty() || token_type_of(t[token_index(t, col)].1) == 0)
+    }
+    /// Go to Bracket (VS Code's jumpToBracket): from the bracket touching the cursor (the one after it first) to its
+    /// partner, else to the closer of the pair around the cursor, else to the next bracket.
+    fn jump_to_bracket(&mut self) {
+        let p = self.range().0;
+        let to = {
+            let (lines, code) = (&self.buf.lines, self.is_code());
+            match decorations::match_bracket(lines, p, &code, 20000, true) {
+                Some((at, other)) => Some(if other.line == p.line && (p.col == other.col || p.col == other.col + 1) { at } else { other }),
+                None => decorations::enclosing_brackets(lines, p, &code, 20000).map(|(_, close)| close).or_else(|| decorations::next_bracket(lines, p, &code, 20000)),
+            }
+        };
+        if let Some(to) = to {
+            self.move_to(to, false);
+        }
+    }
+    /// Select to Bracket: the pair at the cursor (else around it, else the next one) with its brackets, backwards from
+    /// the closer.
+    fn select_to_bracket(&mut self) {
+        let p = self.range().0;
+        let pair = {
+            let (lines, code) = (&self.buf.lines, self.is_code());
+            decorations::match_bracket(lines, p, &code, 20000, true)
+                .or_else(|| decorations::enclosing_brackets(lines, p, &code, 20000))
+                .or_else(|| decorations::next_bracket(lines, p, &code, 20000).and_then(|n| decorations::match_bracket(lines, n, &code, 20000, true)))
+        };
+        let Some((x, y)) = pair else { return };
+        let (open, close) = if x < y { (x, y) } else { (y, x) };
+        let to = pos(close.line, close.col + 1);
+        let back = close.line == p.line && (p.col == close.col || p.col == to.col);
+        self.sel = if back { Sel { anchor: to, head: open } } else { Sel { anchor: open, head: to } };
+        self.buf.seal();
+        self.reveal();
+    }
+
     // ----- find / replace -----
     pub fn matches(&mut self) -> &[Hit] {
         let key = (self.buf.version, self.find.opts, self.find.query.clone());
@@ -924,6 +1156,33 @@ impl Editor {
         }
         self.find.field = if replace && !self.find.query.is_empty() { Field::Replace } else { Field::Query };
         self.prompt = Some(Prompt { replace, origin: self.sel });
+    }
+    /// The search a selection seeds (VS Code's getSelectionSearchString): a one-line selection, else the word at the
+    /// cursor.
+    fn selection_search(&self) -> Option<String> {
+        let (s, e) = self.range();
+        if self.empty() {
+            self.word_at(self.head()).map(|w| w.0)
+        } else {
+            (s.line == e.line).then(|| self.buf.text(s, e))
+        }
+    }
+    /// Find With Selection (⌘E): the find widget with the selection (or the word at the cursor) as the search.
+    fn find_with_selection(&mut self) {
+        if let Some(q) = self.selection_search() {
+            self.find.query = q;
+        }
+        self.open_find(false);
+    }
+    /// Find Next / Previous Selection (⌘F3 / ⇧⌘F3): the selection (or the word at the cursor) becomes the search, then
+    /// the next / previous match is selected; the find widget is not opened.
+    fn find_selection(&mut self, dir: i32) {
+        if let Some(q) = self.selection_search() {
+            self.find.query = q;
+        }
+        if !self.find.query.is_empty() {
+            self.find_next(dir, None);
+        }
     }
     fn find_again(&mut self, dir: i32) {
         let (s, e) = self.range();
@@ -1057,6 +1316,128 @@ impl Editor {
         }
     }
 
+    // ----- other files and navigation -----
+    /// Shows the open file docs[i]; the file shown until now takes its place in `docs`.
+    fn activate(&mut self, i: usize) {
+        let mut st = self.docs.remove(i);
+        self.swap_doc(&mut st);
+        self.docs.push(st);
+        // caches keyed by the buffer's version belong to the file shown before
+        (self.find.searched, self.hits_cache, self.word) = (None, None, None);
+    }
+    /// A file's state with its own tokenizer, or None (and a message) when it can't be opened as text.
+    fn load_state(&mut self, file: &Path) -> Option<DocState> {
+        let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let why = match file::load(file, false) {
+            Ok(Ok(doc)) => {
+                let hl = Highlight::start(self.vscode.clone(), term::wake);
+                let mut st = DocState::new(file.to_path_buf(), doc, hl, &self.index, &self.settings);
+                st.hl.reset(st.scope.as_deref(), &st.buf.lines);
+                return Some(st);
+            }
+            Ok(Err(r)) => r.message(),
+            Err(e) => format!("Cannot open {name}: {e}"),
+        };
+        self.error(why, 6000);
+        None
+    }
+    /// Shows `file` (loading it once), optionally at `at`; `record` remembers where we were for Go Back.
+    fn open(&mut self, file: &Path, at: Option<Pos>, record: bool) -> bool {
+        let file = crate::normalize(file);
+        if record {
+            self.push_nav();
+        }
+        if file != self.file {
+            let i = match self.docs.iter().position(|d| d.file == file) {
+                Some(i) => i,
+                None => match self.load_state(&file) {
+                    Some(st) => {
+                        self.docs.push(st);
+                        self.docs.len() - 1
+                    }
+                    None => {
+                        if record {
+                            self.back.pop();
+                        }
+                        return false;
+                    }
+                },
+            };
+            let first = self.docs[i].seen_version == 0;
+            self.activate(i);
+            if first {
+                self.offer_backup();
+            }
+        }
+        if let Some(p) = at {
+            self.move_to(p, false);
+            let v = self.row_of(self.head().line).saturating_sub(self.height() / 3);
+            self.top = self.line_at_row(v);
+        }
+        true
+    }
+    fn push_nav(&mut self) {
+        self.back.push((self.file.clone(), self.head(), self.top));
+        if self.back.len() > 50 {
+            self.back.remove(0);
+        }
+        self.forward.clear();
+    }
+    /// Go Back (-1) / Go Forward (1): the file and position before the last jump to another file.
+    fn navigate(&mut self, dir: i32) {
+        let Some((file, p, top)) = (if dir < 0 { self.back.pop() } else { self.forward.pop() }) else { return };
+        let here = (self.file.clone(), self.head(), self.top);
+        if dir < 0 { self.forward.push(here) } else { self.back.push(here) }
+        if self.open(&file, None, false) {
+            self.move_to(p, false);
+            self.top = top.min(self.buf.lines.len() - 1);
+        }
+    }
+    /// The folder Go to File lists: the git root, else the file's folder.
+    fn root(&self) -> PathBuf {
+        term::git_root(&self.file).or_else(|| self.file.parent().map(Path::to_path_buf)).unwrap_or_default()
+    }
+    /// Files of the git root (git ls-files), else up to 20,000 files found under the file's folder.
+    fn project_files(&mut self) -> Vec<String> {
+        let root = self.root();
+        if let Some((r, list)) = &self.project {
+            if *r == root {
+                return list.clone();
+            }
+        }
+        let git = root.join(".git").exists().then(|| std::process::Command::new("git").args(["ls-files", "-co", "--exclude-standard"]).current_dir(&root).stderr(std::process::Stdio::null()).output().ok()).flatten();
+        let list = match git.filter(|o| o.status.success()) {
+            Some(o) => String::from_utf8_lossy(&o.stdout).lines().filter(|l| !l.is_empty()).map(str::to_string).collect(),
+            None => {
+                let mut list = vec![];
+                walk(&root, "", 0, &mut list);
+                list
+            }
+        };
+        self.project = Some((root, list.clone()));
+        list
+    }
+    /// Go to File (Quick Open): the project's files by name, ":<line>" to go to a line.
+    fn quick_open(&mut self) {
+        let files = self.project_files().into_iter().map(|f| (f.clone(), String::new(), PAct::Open(f))).collect();
+        self.popup = Some(Popup::Picker(Picker::quick_open("Search files by name (: to go to a line)", files, PAct::GotoLine)));
+    }
+    fn open_settings_json(&mut self) {
+        let path = settings::settings_file();
+        settings::load(&path); // creates it with the defaults
+        self.open(&path, None, true);
+    }
+    fn open_keybindings_json(&mut self) {
+        let path = crate::commands::keybindings_file();
+        if !path.exists() {
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = file::save(&path, "[]\n");
+        }
+        self.open(&path, None, true);
+    }
+
     // ----- files -----
     /// Saves (trim, final newline from the settings); asks first when the file changed on disk. True when written.
     pub fn save(&mut self, force: bool, auto: bool, then_quit: bool) -> bool {
@@ -1133,11 +1514,14 @@ impl Editor {
     pub fn dialog(&mut self, title: &str, detail: Option<&str>, buttons: Vec<crate::overlays::Button<DAct>>) {
         self.popup = Some(Popup::Dialog(Dialog::new(title, detail, buttons)));
     }
-    /// Asks about unsaved changes, then exits.
+    /// Asks about each unsaved file (showing it), then exits.
     fn quit(&mut self) {
         if !self.buf.dirty() {
-            self.exit = Some(0);
-            return;
+            let Some(i) = self.docs.iter().position(|d| d.buf.dirty()) else {
+                self.exit = Some(0);
+                return;
+            };
+            self.activate(i);
         }
         let name = self.name();
         self.dialog(
@@ -1146,13 +1530,110 @@ impl Editor {
             vec![button("Save", 's', DAct::QuitSave), button("Don't Save", 'd', DAct::QuitDiscard), cancel_button()],
         );
     }
-    /// Hot exit: unsaved text goes to a backup (runs right before the process ends).
+    /// Hot exit: unsaved files go to backups (runs right before the process ends).
     pub fn hot_exit(&self) {
-        if self.buf.dirty() {
-            let h = self.head();
-            let col = utf16_len(&self.buf.lines[h.line][..h.col]);
-            let _ = backup::write(&self.file, &self.buf.all_text(), (h.line, col));
+        let current = (&self.file, &self.buf, self.head());
+        for (file, buf, h) in std::iter::once(current).chain(self.docs.iter().map(|d| (&d.file, &d.buf, d.sel.head))) {
+            if buf.dirty() {
+                let col = utf16_len(&buf.lines[h.line][..h.col]);
+                let _ = backup::write(file, &buf.all_text(), (h.line, col));
+            }
         }
+    }
+    /// Writes another open file as it is (Save All, auto save).
+    fn write_state(&mut self, i: usize) -> bool {
+        let st = &mut self.docs[i];
+        match file::save(&st.file, &file::encode(&st.buf.lines, &st.doc)) {
+            Ok(stamp) => {
+                st.doc.stamp = Some(stamp);
+                st.buf.mark_saved();
+                backup::remove(&st.file);
+                st.git.saved();
+                true
+            }
+            Err(e) => {
+                let name = st.file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                self.error(format!("Failed to save {name}: {e}"), 8000);
+                false
+            }
+        }
+    }
+    /// File: Save All: the current file as Save does, every other unsaved open file as it is; one changed on disk is
+    /// left unsaved.
+    fn save_all(&mut self) {
+        let mut skipped = vec![];
+        for i in 0..self.docs.len() {
+            let st = &self.docs[i];
+            if !st.buf.dirty() {
+                continue;
+            }
+            if st.doc.stamp.is_some() && file::changed_on_disk(&st.file, st.doc.stamp).is_some() {
+                skipped.push(st.file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+            } else {
+                self.write_state(i);
+            }
+        }
+        if self.buf.dirty() {
+            self.save(false, false, false);
+        }
+        if !skipped.is_empty() {
+            let w = self.c.warn.clone();
+            self.say(format!("Not saved, changed on disk: {}", skipped.join(", ")), Some(&w), 8000);
+        }
+    }
+    /// File: Save As...: asks for a path (relative to the file's folder, which is prefilled).
+    fn ask_save_as(&mut self) {
+        let dir = self.file.parent().map(|d| format!("{}/", d.display())).unwrap_or_default();
+        let mut input = Input::new("Save As:", &dir, IAct::SaveAs);
+        input.select_all = false; // typing goes after the folder
+        self.popup = Some(Popup::Input(input));
+    }
+    /// Confirms replacing a file, then saves the text there and edits that file; the original stays as it is on disk.
+    fn save_as(&mut self, text: &str) {
+        let v = text.trim();
+        let v = match v.strip_prefix('~').filter(|r| r.is_empty() || r.starts_with('/')) {
+            Some(rest) => format!("{}{rest}", settings::home_dir().display()),
+            None => v.to_string(),
+        };
+        if v.is_empty() {
+            return;
+        }
+        let target = crate::normalize(&self.file.parent().unwrap_or(Path::new("/")).join(v));
+        if target == self.file {
+            self.save(false, false, false);
+            return;
+        }
+        let folder = target.parent().map(Path::to_path_buf).unwrap_or_default();
+        match std::fs::metadata(&target) {
+            Ok(m) if m.is_dir() => self.say(format!("{} is a folder", target.display()), Some(&self.c.warn.clone()), 6000),
+            _ if !folder.exists() => self.say(format!("Folder not found: {}", folder.display()), Some(&self.c.warn.clone()), 6000),
+            Err(_) => self.save_to(target),
+            Ok(_) => {
+                let name = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                self.dialog(
+                    &format!("'{name}' already exists. Do you want to replace it?"),
+                    Some("Replacing it will overwrite its contents."),
+                    vec![button("Replace", 'r', DAct::Replace(target)), cancel_button()],
+                );
+            }
+        }
+    }
+    /// The current text becomes `target`'s document (its language from its name) and is saved; the original file's
+    /// unsaved changes go with it (VS Code reverts the original).
+    fn save_to(&mut self, target: PathBuf) {
+        let doc = Doc { lines: self.buf.lines.clone(), stamp: None, ..self.doc.clone() };
+        let hl = Highlight::start(self.vscode.clone(), term::wake);
+        let mut st = DocState::new(target.clone(), doc, hl, &self.index, &self.settings);
+        st.hl.reset(st.scope.as_deref(), &st.buf.lines);
+        (st.sel, st.top, st.left, st.indent, st.seen_version) = (self.sel, self.top, self.left, self.indent, st.buf.version);
+        st.buf.saved_version = None; // unsaved until written
+        let old = self.file.clone();
+        self.docs.retain(|d| d.file != target);
+        self.docs.push(st);
+        self.activate(self.docs.len() - 1);
+        self.docs.retain(|d| d.file != old);
+        backup::remove(&old);
+        self.save(true, false, false);
     }
     /// Offers a hot-exit backup of the file back.
     pub fn offer_backup(&mut self) {
@@ -1190,6 +1671,7 @@ impl Editor {
                     self.quit();
                 }
             }
+            DAct::Replace(target) => self.save_to(target),
             DAct::Reload => self.reload(),
             DAct::Restore => {
                 if let Some(b) = backup::read(&self.file) {
@@ -1231,6 +1713,7 @@ impl Editor {
                 Ok(n) if n.is_finite() => self.write_setting("files.autoSaveDelay", settings::js_number(n.clamp(0.1, 3600.0))),
                 _ => self.warn(format!("Not a number of seconds: {text}")),
             },
+            IAct::SaveAs => self.save_as(&text),
         }
     }
     fn choose(&mut self, placeholder: &str, choices: Vec<(String, String, PAct)>, current: usize) {
@@ -1284,6 +1767,11 @@ impl Editor {
                 self.hl.reset(self.scope.as_deref(), &self.buf.lines);
                 self.language = language_name(self.scope.as_deref());
             }
+            PAct::Open(rel) => {
+                let file = self.root().join(rel);
+                self.open(&file, None, true);
+            }
+            PAct::GotoLine(text) => self.goto_text(&text),
         }
     }
 
@@ -1322,8 +1810,10 @@ impl Editor {
             let dir = settings::settings_file().parent().map(Path::to_path_buf).unwrap_or_default();
             let _ = std::fs::write(dir.join(".vscode-settings-page"), json!({ "page": page, "at": at }).to_string());
             term::herdr(&["do", "mod.open", "--name", "vscode-settings"], false);
+        } else if keybindings {
+            self.open_keybindings_json();
         } else {
-            self.warn(NOT_YET);
+            self.open_settings_json();
         }
     }
     /// After each input event: restart the auto-save timer when the text changed.
@@ -1338,7 +1828,15 @@ impl Editor {
     }
     fn auto_save(&mut self) {
         self.auto_at = None;
-        if self.exit.is_none() && self.popup.is_none() && self.buf.dirty() {
+        if self.exit.is_some() || self.popup.is_some() {
+            return;
+        }
+        for i in 0..self.docs.len() {
+            if self.docs[i].buf.dirty() {
+                self.write_state(i);
+            }
+        }
+        if self.buf.dirty() {
             self.save(false, true, false);
         }
     }
@@ -1477,7 +1975,20 @@ impl Editor {
 
     pub fn run_act(&mut self, act: Act, term: Option<&mut Term>) {
         match act {
-            Act::Lang | Act::QuickOpen | Act::OpenSettingsJson | Act::OpenKeybindingsJson | Act::Navigate(_) => self.warn(NOT_YET),
+            Act::Lang => self.warn(NOT_YET),
+            Act::QuickOpen => self.quick_open(),
+            Act::OpenSettingsJson => self.open_settings_json(),
+            Act::OpenKeybindingsJson => self.open_keybindings_json(),
+            Act::Navigate(dir) => self.navigate(dir),
+            Act::SaveAs => self.ask_save_as(),
+            Act::SaveAll => self.save_all(),
+            Act::ExpandLineSelection => self.expand_line_selection(),
+            Act::BlockComment => self.block_comment(),
+            Act::FindWithSelection => self.find_with_selection(),
+            Act::FindSelection(dir) => self.find_selection(dir),
+            Act::JumpToBracket => self.jump_to_bracket(),
+            Act::SelectToBracket => self.select_to_bracket(),
+            Act::JoinLines => self.join_lines(),
             Act::Copy(cut) => {
                 if let Some(t) = term {
                     self.copy(t, cut)
@@ -1526,11 +2037,14 @@ impl Editor {
                     let (s, e) = self.range();
                     return self.delete_range(s, e);
                 }
-                let h = self.head();
+                // to the line's start / end; at the start / end, the line break (VS Code's)
+                let (h, len) = (self.head(), self.buf.lines[self.head().line].len());
                 if dir < 0 {
-                    self.delete_range(pos(h.line, 0), h);
+                    let s = if h.col == 0 && h.line > 0 { pos(h.line - 1, self.buf.lines[h.line - 1].len()) } else { pos(h.line, 0) };
+                    self.delete_range(s, h);
                 } else {
-                    self.delete_range(h, pos(h.line, self.buf.lines[h.line].len()));
+                    let e = if h.col == len && h.line + 1 < self.buf.lines.len() { pos(h.line + 1, 0) } else { pos(h.line, len) };
+                    self.delete_range(h, e);
                 }
             }
             Act::SelectNextOccurrence => self.select_next_occurrence(),
@@ -1571,6 +2085,26 @@ impl Editor {
     }
 }
 
+/// Go to File without git: files under root/dir (8 folders deep, 20,000 at most), skipping .git and node_modules.
+fn walk(root: &Path, dir: &str, depth: usize, list: &mut Vec<String>) {
+    if list.len() >= 20000 || depth > 8 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(root.join(dir)) else { return };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name == ".git" || name == "node_modules" {
+            continue;
+        }
+        let rel = if dir.is_empty() { name } else { format!("{dir}/{name}") };
+        if e.file_type().is_ok_and(|t| t.is_dir()) {
+            walk(root, &rel, depth + 1, list);
+        } else if list.len() < 20000 {
+            list.push(rel);
+        }
+    }
+}
+
 fn cancel_button() -> crate::overlays::Button<DAct> {
     crate::overlays::Button { label: "Cancel".into(), key: 'c', act: DAct::Cancel, cancel: true }
 }
@@ -1578,6 +2112,17 @@ fn cancel_button() -> crate::overlays::Button<DAct> {
 /// Closers on `line` at or after `col` moved by `delta` bytes (an insert or delete there).
 fn shift_closers(at: &[Pos], line: usize, col: usize, delta: i64) -> Vec<Pos> {
     at.iter().map(|q| if q.line == line && q.col >= col { pos(line, (q.col as i64 + delta).max(0) as usize) } else { *q }).collect()
+}
+
+/// `hay.indexOf(needle, from)`: the first match starting at or after byte `from`.
+fn index_of(hay: &str, needle: &str, from: usize) -> Option<usize> {
+    hay.as_bytes().get(from..)?.windows(needle.len()).position(|w| w == needle.as_bytes()).map(|i| i + from)
+}
+
+/// `hay.lastIndexOf(needle, at_most)`: the last match starting at or before byte `at_most`.
+fn last_index_of(hay: &str, needle: &str, at_most: usize) -> Option<usize> {
+    let end = (at_most + needle.len()).min(hay.len());
+    hay.as_bytes()[..end].windows(needle.len()).rposition(|w| w == needle.as_bytes())
 }
 
 /// The byte offset of UTF-16 offset `u` in `line` (clamped).
@@ -1607,6 +2152,293 @@ mod tests {
         assert_eq!(word_right("  한글 x", 0), 8);
         assert_eq!(word_left("foo.bar baz", 11), 8);
         assert_eq!(word_left("foo.bar ", 8), 4);
+    }
+
+    use crate::commands::act_of;
+    use crate::keys::key;
+    use std::fs;
+
+    /// Settings, keybindings and backups in a temp folder (once per test run), the repository's grammars.
+    fn scratch() -> &'static PathBuf {
+        static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        DIR.get_or_init(|| {
+            let d = std::env::temp_dir().join(format!("vsedit-unit-{}", std::process::id()));
+            fs::create_dir_all(&d).unwrap();
+            std::env::set_var("VSEDIT_SETTINGS", d.join("vscode-settings.json"));
+            std::env::set_var("VSEDIT_KEYBINDINGS", d.join("vscode-keybindings.json"));
+            std::env::set_var("VSEDIT_BACKUPS", d.join("backups"));
+            d
+        })
+    }
+    fn vscode() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../vscode-viewer/vscode")
+    }
+    /// An editor on `file` (its language from the name), every line tokenized.
+    fn editor_on(file: &Path, doc: Doc) -> Editor {
+        scratch();
+        let index: Value = serde_json::from_str(&fs::read_to_string(vscode().join("index.json")).unwrap()).unwrap();
+        let mut ed = Editor::new(file.to_path_buf(), doc, Highlight::start(vscode(), || {}), index, &Value::Null, vscode());
+        let lines = ed.buf.lines.clone();
+        ed.hl.reset(ed.scope.as_deref(), &lines);
+        assert!(ed.hl.wait(&lines, Instant::now() + Duration::from_secs(10), |h| h.has_lines(0, lines.len() - 1)));
+        ed
+    }
+    fn editor(file: &str, lines: &[&str]) -> Editor {
+        editor_on(Path::new(file), Doc { lines: lines.iter().map(|s| s.to_string()).collect(), ..Doc::empty() })
+    }
+    fn run(ed: &mut Editor, id: &str) {
+        ed.run_act(act_of(id).unwrap(), None);
+    }
+    fn sel(ed: &Editor) -> [usize; 4] {
+        [ed.sel.anchor.line, ed.sel.anchor.col, ed.sel.head.line, ed.sel.head.col]
+    }
+    fn text(ed: &Editor) -> Vec<&str> {
+        ed.buf.lines.iter().map(String::as_str).collect()
+    }
+
+    #[test]
+    fn expand_line_selection_adds_a_line_per_press_and_the_last_line_to_its_end() {
+        let mut ed = editor("/tmp/x.txt", &["ab", "cd", "ef"]);
+        ed.move_to(pos(0, 1), false);
+        let mut got = vec![];
+        for _ in 0..4 {
+            run(&mut ed, "expandLineSelection");
+            got.push(sel(&ed));
+        }
+        assert_eq!(got, [[0, 0, 1, 0], [0, 0, 2, 0], [0, 0, 2, 2], [0, 0, 2, 2]]);
+    }
+
+    #[test]
+    fn join_lines_uses_one_space_drops_indent_and_blank_lines_and_keeps_a_selections_end() {
+        let mut ed = editor("/tmp/x.txt", &["foo", "    bar", "x  ", "y"]);
+        run(&mut ed, "editor.action.joinLines");
+        assert_eq!((text(&ed), sel(&ed)), (vec!["foo bar", "x  ", "y"], [0, 3, 0, 3]));
+        ed.move_to(pos(1, 0), false);
+        ed.join_lines();
+        assert_eq!((text(&ed), sel(&ed)), (vec!["foo bar", "x y"], [1, 2, 1, 2])); // trailing whitespace is the space
+        ed.join_lines(); // the last line: the cursor goes to its end
+        assert_eq!((text(&ed), sel(&ed)), (vec!["foo bar", "x y"], [1, 3, 1, 3]));
+        let mut multi = editor("/tmp/x.txt", &["a", "", "  bc", "d"]);
+        multi.sel = Sel { anchor: pos(0, 0), head: pos(2, 3) };
+        multi.join_lines();
+        assert_eq!((text(&multi), sel(&multi)), (vec!["a bc", "d"], [0, 0, 0, 3]));
+        multi.undo(false);
+        assert_eq!(text(&multi), ["a", "", "  bc", "d"]);
+    }
+
+    #[test]
+    fn delete_all_right_and_left_take_the_line_break_at_the_edges() {
+        let mut ed = editor("/tmp/x.txt", &["ab", "cd"]);
+        ed.move_to(pos(0, 1), false);
+        run(&mut ed, "deleteAllRight");
+        assert_eq!(text(&ed), ["a", "cd"]);
+        run(&mut ed, "deleteAllRight");
+        assert_eq!(text(&ed), ["acd"]);
+        ed.move_to(pos(0, 0), false);
+        run(&mut ed, "deleteAllLeft");
+        assert_eq!(text(&ed), ["acd"]);
+        let mut two = editor("/tmp/x.txt", &["ab", "cd"]);
+        two.move_to(pos(1, 0), false);
+        run(&mut two, "deleteAllLeft");
+        assert_eq!((text(&two), sel(&two)), (vec!["abcd"], [0, 2, 0, 2]));
+    }
+
+    #[test]
+    fn block_comment_wraps_the_selection_and_takes_the_comment_off_again() {
+        let mut ed = editor("/tmp/x.js", &["let x = 1;"]);
+        ed.sel = Sel { anchor: pos(0, 4), head: pos(0, 5) };
+        run(&mut ed, "editor.action.blockComment");
+        assert_eq!((text(&ed), sel(&ed)), (vec!["let /* x */ = 1;"], [0, 7, 0, 8]));
+        ed.block_comment();
+        assert_eq!((text(&ed), sel(&ed)), (vec!["let x = 1;"], [0, 4, 0, 5]));
+        ed.move_to(pos(0, 10), false);
+        ed.block_comment();
+        assert_eq!((text(&ed), sel(&ed)), (vec!["let x = 1;/*  */"], [0, 13, 0, 13]));
+        ed.block_comment();
+        assert_eq!(text(&ed), ["let x = 1;"]);
+        let mut multi = editor("/tmp/x.js", &["a", "b"]);
+        multi.sel = Sel { anchor: pos(0, 0), head: pos(1, 1) };
+        multi.block_comment();
+        assert_eq!(text(&multi), ["/* a", "b */"]);
+        multi.block_comment();
+        assert_eq!(text(&multi), ["a", "b"]);
+        let mut py = editor("/tmp/x.py", &["x"]);
+        py.select_all();
+        py.block_comment();
+        assert_eq!(text(&py), ["\"\"\" x \"\"\""]);
+        let mut plain = editor("/tmp/x.txt", &["x"]);
+        plain.select_all();
+        plain.block_comment();
+        assert_eq!(text(&plain), ["x"]);
+        assert!(plain.message.unwrap().text.contains("No block comment syntax known for Plain Text"));
+    }
+
+    #[test]
+    fn go_to_bracket_jumps_between_partners_to_the_closer_around_else_the_next_bracket() {
+        let mut ed = editor("/tmp/x.js", &["foo(a, [b]) ", "f(\")\")"]);
+        let go = |ed: &mut Editor, line: usize, col: usize| {
+            ed.move_to(pos(line, col), false);
+            run(ed, "editor.action.jumpToBracket");
+            (ed.head().line, ed.head().col)
+        };
+        assert_eq!(go(&mut ed, 0, 4), (0, 10));
+        ed.jump_to_bracket();
+        assert_eq!((ed.head().line, ed.head().col), (0, 3));
+        assert_eq!(go(&mut ed, 0, 8), (0, 9));
+        assert_eq!(go(&mut ed, 0, 5), (0, 10));
+        assert_eq!(go(&mut ed, 0, 0), (0, 3));
+        assert_eq!(go(&mut ed, 1, 2), (1, 5)); // the `)` in the string doesn't count
+    }
+
+    #[test]
+    fn select_to_bracket_selects_the_pair_backwards_from_the_closer() {
+        let mut ed = editor("/tmp/x.js", &["foo(a, [b]) x"]);
+        ed.move_to(pos(0, 5), false);
+        run(&mut ed, "editor.action.selectToBracket");
+        assert_eq!(sel(&ed), [0, 3, 0, 11]);
+        ed.move_to(pos(0, 11), false);
+        ed.select_to_bracket();
+        assert_eq!(sel(&ed), [0, 11, 0, 3]);
+        ed.move_to(pos(0, 12), false);
+        ed.select_to_bracket();
+        assert_eq!(sel(&ed), [0, 12, 0, 12]);
+    }
+
+    #[test]
+    fn find_with_selection_opens_find_and_find_next_selection_moves_without_it() {
+        let mut ed = editor("/tmp/x.txt", &["foo bar foo", "bar"]);
+        ed.move_to(pos(0, 1), false);
+        run(&mut ed, "actions.findWithSelection");
+        assert!(ed.find.query == "foo" && ed.prompt.is_some());
+        ed.prompt = None;
+        ed.sel = Sel { anchor: pos(0, 4), head: pos(0, 7) };
+        run(&mut ed, "editor.action.nextSelectionMatchFindAction");
+        assert_eq!((ed.find.query.as_str(), sel(&ed), ed.prompt.is_none()), ("bar", [1, 0, 1, 3], true));
+        ed.move_to(pos(0, 9), false);
+        run(&mut ed, "editor.action.previousSelectionMatchFindAction");
+        assert_eq!((ed.find.query.as_str(), sel(&ed)), ("foo", [0, 0, 0, 3]));
+        ed.find_selection(-1); // wraps
+        assert_eq!(sel(&ed), [0, 8, 0, 11]);
+    }
+
+    fn temp_folder(name: &str) -> PathBuf {
+        let d = scratch().join(name);
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+    fn on_disk(file: &Path) -> Editor {
+        editor_on(file, file::load(file, false).unwrap().unwrap())
+    }
+    /// Types into the open input box and presses Enter.
+    fn answer(ed: &mut Editor, typed: Option<&str>, replace: Option<&str>) {
+        let Some(Popup::Input(i)) = ed.popup.as_mut() else { panic!("no input box") };
+        if let Some(t) = replace {
+            i.text = t.into();
+            i.select_all = false;
+        }
+        if let Some(t) = typed {
+            i.event(&Ev::Text(t.into()));
+        }
+        let InputOutcome::Accept(a, text) = i.event(&key("enter")) else { panic!("not accepted") };
+        ed.popup = None;
+        ed.input_act(a, text);
+    }
+
+    #[test]
+    fn save_as_asks_in_the_files_folder_saves_there_and_edits_that_file() {
+        let dir = temp_folder("save-as");
+        let file = dir.join("a.txt");
+        fs::write(&file, "one\n").unwrap();
+        let mut ed = on_disk(&file);
+        ed.typed("x");
+        run(&mut ed, "workbench.action.files.saveAs");
+        let Some(Popup::Input(i)) = &ed.popup else { panic!() };
+        assert_eq!(i.text, format!("{}/", dir.display()));
+        answer(&mut ed, Some("b.js"), None); // typed after the folder, not over it
+        assert_eq!(fs::read_to_string(dir.join("b.js")).unwrap(), "xone\n");
+        assert_eq!(fs::read_to_string(&file).unwrap(), "one\n");
+        assert_eq!((ed.file.clone(), ed.language.as_str(), ed.buf.dirty()), (dir.join("b.js"), "JavaScript", false));
+        assert!(ed.docs.iter().all(|d| d.file != file));
+        run(&mut ed, "workbench.action.files.saveAs"); // an existing file: asks first
+        answer(&mut ed, None, Some(&file.display().to_string()));
+        let Some(Popup::Dialog(d)) = &ed.popup else { panic!("no dialog") };
+        assert!(d.title.contains("'a.txt' already exists"));
+        ed.popup = None;
+        assert_eq!(fs::read_to_string(&file).unwrap(), "one\n");
+        run(&mut ed, "workbench.action.files.saveAs");
+        answer(&mut ed, None, Some(&dir.join("missing/c.txt").display().to_string()));
+        assert!(ed.message.as_ref().unwrap().text.contains("Folder not found"));
+    }
+
+    #[test]
+    fn save_all_writes_every_unsaved_open_file_but_one_changed_on_disk() {
+        let dir = temp_folder("save-all");
+        let [a, b, c] = ["a.txt", "b.txt", "c.txt"].map(|n| dir.join(n));
+        for f in [&a, &b, &c] {
+            fs::write(f, "1\n").unwrap();
+        }
+        let mut ed = on_disk(&a);
+        for f in [&b, &c, &a] {
+            assert!(ed.open(f, None, true));
+            ed.typed("x");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        fs::write(&c, "changed elsewhere\n").unwrap();
+        run(&mut ed, "workbench.action.files.saveAll");
+        let read = |f: &Path| fs::read_to_string(f).unwrap();
+        assert_eq!((read(&a), read(&b), read(&c)), ("x1\n".into(), "x1\n".into(), "changed elsewhere\n".into()));
+        assert!(ed.message.as_ref().unwrap().text.contains("Not saved, changed on disk: c.txt"));
+    }
+
+    #[test]
+    fn go_back_and_forward_return_to_the_file_and_position_before_a_jump() {
+        let dir = temp_folder("navigate");
+        let (a, b) = (dir.join("a.txt"), dir.join("b.txt"));
+        fs::write(&a, "a1\na2\n").unwrap();
+        fs::write(&b, "b1\n").unwrap();
+        let mut ed = on_disk(&a);
+        ed.move_to(pos(1, 1), false);
+        assert!(ed.open(&b, Some(pos(0, 2)), true));
+        assert_eq!((ed.file.clone(), sel(&ed)), (b.clone(), [0, 2, 0, 2]));
+        run(&mut ed, "workbench.action.navigateBack");
+        assert_eq!((ed.file.clone(), sel(&ed)), (a.clone(), [1, 1, 1, 1]));
+        run(&mut ed, "workbench.action.navigateBack"); // nothing further back
+        assert_eq!(ed.file, a);
+        run(&mut ed, "workbench.action.navigateForward");
+        assert_eq!((ed.file.clone(), sel(&ed)), (b.clone(), [0, 2, 0, 2]));
+        assert!(!ed.open(&dir.join("gone.txt"), None, true)); // a file that can't open: no history entry
+        run(&mut ed, "workbench.action.navigateBack");
+        assert_eq!(ed.file, a);
+    }
+
+    #[test]
+    fn go_to_file_lists_the_folder_and_goes_to_a_line() {
+        let dir = temp_folder("quick-open");
+        fs::create_dir_all(dir.join("sub/node_modules")).unwrap();
+        for f in ["a.txt", "sub/b.rs", "sub/node_modules/c.js"] {
+            fs::write(dir.join(f), "1\n2\n3\n").unwrap();
+        }
+        let mut ed = on_disk(&dir.join("a.txt"));
+        let mut files = ed.project_files();
+        files.sort();
+        assert_eq!(files, ["a.txt", "sub/b.rs"]);
+        run(&mut ed, "workbench.action.quickOpen");
+        let Some(Popup::Picker(p)) = ed.popup.as_mut() else { panic!("no picker") };
+        let area = crate::overlays::Area { c: &Palette::of(&Value::Null), rows: 30, cols: 100 };
+        p.event(&Ev::Text("b.rs".into()), &area);
+        assert_eq!(p.items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>(), ["sub/b.rs"]);
+        let Outcome::Run(act) = p.event(&key("enter"), &area) else { panic!() };
+        ed.popup = None;
+        ed.pick_act(act);
+        assert_eq!(ed.file, dir.join("sub/b.rs"));
+        run(&mut ed, "workbench.action.quickOpen");
+        let Some(Popup::Picker(p)) = ed.popup.as_mut() else { panic!() };
+        p.event(&Ev::Text(":3".into()), &area);
+        assert_eq!(p.items[0].label, "Go to line 3");
+        let Outcome::Run(act) = p.event(&key("enter"), &area) else { panic!() };
+        ed.pick_act(act);
+        assert_eq!(ed.head().line, 2);
     }
 
     #[test]

@@ -66,9 +66,42 @@ pub fn comment_of(scope: Option<&str>) -> Option<(&'static str, Option<&'static 
     BLOCK.iter().find(|(s, _, _)| *s == scope).map(|(_, o, c)| (*o, *c))
 }
 
+/// Block comment pairs of the languages that have both line and block comments (VS Code's language-configuration.json
+/// blockComment); the BLOCK languages use their own pair.
+const BLOCK_PAIRS: &[((&str, &str), &[&str])] = &[
+    (("/*", "*/"), &["source.js", "source.js.jsx", "source.ts", "source.tsx", "source.go", "source.c", "source.cpp", "source.cuda-cpp", "source.cs",
+        "source.java", "source.rust", "source.swift", "source.dart", "source.kotlin", "source.css.scss", "source.css.less", "source.php",
+        "source.groovy", "source.json", "source.json.comments", "source.objc", "source.objcpp", "source.hlsl", "source.shaderlab", "source.sql"]),
+    (("(*", "*)"), &["source.fsharp"]),
+    (("\"\"\"", "\"\"\""), &["source.python"]),
+    (("=begin", "=end"), &["source.ruby"]),
+    (("--[[", "]]"), &["source.lua"]),
+    (("###", "###"), &["source.coffee"]),
+    (("<#", "#>"), &["source.powershell"]),
+    (("#=", "=#"), &["source.julia"]),
+];
+
+/// (open, close) for Toggle Block Comment, or None when the language has none.
+pub fn block_comment_of(scope: Option<&str>) -> Option<(&'static str, &'static str)> {
+    let scope = scope?;
+    if let Some((_, o, c)) = BLOCK.iter().find(|(s, _, _)| *s == scope) {
+        return c.map(|c| (*o, c));
+    }
+    BLOCK_PAIRS.iter().find(|(_, s)| s.contains(&scope)).map(|(p, _)| *p)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn block_comments_come_from_the_language() {
+        assert_eq!(block_comment_of(Some("source.ts")), Some(("/*", "*/")));
+        assert_eq!(block_comment_of(Some("text.html.basic")), Some(("<!--", "-->")));
+        assert_eq!(block_comment_of(Some("source.python")), Some(("\"\"\"", "\"\"\"")));
+        assert_eq!(block_comment_of(Some("text.pug")), None);
+        assert_eq!(block_comment_of(Some("source.shell")), None);
+    }
 
     #[test]
     fn names_and_comments() {

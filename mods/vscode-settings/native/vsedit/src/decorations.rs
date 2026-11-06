@@ -124,11 +124,12 @@ fn partner_of(b: u8) -> Option<(u8, bool)> {
     }
 }
 
-/// The bracket touching p (the one before it first) and its partner. `code(line, col)` is false inside strings and
-/// comments. At most `limit` characters are scanned.
-pub fn match_bracket(lines: &[String], p: Pos, code: &dyn Fn(usize, usize) -> bool, limit: usize) -> Option<(Pos, Pos)> {
+/// The bracket touching p (the one before it first; after it first with `after_first`, as VS Code's Go to Bracket) and
+/// its partner. `code(line, col)` is false inside strings and comments. At most `limit` characters are scanned.
+pub fn match_bracket(lines: &[String], p: Pos, code: &dyn Fn(usize, usize) -> bool, limit: usize, after_first: bool) -> Option<(Pos, Pos)> {
     let t = lines.get(p.line)?.as_bytes();
-    for col in [p.col.checked_sub(1), Some(p.col)].into_iter().flatten() {
+    let (before, at) = (p.col.checked_sub(1), Some(p.col));
+    for col in (if after_first { [at, before] } else { [before, at] }).into_iter().flatten() {
         let Some(&ch) = t.get(col) else { continue };
         if partner_of(ch).is_none() || !code(p.line, col) {
             continue;
@@ -163,6 +164,66 @@ fn partner(lines: &[String], at: Pos, ch: u8, code: &dyn Fn(usize, usize) -> boo
             return None;
         }
         col = if forward { 0 } else { lines[line as usize].len() as i64 - 1 };
+    }
+    None
+}
+
+/// The innermost pair around p: the nearest opener before p still open there, and its partner (open, close).
+pub fn enclosing_brackets(lines: &[String], p: Pos, code: &dyn Fn(usize, usize) -> bool, limit: usize) -> Option<(Pos, Pos)> {
+    let mut depth = [0usize; 3]; // ( [ {
+    let slot = |c: u8| match c {
+        b'(' | b')' => 0,
+        b'[' | b']' => 1,
+        _ => 2,
+    };
+    let (mut line, mut col) = (p.line, p.col.min(lines.get(p.line)?.len()));
+    let mut budget = limit;
+    while budget > 0 {
+        let t = lines[line].as_bytes();
+        while col > 0 && budget > 0 {
+            col -= 1;
+            budget -= 1;
+            let c = t[col];
+            let Some((_, opener)) = partner_of(c) else { continue };
+            if !code(line, col) {
+                continue;
+            }
+            let d = &mut depth[slot(c)];
+            if !opener {
+                *d += 1;
+            } else if *d > 0 {
+                *d -= 1;
+            } else if let Some(close) = partner(lines, pos(line, col), c, code, limit) {
+                return Some((pos(line, col), close));
+            }
+        }
+        if line == 0 {
+            return None;
+        }
+        line -= 1;
+        col = lines[line].len();
+        budget = budget.saturating_sub(1);
+    }
+    None
+}
+
+/// The first bracket at or after p.
+pub fn next_bracket(lines: &[String], p: Pos, code: &dyn Fn(usize, usize) -> bool, limit: usize) -> Option<Pos> {
+    let (mut col, mut budget) = (p.col, limit);
+    for (line, t) in lines.iter().enumerate().skip(p.line) {
+        if budget == 0 {
+            break;
+        }
+        let t = t.as_bytes();
+        while col < t.len() && budget > 0 {
+            if partner_of(t[col]).is_some() && code(line, col) {
+                return Some(pos(line, col));
+            }
+            col += 1;
+            budget -= 1;
+        }
+        col = 0;
+        budget = budget.saturating_sub(1);
     }
     None
 }
@@ -238,10 +299,26 @@ mod tests {
     fn brackets_match_across_lines_skipping_non_code() {
         let l = lines(&["f(a, (b)", ")"]);
         let all = |_: usize, _: usize| true;
-        assert_eq!(match_bracket(&l, pos(0, 2), &all, 20000), Some((pos(0, 1), pos(1, 0))));
+        assert_eq!(match_bracket(&l, pos(0, 2), &all, 20000, false), Some((pos(0, 1), pos(1, 0))));
         let not_col5 = |line: usize, col: usize| !(line == 0 && col == 5);
-        assert_eq!(match_bracket(&l, pos(0, 8), &not_col5, 20000), Some((pos(0, 7), pos(0, 1))));
-        assert_eq!(match_bracket(&l, pos(0, 0), &all, 20000), None);
+        assert_eq!(match_bracket(&l, pos(0, 8), &not_col5, 20000, false), Some((pos(0, 7), pos(0, 1))));
+        assert_eq!(match_bracket(&l, pos(0, 0), &all, 20000, false), None);
+        // between `)` and `(`: the one after the cursor first for Go to Bracket
+        let m = lines(&["(a)(b)"]);
+        assert_eq!(match_bracket(&m, pos(0, 3), &all, 20000, false), Some((pos(0, 2), pos(0, 0))));
+        assert_eq!(match_bracket(&m, pos(0, 3), &all, 20000, true), Some((pos(0, 3), pos(0, 5))));
+    }
+
+    #[test]
+    fn the_pair_around_a_position_and_the_next_bracket() {
+        let l = lines(&["f(a, [b], c", "  d)", "x {y}"]);
+        let all = |_: usize, _: usize| true;
+        assert_eq!(enclosing_brackets(&l, pos(0, 10), &all, 20000), Some((pos(0, 1), pos(1, 3))));
+        assert_eq!(enclosing_brackets(&l, pos(1, 2), &all, 20000), Some((pos(0, 1), pos(1, 3))));
+        assert_eq!(enclosing_brackets(&l, pos(2, 1), &all, 20000), None);
+        assert_eq!(next_bracket(&l, pos(1, 4), &all, 20000), Some(pos(2, 2)));
+        assert_eq!(next_bracket(&l, pos(0, 0), &|_, c| c != 1, 20000), Some(pos(0, 5)));
+        assert_eq!(next_bracket(&l, pos(2, 5), &all, 20000), None);
     }
 
     #[test]

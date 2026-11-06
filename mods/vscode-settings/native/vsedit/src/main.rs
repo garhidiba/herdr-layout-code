@@ -116,8 +116,8 @@ fn main() {
 
     let Ok(mut term) = Term::new() else { fallback("no raw mode") };
     let doc = open(&mut term, &file, &paint::Palette::of(&colors));
-    let hl = Highlight::start(vscode, term::wake);
-    let mut ed = Editor::new(file.clone(), doc, hl, index, &colors);
+    let hl = Highlight::start(vscode.clone(), term::wake);
+    let mut ed = Editor::new(file.clone(), doc, hl, index, &colors, vscode);
     let message = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let m = message.clone();
     std::panic::set_hook(Box::new(move |info| {

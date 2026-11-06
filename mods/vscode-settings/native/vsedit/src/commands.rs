@@ -13,12 +13,14 @@ use std::sync::OnceLock;
 /// What a command does in the editor.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Act {
-    /// A language feature, the context menu or the command palette: phase 3, still JS-only.
+    /// A language feature, the context menu, the command palette or a later JS batch (NOT_YET_IDS): phase 3.
     Lang,
     Copy(bool),
     Paste,
     QuickOpen,
     Save,
+    SaveAs,
+    SaveAll,
     ToggleAutoSave,
     AskAutoSaveDelay,
     OpenSettingsUi(bool),
@@ -28,6 +30,14 @@ pub enum Act {
     Undo,
     Redo,
     SelectAll,
+    ExpandLineSelection,
+    BlockComment,
+    FindWithSelection,
+    /// Find Next / Previous Selection
+    FindSelection(i32),
+    JumpToBracket,
+    SelectToBracket,
+    JoinLines,
     /// None toggles; Some(true) adds line comments, Some(false) removes them.
     Comment(Option<bool>),
     TrimTrailing,
@@ -75,21 +85,46 @@ pub enum FindOption {
     Regex,
 }
 
-/// What each command id runs (commands.cjs's RUNS); None for an id the editor doesn't know.
+/// Ids the JS editor has (or is getting) that wait for phase 3 here: language features (tsserver / LSP), the context
+/// menu and the command palette, and the JS editor's later batches (smart select, cursor undo, multiple cursors,
+/// suggestions, word wrap). Their keys say NOT_YET; the file stays in this editor.
+const NOT_YET_IDS: &[&str] = &[
+    "editor.action.revealDefinition", "editor.action.goToTypeDefinition", "editor.action.goToImplementation", "editor.action.goToReferences",
+    "editor.action.peekDefinition", "editor.action.referenceSearch.trigger", "editor.action.peekImplementation", "editor.action.peekTypeDefinition",
+    "references-view.findReferences", "references-view.findImplementations", "references-view.showCallHierarchy", "editor.action.rename",
+    "editor.action.changeAll", "editor.action.formatDocument", "editor.action.formatSelection", "editor.action.refactor",
+    "editor.action.sourceAction", "editor.action.quickFix", "editor.action.codeAction", "editor.action.organizeImports",
+    "editor.action.showHover", "editor.action.showDefinitionPreviewHover", "editor.action.triggerSuggest",
+    "editor.action.triggerParameterHints", "editor.action.revealDeclaration", "editor.action.peekDeclaration",
+    "workbench.action.showCommands", "workbench.action.gotoSymbol", "workbench.action.showAllSymbols", "editor.action.marker.next",
+    "editor.action.marker.prev", "editor.action.showContextMenu", "editor.action.smartSelect.expand", "editor.action.smartSelect.shrink",
+    "cursorUndo", "cursorRedo", "editor.action.insertCursorAbove", "editor.action.insertCursorBelow",
+    "editor.action.insertCursorAtEndOfEachLineSelected", "editor.action.selectHighlights", "editor.action.toggleWordWrap",
+];
+
+/// What each command id runs (commands.cjs's RUNS): `Lang` for NOT_YET_IDS; None for an id this editor has never heard
+/// of — keymap.json is then newer than the binary, and the file goes to the JS editor rather than lose a command.
 pub fn act_of(id: &str) -> Option<Act> {
     use Act::*;
+    if NOT_YET_IDS.contains(&id) {
+        return Some(Lang);
+    }
     Some(match id {
-        "editor.action.revealDefinition" | "editor.action.goToTypeDefinition" | "editor.action.goToImplementation" | "editor.action.goToReferences"
-        | "editor.action.peekDefinition" | "editor.action.referenceSearch.trigger" | "editor.action.peekImplementation"
-        | "editor.action.peekTypeDefinition" | "references-view.findReferences" | "references-view.findImplementations"
-        | "references-view.showCallHierarchy" | "editor.action.rename" | "editor.action.changeAll" | "editor.action.formatDocument"
-        | "editor.action.refactor" | "editor.action.sourceAction" | "workbench.action.showCommands" | "workbench.action.gotoSymbol"
-        | "editor.action.marker.next" | "editor.action.marker.prev" | "editor.action.showContextMenu" => Lang,
         "editor.action.clipboardCutAction" => Copy(true),
         "editor.action.clipboardCopyAction" => Copy(false),
         "editor.action.clipboardPasteAction" => Paste,
         "workbench.action.quickOpen" => QuickOpen,
         "workbench.action.files.save" => Save,
+        "workbench.action.files.saveAs" => SaveAs,
+        "workbench.action.files.saveAll" => SaveAll,
+        "expandLineSelection" => ExpandLineSelection,
+        "editor.action.blockComment" => BlockComment,
+        "actions.findWithSelection" => FindWithSelection,
+        "editor.action.nextSelectionMatchFindAction" => FindSelection(1),
+        "editor.action.previousSelectionMatchFindAction" => FindSelection(-1),
+        "editor.action.jumpToBracket" => JumpToBracket,
+        "editor.action.selectToBracket" => SelectToBracket,
+        "editor.action.joinLines" => JoinLines,
         "workbench.action.files.toggleAutoSave" => ToggleAutoSave,
         "workbench.action.files.setAutoSaveDelay" => AskAutoSaveDelay,
         "workbench.action.openSettings" => OpenSettingsUi(false),
@@ -491,6 +526,16 @@ mod tests {
         assert!(commands().len() > 100, "keymap.json was not read");
         assert!(by_id("cursorHome").is_some() && by_id("deleteAllRight").is_some());
         assert!(parse_keymap(&json!({ "commands": [{ "id": "no.such", "keys": {} }] })).is_err());
+    }
+
+    #[test]
+    fn phase_3_ids_say_not_yet_and_only_unheard_of_ids_send_the_file_to_js() {
+        for id in ["editor.action.quickFix", "editor.action.showHover", "cursorUndo", "workbench.action.showAllSymbols", "editor.action.rename"] {
+            assert_eq!(act_of(id), Some(Act::Lang), "{id}");
+        }
+        assert_eq!(act_of("editor.action.joinLines"), Some(Act::JoinLines));
+        assert_eq!(act_of("editor.action.somethingNew"), None);
+        assert!(parse_keymap(&json!({ "commands": [{ "id": "editor.action.formatSelection", "keys": {} }] })).is_ok());
     }
 
     #[test]

@@ -230,20 +230,38 @@ pub struct Picker<T> {
     pub index: usize,
     top: usize,
     pub cursor: (i32, i32),
+    /// Go to File: ":<line>" offers this (with the text after ':'), and at most 300 matches show.
+    goto_line: Option<fn(String) -> T>,
 }
 
 impl<T: Clone> Picker<T> {
     pub fn new(placeholder: &str, choices: Vec<(String, String, T)>, index: usize) -> Picker<T> {
-        let mut p = Picker { text: String::new(), placeholder: placeholder.into(), choices, items: vec![], index: 0, top: 0, cursor: (2, 1) };
+        let mut p = Picker { text: String::new(), placeholder: placeholder.into(), choices, items: vec![], index: 0, top: 0, cursor: (2, 1), goto_line: None };
         p.refresh();
         p.index = index.min(p.items.len().saturating_sub(1));
         p
     }
 
+    /// Go to File (Quick Open): the files, filtered as typed; ":<line>" goes to a line of the current file.
+    pub fn quick_open(placeholder: &str, files: Vec<(String, String, T)>, goto_line: fn(String) -> T) -> Picker<T> {
+        let mut p = Picker::new(placeholder, files, 0);
+        p.goto_line = Some(goto_line);
+        p.refresh();
+        p
+    }
+
     fn refresh(&mut self) {
+        if let (Some(go), Some(line)) = (self.goto_line, self.text.strip_prefix(':')) {
+            let label = if line.is_empty() { "Type a line number to go to".to_string() } else { format!("Go to line {line}") };
+            self.items = vec![Item { label, detail: String::new(), hits: vec![], act: go(line.to_string()) }];
+            (self.index, self.top) = (0, 0);
+            return;
+        }
         let labels: Vec<&str> = self.choices.iter().map(|c| c.0.as_str()).collect();
-        self.items = filter(&labels, &self.text)
+        let limit = if self.goto_line.is_some() { 300 } else { usize::MAX };
+        self.items = filter(&labels, self.text.trim())
             .into_iter()
+            .take(limit)
             .map(|(i, hits)| Item { label: self.choices[i].0.clone(), detail: self.choices[i].1.clone(), hits, act: self.choices[i].2.clone() })
             .collect();
         self.index = 0;
