@@ -29,6 +29,8 @@ function paletteOf(colors = {}) {
     peek: opaque(colors["peekViewEditor.background"]) ?? "#1b1d23", peekLine: opaque(colors["list.activeSelectionBackground"]) ?? "#2c313a",
   };
 }
+// The palette of the installed theme.json (the defaults when it can't be read).
+function themePalette() { try { return paletteOf(require("./highlight.cjs").loadTheme().colors); } catch { return paletteOf(); } }
 const fgSGR = (c) => { const [r, g, b] = hex(c); return `\x1b[38;2;${r};${g};${b}m`; };
 const bgSGR = (c) => { const [r, g, b] = hex(c); return `\x1b[48;2;${r};${g};${b}m`; };
 const styleSGR = (s) => "\x1b[22;23;24;29m" + (s & 1 ? "\x1b[3m" : "") + (s & 2 ? "\x1b[1m" : "") + (s & 4 ? "\x1b[4m" : "") + (s & 8 ? "\x1b[9m" : "");
@@ -57,4 +59,4 @@ function fit(s, width) {
   return out + " ".repeat(width - w);
 }
 
-module.exports = { hex, opaque, blend, paletteOf, fgSGR, bgSGR, styleSGR, Painter, fit };
+module.exports = { hex, opaque, blend, paletteOf, themePalette, fgSGR, bgSGR, styleSGR, Painter, fit };

@@ -32,13 +32,13 @@ ISOLATED = {}
 
 
 class Term:
-    def __init__(self, file, cols=100, rows=30, env=None):
+    def __init__(self, file, cols=100, rows=30, env=None, args=()):
         pid, fd = pty.fork()
         if pid == 0:
             e = {k: v for k, v in os.environ.items() if k != "HC_TERMINAL_ID"}
             e.update(ISOLATED)
             e.update(env or {})
-            os.execvpe("node", ["node", EDITOR, file], e)
+            os.execvpe("node", ["node", EDITOR, file, *args], e)
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
         self.pid, self.fd, self.out = pid, fd, b""
 
@@ -174,18 +174,26 @@ def screen_of(t):
     return t.out.decode("utf8", "replace")
 
 
-def run_menu_and_cmd_save(tmp):
-    """Right-click (SGR button 2) opens VS Code's context menu; Herdr is told to route right-clicks; Preferences: Open Settings
-    asks Herdr for the Settings dialog; Kitty ⌘S saves."""
+def herdr_stub(tmp):
+    """A herdr-app on PATH that logs its arguments: (env for Term, log path)."""
     stub = os.path.join(tmp, "stub")
     os.makedirs(stub, exist_ok=True)
     log = os.path.join(tmp, "herdr.log")
     with open(os.path.join(stub, "herdr-app"), "w") as f:
         f.write(f'#!/bin/sh\necho "$@" >> "{log}"\n')
     os.chmod(os.path.join(stub, "herdr-app"), 0o755)
+    if os.path.exists(log):
+        os.remove(log)
+    return {"HC_TERMINAL_ID": "term-7", "PATH": stub + ":" + os.environ["PATH"]}, log
+
+
+def run_menu_and_cmd_save(tmp):
+    """Right-click (SGR button 2) opens VS Code's context menu; Herdr is told to route right-clicks; Preferences: Open Settings
+    asks Herdr for the Settings dialog; Kitty ⌘S saves."""
+    env, log = herdr_stub(tmp)
     file = os.path.join(tmp, "menu.txt")
     open(file, "w").write("hello world\n")
-    t = Term(file, env={"HC_TERMINAL_ID": "term-7", "PATH": stub + ":" + os.environ["PATH"]})
+    t = Term(file, env=env)
     assert t.read("Ln 1, Col 1"), "no first frame"
     assert "\x1b[>1u" in screen_of(t) and "\x1b[?1004h" in screen_of(t), "Kitty keyboard / focus reports not enabled"
     t.send("\x1b[<2;20;2M\x1b[<2;20;2m")
@@ -211,6 +219,7 @@ def run_menu_and_cmd_save(tmp):
     assert "do terminal.right_click --to program --terminal term-7" in calls, calls
     assert "do terminal.right_click --to menu --terminal term-7" in calls, calls
     assert "do mod.open --name vscode-settings" in calls, calls
+    assert "terminal.kill" not in calls, "started by hand (no --close-on-exit): the terminal stays"
     print("menu + ⌘S: ok")
 
 
@@ -376,11 +385,46 @@ def run_hex(tmp):
     print("hex viewer: ok")
 
 
+def run_error_page(tmp):
+    """From the Explorer (--close-on-exit): a missing file shows the error page, Try Again opens it once it exists,
+    quitting kills the terminal; an unreadable file says Permission denied and Esc closes the tab, printing nothing."""
+    env, log = herdr_stub(tmp)
+    file = os.path.join(tmp, "later.txt")
+    t = Term(file, env=env, args=["--close-on-exit"])
+    assert t.read("The editor could not be opened", timeout=3), "no error page:\n" + plain(t)[-400:]
+    assert t.read(" Close ", timeout=2) and "File not found" in plain(t) and "later.txt" in plain(t)
+    assert " Try Again " in plain(t) and " Open in VS Code " in plain(t)
+    t.out = b""
+    t.send("\r", wait=0.3)                        # Try Again: still missing
+    assert t.read("File not found", timeout=2)
+    open(file, "w").write("now here\n")
+    t.out = b""
+    t.send("t", wait=0.3)                         # Try Again
+    assert t.read("Ln 1, Col 1", timeout=5), "Try Again did not open the file:\n" + plain(t)[-400:]
+    t.send("\x11")
+    assert t.wait_exit() == 0
+    assert open(log).read().count("do terminal.kill --terminal term-7") == 1, open(log).read()
+
+    env, log = herdr_stub(tmp)
+    locked = os.path.join(tmp, "locked.txt")
+    open(locked, "w").write("secret\n")
+    os.chmod(locked, 0)
+    t = Term(locked, env=env, args=["--close-on-exit"])
+    assert t.read("Permission denied", timeout=3), "no Permission denied:\n" + plain(t)[-400:]
+    t.send("\x1b[27u")                            # Esc = Close
+    assert t.wait_exit() == 1
+    assert "do terminal.kill --terminal term-7" in open(log).read()
+    tail = plain(t)[plain(t).rfind("\x1b[?1049l"):]
+    assert "vsedit" not in tail and "Permission" not in tail, "error printed into the shell: " + repr(tail)
+    os.chmod(locked, 0o644)
+    print("error page + close on exit: ok")
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="vsedit-e2e-")
     ISOLATED.update(VSEDIT_SETTINGS=os.path.join(tmp, "settings", "vscode-settings.json"), VSEDIT_BACKUPS=os.path.join(tmp, "backups"))
     try:
-        run_tsx(tmp); run_go(tmp); run_crlf(tmp); run_hex(tmp)
+        run_tsx(tmp); run_go(tmp); run_crlf(tmp); run_hex(tmp); run_error_page(tmp)
         run_menu_and_cmd_save(tmp); run_save_dialog(tmp); run_auto_save(tmp); run_hot_exit(tmp)
         run_format(tmp); run_typescript(tmp)
     finally:

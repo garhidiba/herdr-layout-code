@@ -1,5 +1,5 @@
-// Terminal session shared by the editor and the hex viewer: the alternate screen and input modes, Herdr right-click
-// routing, and a raw-input loop that turns keys/mouse into events for a full-screen app.
+// Terminal session shared by the editor, the hex viewer and the error page: the alternate screen and input modes, Herdr
+// right-click routing, a raw-input loop that turns keys/mouse into events for a full-screen app, closing the tab on exit.
 const os = require("os");
 const { spawn, spawnSync } = require("child_process");
 const { parse } = require("./keys.cjs");
@@ -58,8 +58,18 @@ function session(app) {
   for (const [target, name, fn] of handlers) target.on(name, fn);
   process.stdout.write(ENTER);
   rightClicksTo("program", false);
-  frame();
+  draw();
   return { draw, end };
 }
 
-module.exports = { ENTER, LEAVE, herdr, rightClicksTo, session };
+// Opened from the Explorer (`--close-on-exit`) inside a Herdr terminal: leaving the program also closes its tab, instead
+// of leaving the shell Herdr keeps open after the program ends.
+const closesTab = () => process.argv.includes("--close-on-exit") && !!process.env.HC_TERMINAL_ID;
+
+// Exits; when closesTab(), first kills the Herdr terminal (its pane, and so the tab, closes). Restore the terminal first.
+function exit(code = 0) {
+  if (closesTab()) herdr(["do", "terminal.kill", "--terminal", process.env.HC_TERMINAL_ID], true);
+  process.exit(code);
+}
+
+module.exports = { ENTER, LEAVE, herdr, rightClicksTo, session, closesTab, exit };

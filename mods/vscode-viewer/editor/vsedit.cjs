@@ -24,6 +24,7 @@ const { wordOccurrences, Fallback } = require("./lang/fallback.cjs");
 const { gitRoot, run, which } = require("./lang/proc.cjs");
 const T = require("./terminal.cjs");
 const HV = require("./hexview.cjs");
+const E = require("./errorpage.cjs");
 
 // VS Code's "Col": characters before the cursor, tabs counted to the next tab stop.
 function visibleColumn(line, index, tab) {
@@ -995,15 +996,18 @@ async function main() {
   const file = path.resolve(arg);
   if (!process.stdin.isTTY || !process.stdout.isTTY) { process.stderr.write("vsedit: needs a terminal\n"); process.exit(1); }
   let doc;
-  try {
-    // Binary: straight to hex for known binary names, else ask first (Open Anyway decodes it as text, lossy).
-    doc = HV.binaryName(file) ? { binary: true } : F.load(file);
-    if (doc.binary && (await HV.open(file, { ask: !HV.binaryName(file), crumbs: breadcrumbs(file), clipboard: writeClipboard })) === "text") doc = F.load(file, { lossy: true });
-  } catch (e) {
-    if (e.code !== "ENOENT") { process.stderr.write(`vsedit: ${e.message}\n`); process.exit(1); }
-    doc = { lines: [""], eol: "\n", finalNewline: true, bom: false, stamp: null };
+  for (;;) { // a file that can't be opened shows the error page; Try Again comes back here
+    try {
+      // Binary: straight to hex for known binary names, else ask first (Open Anyway decodes it as text, lossy).
+      doc = HV.binaryName(file) ? { binary: true } : F.load(file);
+      if (doc.binary && (await HV.open(file, { ask: !HV.binaryName(file), crumbs: breadcrumbs(file), clipboard: writeClipboard })) === "text") doc = F.load(file, { lossy: true });
+    } catch (e) {
+      // Started by hand, a missing file is a new one; the Explorer only opens files that exist.
+      doc = e.code === "ENOENT" && !T.closesTab() ? { lines: [""], eol: "\n", finalNewline: true, bom: false, stamp: null } : { error: E.reasonOf(e) };
+    }
+    if (!doc.error) break;
+    await E.show(file, doc.error, breadcrumbs(file));
   }
-  if (doc.error) { process.stderr.write(`vsedit: ${path.basename(file)}: ${doc.error}\n`); process.exit(1); }
 
   const settings = S.load();
   const index = H.loadIndex(), theme = H.loadTheme(), scope = L.scopeOf(index, path.basename(file));
@@ -1023,7 +1027,7 @@ async function main() {
   const hotExit = (code) => { ed.hotExit(); restore(); process.exit(code); };
   process.on("exit", restore);
   for (const sig of ["SIGTERM", "SIGHUP", "SIGINT"]) process.on(sig, () => hotExit(128 + (os.constants.signals[sig] ?? 1)));
-  process.on("uncaughtException", (e) => { try { ed.hotExit(); } catch {} restore(); process.stderr.write(`vsedit crashed: ${e && e.stack || e}\n`); process.exit(1); });
+  process.on("uncaughtException", (e) => { try { ed.hotExit(); } catch {} restore(); crashed(file, e); });
   process.stdin.on("end", () => hotExit(129));
   process.stdin.on("error", () => hotExit(129));
   process.stdout.on("error", () => hotExit(129));
@@ -1047,7 +1051,7 @@ async function main() {
   };
   const schedule = () => { if (!scheduled) { scheduled = true; setImmediate(draw); } };
   ed.redraw = () => { ed.afterEvent(); schedule(); };
-  ed.onExit = () => { restore(); process.exit(0); };
+  ed.onExit = () => { restore(); T.exit(0); };
   Lang.setApplyEdit((ws) => { ed.applyEdit(ws); schedule(); return true; });
   setInterval(() => { if (ed.pollSettings()) schedule(); }, 2000).unref();
 
@@ -1065,5 +1069,15 @@ async function main() {
   draw();
 }
 
-if (require.main === module) main();
+// A crash shows the error page (unsaved text is already in a backup); Try Again starts the editor again in this terminal.
+let crashing = false;
+async function crashed(file, e) {
+  if (crashing) { process.stderr.write(`vsedit crashed: ${e && e.stack || e}\n`); process.exit(1); }
+  crashing = true;
+  await E.show(file, `vsedit crashed: ${E.reasonOf(e)}`, breadcrumbs(file));
+  process.stdin.pause(); // the restarted editor reads the terminal
+  process.exit(spawnSync(process.execPath, process.argv.slice(1), { stdio: "inherit" }).status ?? 1);
+}
+
+if (require.main === module) main().catch((e) => crashed(path.resolve(process.argv[2]), e));
 module.exports = { Editor, paletteOf, blend, wordLeft, wordRight, breadcrumbs };

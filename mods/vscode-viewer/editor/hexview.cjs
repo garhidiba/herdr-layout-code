@@ -2,10 +2,9 @@
 // chunks (never the whole file), go to offset, find hex bytes or text, a data inspector, copy as hex. Also the
 // "this file is binary" prompt the editor shows before it.
 const fs = require("fs");
-const { paletteOf, Painter, fit } = require("./paint.cjs");
+const { Painter, fit, themePalette } = require("./paint.cjs");
 const { Dialog, Input } = require("./overlays.cjs");
 const { chordOf } = require("./commands.cjs");
-const H = require("./highlight.cjs");
 const T = require("./terminal.cjs");
 
 // Names that are clearly binary: these skip the prompt and open in hex right away.
@@ -289,21 +288,21 @@ class BinaryPrompt {
   }
 }
 
-let theme = null;
-const colorsOf = () => paletteOf((theme ??= (() => { try { return H.loadTheme(); } catch { return {}; } })()).colors);
-
 // Shows `file` in hex (after the binary prompt when `ask`). Resolves "text" when the user picks Open Anyway (the terminal
-// is restored first); quitting exits the process. Throws before touching the screen when the file can't be opened.
-// opts: { ask, crumbs, clipboard(text), onExit?() }
-function open(file, { ask = false, crumbs, clipboard, onExit = () => process.exit(0) }) {
+// is restored first); quitting exits the process (closing the tab when the Explorer opened it). Rejects, with the
+// terminal restored, when the file can't be opened or read.
+// opts: { ask, crumbs, clipboard(text) }
+function open(file, { ask = false, crumbs, clipboard }) {
   const fd = fs.openSync(file, "r"), reader = new Reader(fd, fs.fstatSync(fd).size);
-  const env = { file, crumbs, colors: colorsOf(), clipboard };
-  return new Promise((resolve) => {
+  const env = { file, crumbs, colors: themePalette(), clipboard };
+  return new Promise((resolve, reject) => {
     const viewer = new HexView(reader, env);
     let s = null, app = viewer;
-    viewer.onExit = () => { s.end(); onExit(); };
+    viewer.onExit = () => { s.end(); T.exit(0); };
     if (ask) app = new BinaryPrompt(env, () => { app = viewer; }, () => { s.end(); fs.closeSync(fd); resolve("text"); }, viewer.onExit);
-    s = T.session({ render: (r, c) => app.render(r, c), handle: (ev) => app.handle(ev) });
+    // A read error later on (file removed, disk gone) ends the session and goes to the caller like an open error.
+    const guard = (fn) => (...a) => { try { return fn(...a); } catch (e) { s.end(); try { fs.closeSync(fd); } catch {} reject(e); return ""; } };
+    s = T.session({ render: guard((r, c) => app.render(r, c)), handle: guard((ev) => app.handle(ev)) });
     viewer.redraw = s.draw;
   });
 }
