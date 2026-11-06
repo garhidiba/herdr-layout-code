@@ -9,7 +9,7 @@ A VS Code–style layout for [Herdr](https://herdr.dev):
 - **Explorer menu:** VS Code's right-click menu (new, open with, reveal, cut/copy/paste, copy path, rename, delete to Trash).
 - **Pane menu:** Open in VS Code / Finder.
 - **Status bar:** Claude and Codex usage meters; Codex limit resets can be redeemed from the card; a gear for Settings.
-- **Settings:** a VS Code-style dialog (gear, `cmd-,`, or the editor's Preferences: Open Settings) for auto save, trim/final newline, format on save, tab size and the core engine (JavaScript or the optional Rust core).
+- **Settings:** a VS Code-style dialog (gear, `cmd-,`, or the editor's Preferences: Open Settings) for auto save, trim/final newline, format on save, tab size and the core engine (JavaScript or the optional Rust core), with a **Keyboard Shortcuts** page (or the editor's Preferences: Open Keyboard Shortcuts) to change, remove and reset the editor's keys.
 
 See [RECIPE.md](RECIPE.md) for exactly what it does and how it is built.
 
@@ -20,7 +20,7 @@ Ask your agent in Herdr: *"add the layout from github.com/garhidiba/herdr-layout
 To install by hand:
 
 1. Copy `layouts/vscode.json` into `~/.config/herdr-app/layouts/` and the `mods/*` folders into `~/.config/herdr-app/mods/`.
-2. Merge `keys.json` into yours. Copy `vscode-settings.json` to `~/.config/herdr-app/` only if you don't have one (the editor creates it with the defaults otherwise).
+2. Merge `keys.json` into yours. Copy `vscode-settings.json` to `~/.config/herdr-app/` only if you don't have one (the editor creates it with the defaults otherwise). `vscode-keybindings.json` is the editor's user keybindings file, empty (`[]`, no custom keys); copy it only if you don't have one. It takes VS Code's format, `[{ "key": "cmd+shift+d", "command": "editor.action.deleteLines" }]`, and `"command": "-editor.action.deleteLines"` removes a default; the Keyboard Shortcuts page writes it for you.
 3. Run `herdr-app check` on each mod.
 4. Switch with `ctrl-shift-l`, or run `herdr-app do layout.switch --name vscode`.
 
@@ -46,6 +46,7 @@ Optional Claude meter: set Claude Code's `statusLine.command` to `sh ~/.config/h
 - Without a server: `git grep` / `grep -r` (Go to Definition and references by word), `gofmt`, `rustfmt`, `prettier` (Format Document)
 - `cp`, `mv`, `mkdir`, `test`, `pbcopy`, `trash` or `osascript` (Explorer menu)
 - With `"core.engine": "rust"` only: `<herdr home>/vscode-core/vscode-core` (`--version`, `tree`, `repos`, `repo`, `commit-files`, `all`; it runs `git` itself), instead of the Explorer's and Source Control's `sh`/`find`/`git` reads
+- `node mods/vscode-viewer/editor/keybindings.cjs --table` (Settings: the Keyboard Shortcuts table, when it opens and when `vscode-keybindings.json` changes)
 - `<herdr home>/vscode-core/vscode-core --version` (Settings: Rust core status), `sh` + `mods/vscode-settings/native/install.sh` → `cargo` (Build Rust core, only when you click it)
 - `code` (Open in VS Code), `open` (Finder, Reveal in Finder, System Default)
 - `stat`, `cp`, `sips` (image preview: copies the image into `mods/vscode-viewer/.cache/`)
