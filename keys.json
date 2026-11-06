@@ -24,7 +24,17 @@
     "alt-shift-f12": "terminal",
     "shift-f10": "terminal",
     "ctrl--": "terminal",
-    "ctrl-shift--": "terminal"
+    "ctrl-shift--": "terminal",
+    "cmd-s": "terminal",
+    "f2": "terminal",
+    "cmd-w": "terminal",
+    "cmd-p": "terminal",
+    "cmd-shift-p": "terminal",
+    "cmd-d": "terminal",
+    "cmd-/": "terminal",
+    "cmd-[": "terminal",
+    "cmd-]": "terminal",
+    "cmd-shift-enter": "terminal"
   },
   "layout:vscode": {
     "cmd-e": "layout.toggle:panel",
