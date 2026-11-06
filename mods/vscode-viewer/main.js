@@ -1,8 +1,9 @@
 // A file editor for a tab: props { file: absolute path, on?: machine }.
 // Opens straight into Herdr's built-in editor (Atom One Dark colors, VS Code's file-type recognition from langs.json),
 // saves with Cmd+S ("vscode-viewer.save" in keys.json), flags changes on disk, and shows a VS Code-style status bar.
-import { View, div, image } from "gpui-kit";
-import { v_flex, h_flex, Editor, EditorState } from "gpui-base";
+// Images open as a preview; markdown opens rendered, with Edit to switch to the editor.
+import { View, div, image, PathBuilder, Background } from "gpui-kit";
+import { v_flex, h_flex, Editor, EditorState, TextView } from "gpui-base";
 import { props, readTextFile, writeTextFile, exec, theme, appHome, nextCommand } from "herdr";
 
 const ONE_DARK = {
@@ -40,6 +41,24 @@ const extOf = (name) => { const n = name.toLowerCase(), e = n.includes(".") ? n.
 // Atom One Dark editor colors (akamud.vscode-theme-onedark: editor.background / editor.foreground).
 const EDITOR_BG = "#282c34", EDITOR_FG = "#abb2bf";
 
+// What the tab shows: an image preview, markdown (preview + editor) or code. Images: extension -> format name.
+const IMAGES = { png: "PNG", jpg: "JPEG", jpeg: "JPEG", gif: "GIF", webp: "WebP", bmp: "BMP", ico: "ICO", svg: "SVG", tif: "TIFF", tiff: "TIFF" };
+const MARKDOWN = ["md", "markdown", "mdx", "mkd"];
+function kindOf(name) {
+  const n = name.toLowerCase(), e = n.includes(".") ? n.split(".").pop() : "";
+  return IMAGES[e] ? "image" : MARKDOWN.includes(e) ? "markdown" : "code";
+}
+const sizeText = (b) => b < 1024 ? `${b} B` : b < 1048576 ? `${(b / 1024).toFixed(1)} KB` : `${(b / 1048576).toFixed(1)} MB`;
+// `sips -g pixelWidth -g pixelHeight` output -> "W × H" (null when it has none).
+function sipsSize(out) {
+  const w = /pixelWidth: (\d+)/.exec(out ?? ""), h = /pixelHeight: (\d+)/.exec(out ?? "");
+  return w && h ? `${w[1]} × ${h[1]}` : null;
+}
+// image() only loads from the app's folder, so images are copied to <app>/mods/vscode-viewer/.cache/<path hash>-<mtime>-<size>.<ext>.
+const CACHE = "mods/vscode-viewer/.cache";
+const pathHash = (s) => { let h = 5381; for (const c of s) h = (h * 33 ^ c.charCodeAt(0)) >>> 0; return h.toString(36); };
+const RECT = () => PathBuilder.fill().move_to("0%", "0%").line_to("100%", "0%").line_to("100%", "100%").line_to("0%", "100%").close().build();
+
 const tables = {};  // shared by every viewer: highlighter names (langs.json) and VS Code language scopes (vscode/index.json)
 const tableReady = (path) => tables[path] ??= readTextFile(`${appHome()}/mods/vscode-viewer/${path}`).then(t => JSON.parse(t)).catch(() => ({ ext: {}, files: {}, prefixes: {} }));
 
@@ -73,6 +92,7 @@ export default class Viewer extends View {
     this.text = null;          // what is on disk, as last read or written
     this.code = null; this.dirty = false; this.conflict = false; this.wrap = false;
     this.error = null; this.table = null; this.language = "Plain Text"; this.facts = null;
+    this.kind = kindOf(this.file ?? ""); this.preview = this.kind === "markdown"; this.img = null;
     this.load(cx);
     cx.timer.every(3000, cx => this.load(cx));
     cx.spawn(async cx => { for (;;) { const c = await nextCommand(); if (c === "save") await this.save(cx); } });
@@ -97,6 +117,7 @@ export default class Viewer extends View {
           const scope = lookup(this.file.split("/").pop(), await tableReady("vscode/index.json"));
           this.language = scope ? NAMES[scope] ?? scope.replace(/^(source|text)\./, "") : "Plain Text";
         }
+        if (this.kind === "image") return await this.loadImage();
         const disk = await readTextFile(this.file, { on: this.on });
         if (disk === null) this.error = "This file is no longer available";
         else if (disk.includes("\0")) { this.code?.release(); this.code = null; this.error = "Binary file · no text preview"; }
@@ -105,8 +126,26 @@ export default class Viewer extends View {
           else { this.error = null; this.conflict = false; this.text = disk; this.facts = facts(disk); this.build(disk); }
         }
       } catch { this.error = "Cannot open this file (binary or larger than 1 MiB)"; }
-      cx.notify();
+      finally { cx.notify(); }
     });
+  }
+
+  // Re-copies the image into the cache when its mtime or size changes, dropping this file's older copies.
+  async loadImage() {
+    if (this.on) { this.error = "Image preview is local only"; return; }
+    if (this.copying) return;
+    this.copying = true;
+    try {
+      const st = await exec("sh", ["-c", `stat -f '%m %z' "$1" 2>/dev/null || stat -c '%Y %s' "$1"`, "sh", this.file]);
+      const [mtime, size] = st.stdout.trim().split(" ").map(Number);
+      if (st.code !== 0 || !Number.isFinite(size)) { this.img = null; this.error = "This file is no longer available"; return; }
+      if (this.img?.key === `${mtime}-${size}`) return;
+      const id = pathHash(this.file), name = `${id}-${mtime}-${size}.${extOf(this.file)}`;
+      const cp = await exec("sh", ["-c", `mkdir -p "$1" && rm -f "$1/$2"-* && cp "$3" "$1/$4"`, "sh", `${appHome()}/${CACHE}`, id, this.file, name]);
+      if (cp.code !== 0) { this.img = null; this.error = "Cannot preview this image"; return; }
+      const dims = await exec("sips", ["-g", "pixelWidth", "-g", "pixelHeight", this.file]).then(r => sipsSize(r.stdout)).catch(() => null);
+      this.img = { key: `${mtime}-${size}`, path: `${CACHE}/${name}`, size, dims }; this.error = null;
+    } finally { this.copying = false; }
   }
 
   // Writes only if the disk still holds what was loaded; otherwise the conflict banner decides.
@@ -129,8 +168,20 @@ export default class Viewer extends View {
     cx.notify();
   }
 
+  body(t) {
+    if (this.kind === "image") return this.img
+      ? v_flex().flex_1().min_h(0).relative().items_center().justify_center().p(16).overflow_hidden().bg(EDITOR_BG)
+        .child(window.paint_path(RECT(), Background.checkerboard("#323842", 8)).absolute().top(0).left(0).size_full())
+        .child(image(this.img.path).max_w("100%").max_h("100%"))
+      : div().p(12).text_color(t.dim).child(this.error || "Loading image…");
+    if (!this.code) return div().p(12).text_color(t.dim).child(this.error || "Loading file…");
+    if (this.preview) return TextView.markdown("preview", this.code.value()).scrollable(true).selectable(true)
+      .flex_1().min_h(0).px(28).py(16).bg(EDITOR_BG).text_color(EDITOR_FG).text_size(14);
+    return Editor.new(this.code).flex_1().min_h(0).bg(EDITOR_BG).text_color(EDITOR_FG);
+  }
+
   render() {
-    const t = theme(), parts = (this.file ?? "").split("/").filter(Boolean), name = parts[parts.length - 1] ?? "";
+    const t = theme(), text = this.kind !== "image", parts = (this.file ?? "").split("/").filter(Boolean), name = parts[parts.length - 1] ?? "";
     // Ghost buttons like VS Code's editor actions: no fill until hovered or active.
     const button = (id, label, onClick, on = false) => div().id(id).px(7).h(22).flex().items_center().rounded(4).cursor_pointer().text_size(11.5)
       .text_color(on ? t.foreground : t.muted).when(on, el => el.bg(t.selected)).hover(s => s.bg(t.hover)).on_click((_e, cx) => onClick(cx)).child(label);
@@ -143,19 +194,21 @@ export default class Viewer extends View {
       .child(h_flex().h(30).flex_none().pl(16).pr(10).gap(6).items_center()
         .child(crumbs)
         .when(this.dirty, el => el.child(div().size(8).rounded(4).bg("#e5c07b").flex_none()))
-        .child(button("wrap", "Wrap", cx => this.toggleWrap(cx), this.wrap))
+        .when(this.kind === "markdown", el => el.child(button("preview", this.preview ? "Edit" : "Preview", cx => { this.preview = !this.preview; cx.notify(); })))
+        .when(text && !this.preview, el => el.child(button("wrap", "Wrap", cx => this.toggleWrap(cx), this.wrap)))
         .when(this.dirty, el => el.child(button("revert", "Revert", cx => this.revert(cx))))
         .when(!this.on, el => el.child(button("vscode", "Open in VS Code", () => exec("code", [this.file]).catch(() => {}))))
-        .when(!this.on, el => el.child(button("save", this.dirty ? "Save ⌘S" : "Saved", cx => this.save(cx), this.dirty))))
+        .when(text && !this.on, el => el.child(button("save", this.dirty ? "Save ⌘S" : "Saved", cx => this.save(cx), this.dirty))))
       .when(this.conflict, el => el.child(h_flex().flex_none().px(14).py(6).gap(10).items_center().bg(t.chrome).border_b(1).border_color(t.border).text_size(12)
         .child(div().flex_1().text_color("#e5c07b").child("This file changed on disk."))
         .child(button("reload", "Reload (discard my edits)", cx => this.revert(cx)))
         .child(button("overwrite", "Overwrite", cx => this.save(cx, true)))))
-      .child(this.code ? Editor.new(this.code).flex_1().min_h(0).bg(EDITOR_BG).text_color(EDITOR_FG) : div().p(12).text_color(t.dim).child(this.error || "Loading file…"))
+      .child(this.body(t))
       .child(h_flex().h(22).flex_none().px(12).gap(16).items_center().bg(t.chrome).border_t(1).border_color(t.border).text_size(11.5).text_color(t.muted)
-        .child(div().child(this.language))
+        .child(div().child(text ? this.language : IMAGES[extOf(this.file)]))
         .when(this.on, el => el.child(div().child("Read-only (remote)")))
         .child(div().flex_1())
+        .when(Boolean(this.img), el => el.when(Boolean(this.img.dims), el => el.child(div().child(this.img.dims))).child(div().child(sizeText(this.img.size))))
         .when(Boolean(this.facts), el => el.child(div().child(`${this.facts.lines.toLocaleString()} lines`)).child(div().child(this.facts.indent)).child(div().child("UTF-8")).child(div().child(this.facts.eol))));
   }
 }
