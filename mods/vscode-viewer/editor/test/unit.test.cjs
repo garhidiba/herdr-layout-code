@@ -203,3 +203,45 @@ test("function keys, Shift+F10, the menu key and focus reports", () => {
   assert.deepEqual(parse("\x1b[<2;10;5M").events[0], { type: "mouse", button: 2, x: 10, y: 5, release: false, motion: false, shift: false, alt: false, ctrl: false });
   assert.equal(parse("\x1b[115;9").rest, "\x1b[115;9"); // split sequence waits for the rest
 });
+
+// ---------- language fallbacks and workspace edits ----------
+const FB = require("../lang/fallback.cjs");
+const E = require("../lang/edits.cjs");
+
+test("without a server, Go to Definition searches the git root for definition keywords", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vsedit-fb-"));
+  require("child_process").spawnSync("git", ["init", "-q"], { cwd: dir });
+  fs.writeFileSync(path.join(dir, "a.go"), "package main\n\nfunc (s *Server) Handle() {}\n\nfunc main() { s.Handle(); HandleAll() }\n");
+  fs.writeFileSync(path.join(dir, "b.py"), "def Handle():\n    pass\n");
+  require("child_process").spawnSync("git", ["add", "."], { cwd: dir });
+  const fb = new FB.Fallback(path.join(dir, "a.go"), "source.go", dir);
+  const defs = await fb.definition({ file: path.join(dir, "a.go"), word: "Handle" });
+  assert.deepEqual(defs.map(d => [path.basename(d.file), d.line, d.col]), [["a.go", 2, 17], ["b.py", 0, 4]]);
+  const refs = await fb.references({ word: "Handle" });
+  assert.equal(refs.length, 3); // whole word: HandleAll is not one
+  assert.ok(fb.can("definition") && fb.can("rename") && !fb.can("callHierarchy"));
+});
+
+test("whole-word occurrences and edits applied last-first", () => {
+  const lines = ["let a = ab + a;", "a(a)"];
+  const occ = FB.wordOccurrences(lines, "a", "xyz");
+  assert.equal(occ.length, 4);
+  assert.deepEqual(E.applyToLines(lines, occ), ["let xyz = ab + xyz;", "xyz(xyz)"]);
+  assert.deepEqual(E.applyToLines(["abc", "def"], [{ start: { line: 0, col: 1 }, end: { line: 1, col: 1 }, text: "X\r\nY" }]), ["aX", "Yef"]);
+});
+
+test("a workspace edit rewrites closed files keeping CRLF, and gives open files to the editor", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vsedit-ws-"));
+  const a = path.join(dir, "a.ts"), b = path.join(dir, "b.ts");
+  fs.writeFileSync(a, "foo();\r\nfoo();\r\n"); fs.writeFileSync(b, "x");
+  const seen = [];
+  const r = E.applyWorkspaceEdit({
+    [a]: [{ start: { line: 0, col: 0 }, end: { line: 0, col: 3 }, text: "bar" }, { start: { line: 1, col: 0 }, end: { line: 1, col: 3 }, text: "bar" }],
+    [b]: [{ start: { line: 0, col: 0 }, end: { line: 0, col: 1 }, text: "y" }],
+    [path.join(dir, "missing.ts")]: [{ start: { line: 0, col: 0 }, end: { line: 0, col: 0 }, text: "z" }],
+  }, (file, edits) => (file === b ? (seen.push(edits.length), true) : false));
+  assert.equal(fs.readFileSync(a, "utf8"), "bar();\r\nbar();\r\n");
+  assert.equal(fs.readFileSync(b, "utf8"), "x"); // the editor took it
+  assert.deepEqual(seen, [1]);
+  assert.deepEqual([r.files, r.edits, r.failed.length], [2, 3, 1]);
+});
