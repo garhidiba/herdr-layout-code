@@ -180,3 +180,28 @@ test("a 500 KB single line wraps in time and scrolling to its end stays quick", 
   assert.ok(Date.now() - t < 200, `frame at the end ${Date.now() - t} ms`);
   assert.ok(ed.rowsTo(0, ed.rowPos(ed.head).sub) < ed.height);
 });
+
+test("Shift+click on a continuation row extends to that row's place; on its gutter, through the whole line", () => {
+  const ed = editor(["alpha beta gamma delta epsilon zeta eta theta", "x"]);
+  screen(ed);
+  const mouse = (x, y, more = {}) => ed.handle({ type: "mouse", button: 0, x, y, release: false, motion: false, ...more });
+  const up = () => ed.handle({ type: "mouse", button: 0, x: 1, y: 1, release: true });
+  mouse(ed.gutter + 1, 2); up();
+  mouse(ed.gutter + 3, 3, { shift: true }); up();
+  assert.deepEqual([ed.sel.anchor, ed.sel.head], [{ line: 0, col: 0 }, { line: 0, col: 19 }], "row 2, x 2");
+  mouse(1, 4, { shift: true }); up();
+  assert.deepEqual(ed.sel.head, { line: 1, col: 0 }, "the gutter of the third row: through line 1");
+});
+
+test("a multi-line ghost text below a wrapped cursor row: its rows come after that row, then the line's other rows", () => {
+  const ed = editor(["alpha beta gamma delta epsilon zeta eta theta", "next"], {}, [12, 30]);
+  ed.moveTo({ line: 0, col: 20 }); // row 2 (delta ...)
+  ed.inline.ghost = { file: ed.file, version: ed.buf.version, at: { line: 0, col: 20 }, items: ["X\nfoo\nbar"], index: 0 };
+  const kind = (r) => (r.ghost ? `ghost${r.ghost}` : r.line < 0 ? "end" : `${r.line}.${r.sub}`);
+  assert.deepEqual(ed.layoutRows(7).map(kind), ["0.0", "0.1", "ghost1", "ghost2", "0.2", "1.0", "end"]);
+  assert.equal(ed.rowsTo(0, 2), 4, "the third row sits below the two ghost rows");
+  assert.equal(ed.rowsTo(1), 5);
+  assert.deepEqual(ed.cellToPos(ed.gutter + 1, 6), { line: 0, col: 36 }, "a click on the third row lands there");
+  const s = screen(ed);
+  assert.ok(s[3].includes("foo") && s[4].includes("bar") && s[5].includes("eta theta"), s.join("\n"));
+});

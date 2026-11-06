@@ -3462,4 +3462,23 @@ mod tests {
         let w = settings::normalize(&json!({ "editor.wordWrap": "sometimes", "editor.wordWrapColumn": 0, "editor.wrappingIndent": "deep" }));
         assert_eq!((w.word_wrap, w.word_wrap_column, w.wrapping_indent), ("off", 1, "same"));
     }
+
+
+    #[test]
+    fn a_multi_line_ghost_text_below_a_wrapped_cursor_row_and_gutter_clicks_on_continuation_rows() {
+        let mut ed = wrapped(&["alpha beta gamma delta epsilon zeta eta theta", "next"], "on", 12, 30);
+        ed.move_to(pos(0, 20), false); // row 2 (delta …)
+        let file = ed.file.clone();
+        ed.inline.ghost = Some(super::inline_ui::Ghost { file, version: ed.buf.version, at: pos(0, 20), items: vec!["X\nfoo\nbar".into()], index: 0 });
+        let rows: Vec<(Option<usize>, usize, usize)> = ed.layout_rows(7).iter().map(|r| (r.line, r.sub, r.ghost)).collect();
+        assert_eq!(rows, [(Some(0), 0, 0), (Some(0), 1, 0), (Some(0), 0, 1), (Some(0), 0, 2), (Some(0), 2, 0), (Some(1), 0, 0), (None, 0, 0)]);
+        assert_eq!(ed.rows_to(0, 2), 4, "the third row sits below the two ghost rows");
+        assert_eq!(ed.rows_to(1, 0), 5);
+        let gw = ed.gutter() as i32;
+        assert_eq!(ed.cell_to_pos(gw + 1, 6), pos(0, 36), "a click on the third row lands there");
+        let s = screen(&mut ed);
+        assert!(s[3].contains("foo") && s[4].contains("bar") && s[5].contains("eta theta"), "{s:?}");
+        ed.inline.ghost = None;
+        assert_eq!(ed.cell_to_pos(1, 3).line, 0, "a gutter click on a continuation row is that line's (Shift+click extends through it)");
+    }
 }
