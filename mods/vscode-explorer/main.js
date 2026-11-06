@@ -5,11 +5,14 @@ import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, window, run, appHome } from "herdr";
 
+// Rooted at the active space's folder, like a VS Code workspace (opening a file in a new tab doesn't move it);
+// the focused pane's folder only when the space has none.
 function location() {
   const space = spaces().find(s => s.active), f = focused();
+  if (space?.folder) return { cwd: space.folder, on: space.machine ?? null, space: space.id };
   const pane = f?.pane ? panes().find(p => p.pane === f.pane) : null;
   const on = f?.pane === null ? (f.terminal?.includes("/") ? f.terminal.split("/")[0] : null) : space?.machine ?? null;
-  return { cwd: pane?.cwd || f?.cwd || space?.folder, on, space: space?.id };
+  return { cwd: pane?.cwd || f?.cwd, on, space: space?.id };
 }
 const key = () => JSON.stringify(location());
 const PER_FOLDER = 500, TOTAL = 5000;
