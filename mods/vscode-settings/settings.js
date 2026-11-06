@@ -39,12 +39,15 @@ export function coerce(key, value) {
   return value;
 }
 
+// vsedit.sh's RUST_READY: until the Rust editor has the phase-3 language features, only "editor.engine" picks it.
+const RUST_EDITOR_READY = false;
+
 // Raw object -> every known setting with a valid value (invalid or missing ones are the default), plus the editor's
 // engine in effect.
 export function normalize(raw = {}) {
   const v = {};
   for (const k of Object.keys(DEFAULTS)) v[k] = coerce(k, raw[k]) ?? DEFAULTS[k];
-  v["editor.engine"] = coerce("editor.engine", raw["editor.engine"]) ?? v["core.engine"];
+  v["editor.engine"] = coerce("editor.engine", raw["editor.engine"]) ?? (RUST_EDITOR_READY ? v["core.engine"] : "js");
   return v;
 }
 
