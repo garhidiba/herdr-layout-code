@@ -53,9 +53,10 @@ function textWidth(text, tabSize, col = 0) {
 const displayCol = (line, index, tabSize) => textWidth(line.slice(0, index), tabSize);
 
 // UTF-16 index of the character boundary nearest display column `col` (the right half of a wide char goes after it).
-function indexAtCol(line, col, tabSize) {
-  let c = 0, i = 0;
-  for (const ch of line) {
+// from / fromCol: a known index and its display column to start the walk at (a wrapped row's start).
+function indexAtCol(line, col, tabSize, from = 0, fromCol = 0) {
+  let c = fromCol, i = from;
+  for (const ch of from ? line.slice(from) : line) {
     const w = ch === "\t" ? tabSize - (c % tabSize) : charWidth(ch.codePointAt(0));
     if (c + w > col && w > 0) return (col - c) * 2 >= w ? i + ch.length : i;
     c += w; i += ch.length;

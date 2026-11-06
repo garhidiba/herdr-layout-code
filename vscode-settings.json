@@ -64,5 +64,11 @@
   // What ⌘F / Ctrl+F starts with: "always" (the selection, else the word at the cursor) | "selection" | "never".
   "editor.find.seedSearchStringFromSelection": "always",
   // Find in Selection when Find opens with a selection: "never" | "always" | "multiline" (a selection of several lines).
-  "editor.find.autoFindInSelection": "never"
+  "editor.find.autoFindInSelection": "never",
+  // Word wrap: "off" | "on" (the window's width) | "wordWrapColumn" (at editor.wordWrapColumn) | "bounded" (the smaller
+  // of both). ⌥Z / Alt+Z (View: Toggle Word Wrap) or the status bar's Wrap item toggles it for one file, this session.
+  "editor.wordWrap": "off",
+  "editor.wordWrapColumn": 80,
+  // Wrapped rows' indentation: "none" | "same" (the line's) | "indent" (one level more) | "deepIndent" (two).
+  "editor.wrappingIndent": "same"
 }

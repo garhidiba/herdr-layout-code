@@ -23,11 +23,15 @@ const DEFAULTS = {
   "editor.find.autoFindInSelection": "never",            // "never" | "always" | "multiline"
   "editor.cursorStyle": "line",       // VS Code's values; see cursorSeq
   "editor.cursorBlinking": "blink",   // "blink" | "smooth" | "phase" | "expand" | "solid"
+  "editor.wordWrap": "off",          // "off" | "on" (the window's width) | "wordWrapColumn" | "bounded" (the smaller of both)
+  "editor.wordWrapColumn": 80,       // 1-500
+  "editor.wrappingIndent": "same",   // continuation rows: "none" | "same" | "indent" | "deepIndent"
 };
 const CURSOR_STYLE = { line: 5, "line-thin": 5, block: 1, "block-outline": 1, underline: 3, "underline-thin": 3 }; // DECSCUSR: blinking; +1 is steady
 const CURSOR_BLINKING = ["blink", "smooth", "phase", "expand", "solid"];
 const SEED = ["never", "always", "selection"], AUTO_IN_SELECTION = ["never", "always", "multiline"];
 const AUTO_SAVE = ["off", "afterDelay", "onFocusChange"];
+const { MODES: WRAP, INDENTS: WRAP_INDENT } = require("./wrap.cjs");
 
 const settingsFile = () => process.env.VSEDIT_SETTINGS
   ?? path.join(process.env.HERDR_APP_HOME ?? path.join(os.homedir(), ".config", "herdr-app"), "vscode-settings.json");
@@ -48,6 +52,10 @@ function normalize(raw = {}) {
   if (AUTO_IN_SELECTION.includes(raw["editor.find.autoFindInSelection"])) v["editor.find.autoFindInSelection"] = raw["editor.find.autoFindInSelection"];
   if (raw["editor.cursorStyle"] in CURSOR_STYLE) v["editor.cursorStyle"] = raw["editor.cursorStyle"];
   if (CURSOR_BLINKING.includes(raw["editor.cursorBlinking"])) v["editor.cursorBlinking"] = raw["editor.cursorBlinking"];
+  if (WRAP.includes(raw["editor.wordWrap"])) v["editor.wordWrap"] = raw["editor.wordWrap"];
+  if (WRAP_INDENT.includes(raw["editor.wrappingIndent"])) v["editor.wrappingIndent"] = raw["editor.wrappingIndent"];
+  const wc = Number(raw["editor.wordWrapColumn"]);
+  if (Number.isInteger(wc)) v["editor.wordWrapColumn"] = clamp(wc, 1, 500);
   return v;
 }
 

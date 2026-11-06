@@ -138,10 +138,11 @@ const RUNS = {
   "editor.fold": ["fold"],
   "editor.unfold": ["unfold"],
   "editor.toggleFold": ["toggleFold"],
+  "editor.action.toggleWordWrap": ["toggleWordWrap"],
   "editor.foldAll": ["foldAll"],
   "editor.unfoldAll": ["unfoldAll"],
   "editor.action.showContextMenu": ["openMenuAtCursor"],
-  // horizontal(dir, extend, word), vertical(rows, extend), home(extend), lineEdge(end, extend), docEdge(end, extend), page(dir, extend)
+  // horizontal(dir, extend, word), vertical(rows, extend), home(extend), lineEdge(end, extend, row), docEdge(end, extend), page(dir, extend)
   "cursorLeft": ["horizontal", [-1, false, false]], "cursorLeftSelect": ["horizontal", [-1, true, false]],
   "cursorRight": ["horizontal", [1, false, false]], "cursorRightSelect": ["horizontal", [1, true, false]],
   "cursorUp": ["vertical", [-1, false]], "cursorUpSelect": ["vertical", [-1, true]],
@@ -151,7 +152,7 @@ const RUNS = {
   "cursorHome": ["home", [false]], "cursorHomeSelect": ["home", [true]],
   "cursorEnd": ["lineEdge", [true, false]], "cursorEndSelect": ["lineEdge", [true, true]],
   "cursorLineStart": ["lineEdge", [false, false]], "cursorLineStartSelect": ["lineEdge", [false, true]],
-  "cursorLineEnd": ["lineEdge", [true, false]], "cursorLineEndSelect": ["lineEdge", [true, true]],
+  "cursorLineEnd": ["lineEdge", [true, false, true]], "cursorLineEndSelect": ["lineEdge", [true, true, true]],
   "cursorTop": ["docEdge", [false, false]], "cursorTopSelect": ["docEdge", [false, true]],
   "cursorBottom": ["docEdge", [true, false]], "cursorBottomSelect": ["docEdge", [true, true]],
   "cursorPageUp": ["page", [-1, false]], "cursorPageUpSelect": ["page", [-1, true]],

@@ -5,7 +5,8 @@ pseudo-terminal: (a) a 2,000-line TypeScript file and (b) a 20,000-line one, bot
 first = start -> the first frame (status bar painted); colored = start -> the colored frame (the second one);
 key = a typed character -> the frame showing the new column (median and p95 of 40 keys; the TS files type in the
 middle line, the minified one at the start of its line, re-tokenizing it from there).
-usage: VSEDIT_BIN=<vsedit> python3 -I mods/vscode-viewer/editor/test/latency.py [--root <folder with .ts files>] [--runs 3]"""
+--wrap: with editor.wordWrap "on" (the minified line wraps onto ~5,700 rows and rewraps on every key).
+usage: VSEDIT_BIN=<vsedit> python3 -I mods/vscode-viewer/editor/test/latency.py [--root <folder with .ts files>] [--runs 3] [--wrap]"""
 import os, pty, re, select, statistics, subprocess, sys, tempfile, time, fcntl, struct, termios
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -89,6 +90,8 @@ def main():
     tmp = tempfile.mkdtemp(prefix="vsedit-latency-")
     env = {**os.environ, "VSEDIT_SETTINGS": os.path.join(tmp, "settings.json"), "VSEDIT_BACKUPS": os.path.join(tmp, "backups"),
            "VSEDIT_KEYBINDINGS": os.path.join(tmp, "kb.json")}
+    if "--wrap" in sys.argv:
+        open(env["VSEDIT_SETTINGS"], "w").write('{"editor.wordWrap": "on"}\n')
     env.pop("HC_TERMINAL_ID", None)
     inputs = {"(a) TS 2,000 lines": ("a.ts", "\n".join(ts_lines(root, 2000)) + "\n", False),
               "(b) TS 20,000 lines": ("b.ts", "\n".join(ts_lines(root, 20000)) + "\n", False)}

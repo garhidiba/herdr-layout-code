@@ -38,6 +38,7 @@ const FD = require("./folding.cjs");
 const SS = require("./smartselect.cjs");
 const { editsWithin } = require("./lang/edits.cjs");
 const I = require("./inline.cjs");
+const WR = require("./wrap.cjs");
 
 // VS Code's "Col": characters before the cursor, tabs counted to the next tab stop.
 function visibleColumn(line, index, tab) {
@@ -65,7 +66,7 @@ function wordLeft(line, col) {
 const shiftClosers = (at, line, col, delta) => at.map(q => (q.line === line && q.col >= col ? { line, col: q.col + delta } : q));
 
 // ---------- the editor ----------
-const DOC_FIELDS = ["file", "doc", "buf", "hl", "indent", "scope", "language", "comment", "crumbs", "root", "session", "sel", "goal", "top", "left", "seenVersion", "outline", "git", "folds", "lenses"];
+const DOC_FIELDS = ["file", "doc", "buf", "hl", "indent", "scope", "language", "comment", "crumbs", "root", "session", "sel", "goal", "top", "topSub", "left", "seenVersion", "outline", "git", "folds", "lenses", "wrapToggle", "wrapRows"];
 const GIT_GLYPHS = { added: "▎", modified: "▎", deletedBelow: "▁", deletedAbove: "▔" };
 const GIT_COLORS = { added: "gitAdded", modified: "gitModified", deletedBelow: "gitDeleted", deletedAbove: "gitDeleted" };
 const WORD_DELAY = 250; // ms the cursor rests on a word before its occurrences highlight, like VS Code
@@ -96,6 +97,7 @@ class Editor {
     this.lastClick = { time: 0, line: -1, col: -1 }; this.dragging = false;
     this.rows = 24; this.cols = 80;
     this.vbar = new SB.Bar(true); this.hbar = new SB.Bar(false); this.marks = null; // scrollbars, laid out each frame
+    this.wraps = new WR.Cache(); // each line's rows while word wrap is on
     this.redraw = () => {}; this.onExit = null; this.autoTimer = null;
     // inline suggestions: the ghost text shown, the debounce timer, the request in flight (abort), replies per position
     this.inline = { ghost: null, timer: null, abort: null, gen: 0, busy: false, error: null, cache: new Map(), health: new Map(),
@@ -112,10 +114,21 @@ class Editor {
     buf.listeners.push((s, r, n) => folds.onEdit(s, r, n));
     const lenses = { version: -1, items: [] }; // CodeLens as of a text version, moved along with edits until new ones come
     buf.listeners.push((s, r, n) => { if (lenses.items.length) lenses.items = D.shiftLines(lenses.items, s, r, n); });
+    // rows per line while wrapping, -1 where an edit changed the line (recounted on the next rowIndex())
+    const wrapRows = { key: "", counts: [], start: null, version: -1, foldVersion: -1 };
+    buf.listeners.push((s, r, n) => {
+      if (!wrapRows.key) return;
+      const c = wrapRows.counts;
+      if (r === n) { for (let k = s; k < s + n; k++) c[k] = -1; return; } // typing within lines
+      const tail = c.splice(s + r);
+      c.length = s;
+      for (let k = 0; k < n; k++) c.push(-1);
+      for (const x of tail) c.push(x);
+    });
     const fallback = { useTabs: !this.settings["editor.insertSpaces"], size: this.settings["editor.tabSize"] };
     return { file, doc, buf, hl, indent: F.detectIndent(buf.lines, fallback), scope, language: L.languageName(grammar ? scope : null),
       comment: L.commentOf(scope), crumbs: breadcrumbs(file), root: gitRoot(file), session: null, sel: caret({ line: 0, col: 0 }),
-      goal: null, top: 0, left: 0, seenVersion: 0, outline: null, git, folds, lenses };
+      goal: null, top: 0, topSub: 0, left: 0, seenVersion: 0, outline: null, git, folds, lenses, wrapToggle: null, wrapRows };
   }
   colorsOf(colorMap) { return colorMap.map(c => (c ? c.slice(0, 7).toLowerCase() : this.colors.fg)); }
   // The grammar arrives after the first, uncolored frame (main paints before loading it).
@@ -140,12 +153,63 @@ class Editor {
   get gutter() { return Math.max(3, String(this.lines.length).length) + 3; }
   get textWidth() { return Math.max(1, this.cols - this.gutter - (this.vbar.shown ? 1 : 0)); }
   range() { return ordered(this.sel.anchor, this.sel.head); }
-  // View rows (the lines collapsed folds hide skipped) <-> buffer lines; `top` is always a visible line.
-  toView(line) { return this.folds.toView(line); }
-  fromView(v) { return this.folds.fromView(v); }
-  get viewCount() { return this.folds.viewCount(this.lines.length); }
-  // The line `rows` view rows from `top`, clamped to [0, max].
-  scrolled(rows, max = this.viewCount - 1) { return this.fromView(Math.max(0, Math.min(Math.max(0, max), this.toView(this.top) + rows))); }
+  // ----- word wrap (wrap.cjs): editor.wordWrap, or Toggle Word Wrap's choice for this file -----
+  get wordWrap() { return this.wrapToggle ?? this.settings["editor.wordWrap"]; }
+  // Columns a row holds, 0 while not wrapping. "on" leaves the scrollbar's column and one for the caret free.
+  get wrapWidth() {
+    const mode = this.wordWrap, view = Math.max(1, this.cols - this.gutter - 2), col = this.settings["editor.wordWrapColumn"];
+    return mode === "on" ? view : mode === "bounded" ? Math.min(view, col) : mode === "wordWrapColumn" ? col : 0;
+  }
+  // A line's rows (WR.ONE while not wrapping or when it fits).
+  wrapOf(line) { const w = this.wrapWidth; return w ? this.wraps.get(this.lines[line], w, this.tab, this.settings["editor.wrappingIndent"]) : WR.ONE; }
+  // p's row within its line and its x there (cells from the row's left edge, the wrap indent included).
+  rowPos(p) { const r = this.wrapOf(p.line), sub = WR.rowOf(r, p.col); return { sub, x: WR.xOf(r, sub, this.lines[p.line], p.col, this.tab) }; }
+  // VS Code's Toggle Word Wrap: off <-> on (or the configured mode), for this file and session.
+  toggleWordWrap() {
+    const set = this.settings["editor.wordWrap"], next = this.wordWrap === "off" ? (set === "off" ? "on" : set) : "off";
+    this.wrapToggle = next === set ? null : next; this.left = 0; this.reveal();
+  }
+  // While wrapping: the first view row of each line (hidden lines: the next line's), for the text, folds and width;
+  // only the lines edited since are wrapped again.
+  rowIndex() {
+    const w = this.wrapWidth;
+    if (!w) return null;
+    const st = this.wrapRows, mode = this.settings["editor.wrappingIndent"], key = `${w}:${this.tab}:${mode}`, lines = this.lines, n = lines.length;
+    if (st.key === key && st.version === this.buf.version && st.foldVersion === this.folds.version) return st.start;
+    if (st.key !== key || st.counts.length !== n) { st.key = key; st.counts = new Array(n).fill(-1); }
+    const counts = st.counts, start = st.start?.length === n + 1 ? st.start : new Int32Array(n + 1);
+    for (let l = 0; l < n; l++) if (counts[l] < 0) counts[l] = this.wraps.get(lines[l], w, this.tab, mode).starts.length;
+    let v = 0;
+    if (!this.folds.any) for (let l = 0; l < n; l++) { start[l] = v; v += counts[l]; }
+    else for (let l = 0; l < n;) {
+      const next = this.folds.next(l);
+      start[l] = v; v += counts[l];
+      for (let h = l + 1; h < next && h < n; h++) start[h] = v;
+      l = next;
+    }
+    start[n] = v;
+    Object.assign(st, { start, version: this.buf.version, foldVersion: this.folds.version });
+    return start;
+  }
+  // View rows (the lines collapsed folds hide skipped, a wrapped line's rows each) <-> buffer lines; `top` is always a
+  // visible line, `topSub` its first row shown.
+  toView(line) { const s = this.rowIndex(); return s ? s[this.folds.visible(line)] : this.folds.toView(line); }
+  fromView(v) {
+    const s = this.rowIndex();
+    if (!s) return this.folds.fromView(v);
+    let lo = 0, hi = this.lines.length - 1;
+    while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (s[mid] <= v) lo = mid; else hi = mid - 1; }
+    return this.folds.visible(lo);
+  }
+  get viewCount() { const s = this.rowIndex(); return s ? s[this.lines.length] : this.folds.viewCount(this.lines.length); }
+  get topRow() { return this.toView(this.top) + this.topSub; }
+  viewRow(p) { return this.toView(p.line) + this.rowPos(p).sub; } // p's view row
+  // Scrolls view row v (clamped to [0, max]) to the first text row.
+  scrollTo(v, max = this.viewCount - 1) {
+    v = Math.max(0, Math.min(Math.max(0, max), v));
+    this.top = this.fromView(v); this.topSub = Math.max(0, v - this.toView(this.top));
+  }
+  scrollBy(rows, max) { this.scrollTo(this.topRow + rows, max); }
   say(text, color = this.colors.barFg, ms = 3000) { this.message = { text, color, until: Date.now() + ms }; }
 
   // ----- cursor -----
@@ -159,22 +223,21 @@ class Editor {
   reveal() {
     const { line, col } = this.head;
     this.folds.reveal(line); // the cursor in a fold opens it
-    const row = this.toView(line) - this.toView(this.top);
-    if (row < 0) this.top = line;
-    if (row >= this.height) this.top = this.fromView(this.toView(line) - this.height + 1);
-    while (this.top < line && this.rowsTo(line) >= this.height) this.top = this.folds.next(this.top); // CodeLens rows take room too
-    const x = W.displayCol(this.lines[line], col, this.tab);
+    const { sub, x } = this.rowPos({ line, col }), v = this.toView(line) + sub, row = v - this.topRow;
+    if (row < 0) this.scrollTo(v);
+    if (row >= this.height) this.scrollTo(v - this.height + 1);
+    while (this.topRow < v && this.rowsTo(line, sub) >= this.height) this.scrollBy(1); // CodeLens rows take room too
     if (x < this.left) this.left = Math.max(0, x - 4);
     if (x >= this.left + this.textWidth) this.left = x - this.textWidth + 5;
   }
   vertical(delta, extend) {
-    const { line, col } = this.head;
-    if (this.goal == null) this.goal = W.displayCol(this.lines[line], col, this.tab);
-    const v = this.toView(line) + delta, end = this.viewCount - 1; // by view rows: over folds
+    const { line } = this.head, { sub, x } = this.rowPos(this.head);
+    if (this.goal == null) this.goal = x;
+    const v = this.toView(line) + sub + delta, end = this.viewCount - 1; // by view rows: over folds and wrapped rows
     if (v < 0) return this.moveTo({ line: 0, col: 0 }, extend);
     if (v > end) { const l = this.fromView(end); return this.moveTo({ line: l, col: this.lines[l].length }, extend); }
     const target = this.fromView(v);
-    this.moveTo({ line: target, col: W.indexAtCol(this.lines[target], this.goal, this.tab) }, extend, true);
+    this.moveTo({ line: target, col: WR.colAt(this.wrapOf(target), v - this.toView(target), this.lines[target], this.goal, this.tab) }, extend, true);
   }
   horizontal(dir, extend, word) {
     if (!extend && !this.empty && !word) return this.moveTo(this.range()[dir < 0 ? 0 : 1]);
@@ -189,18 +252,23 @@ class Editor {
     }
     this.moveTo({ line, col }, extend);
   }
+  // VS Code's cursorHome: on a wrapped row past its start, the row's start; else the first non-blank, then column 0.
   home(extend) {
-    const { line, col } = this.head, first = this.lines[line].search(/\S|$/);
-    this.moveTo({ line, col: col === first ? 0 : first }, extend);
+    const { line, col } = this.head, r = this.wrapOf(line), sub = WR.rowOf(r, col), first = this.lines[line].search(/\S|$/);
+    this.moveTo({ line, col: sub && col !== r.starts[sub] ? r.starts[sub] : col === first ? 0 : first }, extend);
   }
-  lineEdge(end, extend) { this.moveTo({ line: this.head.line, col: end ? this.lines[this.head.line].length : 0 }, extend); }
+  // The cursor row's start / end (cursorLineStart, cursorLineEnd: `row`); cursorEnd: the row's end, then the line's.
+  lineEdge(end, extend, row = false) {
+    const { line, col } = this.head, text = this.lines[line], r = this.wrapOf(line), sub = WR.rowOf(r, col), e = WR.rowEnd(r, sub, text);
+    this.moveTo({ line, col: !end ? r.starts[sub] : row || col !== e ? e : text.length }, extend);
+  }
   docEdge(end, extend) { const last = this.lines.length - 1; this.moveTo(end ? { line: last, col: this.lines[last].length } : { line: 0, col: 0 }, extend); }
   page(dir, extend) {
     const d = dir * this.height;
-    this.top = this.scrolled(d, this.viewCount - this.height);
+    this.scrollBy(d, this.viewCount - this.height);
     this.vertical(d, extend);
   }
-  scrollLine(dir) { this.top = this.scrolled(dir); }
+  scrollLine(dir) { this.scrollBy(dir); }
 
   // ----- editing -----
   // Replaces the selection (or the given range) with text, as one undo step.
@@ -573,7 +641,7 @@ class Editor {
     const { grammar } = await H.loadGrammar(scope, this.index, this.theme);
     if (this.file !== old) return false; // another file is showing by now
     const st = this.makeState(target, { ...this.doc, lines: [...this.lines], stamp: null }, grammar, scope);
-    Object.assign(st, { sel: this.sel, top: this.top, left: this.left, indent: this.indent, seenVersion: st.buf.version });
+    Object.assign(st, { sel: this.sel, top: this.top, topSub: this.topSub, left: this.left, indent: this.indent, seenVersion: st.buf.version });
     st.buf.savedVersion = -1; // unsaved until written
     this.activate(st);
     this.docs.delete(old); B.remove(old);
@@ -656,7 +724,7 @@ class Editor {
       this.activate(st);
       if (first) this.offerBackup();
     }
-    if (pos) { this.moveTo(pos); this.top = this.fromView(Math.max(0, this.toView(this.head.line) - Math.floor(this.height / 3))); }
+    if (pos) { this.moveTo(pos); this.scrollTo(this.viewRow(this.head) - Math.floor(this.height / 3)); }
     this.redraw();
     return true;
   }
@@ -666,7 +734,7 @@ class Editor {
     const from = dir < 0 ? this.back : this.forward, to = dir < 0 ? this.forward : this.back, e = from.pop();
     if (!e) return;
     to.push({ file: this.file, pos: { ...this.head }, top: this.top });
-    return this.track(this.open(e.file, null, false).then(() => { this.moveTo(e.pos); this.top = e.top; }));
+    return this.track(this.open(e.file, null, false).then(() => { this.moveTo(e.pos); this.top = e.top; this.topSub = 0; }));
   }
   // Go to Next / Previous Change: the git change below / above the cursor line, wrapping (nothing without changes).
   gotoChange(dir) {
@@ -721,7 +789,7 @@ class Editor {
     if (!ln) return;
     const line = Math.max(0, Math.min(this.lines.length, ln) - 1);
     this.moveTo({ line, col: col ? col - 1 : 0 });
-    this.top = this.fromView(Math.max(0, this.toView(line) - Math.floor(this.height / 2)));
+    this.scrollTo(this.toView(line) - Math.floor(this.height / 2));
   }
   // ----- status bar pickers (indentation, end of line, language mode); they change the current file only -----
   // A quick pick of fixed choices [{ label, detail?, run }], filtered as typed, starting on `current`.
@@ -761,7 +829,7 @@ class Editor {
     this.useGrammar(g);
   }
   // Screen cell under a buffer position (row, col), for popups placed at the cursor.
-  screenOf(p) { return { row: this.rowsTo(p.line) + 2, col: this.gutter + W.displayCol(this.lines[p.line], p.col, this.tab) - this.left + 1 }; }
+  screenOf(p) { const { sub, x } = this.rowPos(p); return { row: this.rowsTo(p.line, sub) + 2, col: this.gutter + x - this.left + 1 }; }
   openMenu(x, y) { this.popup = new O.Menu(C.menuRows(C.MENU, cap => this.lang.can(cap), this.keymap.label), x, y); }
   openMenuAtCursor() { const s = this.screenOf(this.head); this.openMenu(Math.max(1, s.col), Math.min(this.rows, s.row + 1)); }
   openPicker(prefix) {
@@ -835,25 +903,27 @@ class Editor {
     }
     return st.byLine.map;
   }
-  // Text rows from the top line to `line`'s row: view rows plus the lens rows above the lines in between (and `line`)
-  // and a multi-line ghost text's extra rows below a line before it.
-  rowsTo(line) {
-    let n = this.toView(line) - this.toView(this.top);
+  // Text rows from the first shown row to row `sub` of `line`: view rows plus the lens rows above the lines in between
+  // (and `line`) and a multi-line ghost text's extra rows below a row before it.
+  rowsTo(line, sub = 0) {
+    let n = this.toView(line) + sub - this.topRow;
     if (n < 0) return n;
-    for (const l of this.lensLines().keys()) if (l >= this.top && l <= line && !this.folds.isHidden(l)) n++;
-    const g = this.inlineGhostView();
-    if (g && g.line >= this.top && g.line < line) n += g.lines.length - 1;
+    for (const l of this.lensLines().keys()) if ((l > this.top || (l === this.top && !this.topSub)) && l <= line && !this.folds.isHidden(l)) n++;
+    const g = this.inlineGhostView(), gv = g && this.viewRow(g);
+    if (g && gv >= this.topRow && gv < this.toView(line) + sub) n += g.lines.length - 1;
     return n;
   }
-  // The first `count` text rows: { line, lens?, ghost? } (lens: that line's lenses, on the row above it; ghost k: line k
-  // of a multi-line ghost text, below its line; line -1: past the end).
+  // The first `count` text rows: { line, sub?, lens?, ghost? } (sub: the line's row when wrapped; lens: that line's
+  // lenses, on the row above it; ghost k: line k of a multi-line ghost text, below its row; line -1: past the end).
   layoutRows(count, ghost = this.inlineGhostView()) {
-    const by = this.lensLines(), rows = [];
-    for (let l = this.top; rows.length < count; l = this.folds.next(l)) {
+    const by = this.lensLines(), rows = [], gsub = ghost ? this.rowPos(ghost).sub : -1;
+    for (let l = this.top, k = this.topSub; rows.length < count; l = this.folds.next(l), k = 0) {
       if (l >= this.lines.length) { rows.push({ line: -1 }); continue; }
-      if (by.has(l)) rows.push({ line: l, lens: by.get(l) });
-      if (rows.length < count) rows.push({ line: l });
-      if (ghost?.line === l) for (let k = 1; k < ghost.lines.length && rows.length < count; k++) rows.push({ line: l, ghost: k });
+      if (by.has(l) && !k) rows.push({ line: l, lens: by.get(l) });
+      for (const n = this.wrapOf(l).starts.length; k < n && rows.length < count; k++) {
+        rows.push({ line: l, sub: k });
+        if (ghost?.line === l && k === gsub) for (let j = 1; j < ghost.lines.length && rows.length < count; j++) rows.push({ line: l, ghost: j });
+      }
     }
     return rows;
   }
@@ -949,7 +1019,7 @@ class Editor {
     const d = dir > 0 ? ps.find(p => cmp(p.start, h) > 0) ?? ps[0] : ps.findLast(p => cmp(p.start, h) < 0) ?? ps.at(-1);
     this.pushNav();
     this.moveTo(d.start);
-    this.top = this.fromView(Math.max(0, this.toView(d.start.line) - Math.floor(this.height / 3)));
+    this.scrollTo(this.viewRow(this.head) - Math.floor(this.height / 3));
   }
   // Files of the git root (git ls-files), else up to 20,000 files found under the file's folder.
   projectFiles() {
@@ -1088,7 +1158,7 @@ class Editor {
   // Called after each event: a selection change without a text change records the selection (and scroll) before it, at
   // most CURSOR_STACK, and empties the redo stack; a text change or another file empties both.
   noteCursor() {
-    const h = this.cursorHist, now = { sel: this.sel, top: this.top, left: this.left };
+    const h = this.cursorHist, now = { sel: this.sel, top: this.top, topSub: this.topSub, left: this.left };
     if (h?.buf !== this.buf || h.version !== this.buf.version) { this.cursorHist = { buf: this.buf, version: this.buf.version, last: now, undo: [], redo: [] }; return; }
     if (cmp(h.last.sel.anchor, this.sel.anchor) || cmp(h.last.sel.head, this.sel.head)) {
       h.undo.push(h.last); h.redo = [];
@@ -1102,7 +1172,7 @@ class Editor {
     const h = this.cursorHist, st = (dir < 0 ? h.undo : h.redo).pop();
     if (!st) return;
     (dir < 0 ? h.redo : h.undo).push(h.last);
-    this.sel = st.sel; this.top = st.top; this.left = st.left; this.goal = null; this.buf.seal();
+    this.sel = st.sel; this.top = st.top; this.topSub = st.topSub; this.left = st.left; this.goal = null; this.buf.seal();
     h.last = st;
   }
 
@@ -1164,7 +1234,8 @@ class Editor {
   showPeek(kind, locs) {
     this.peek = new O.Peek(PEEK_TITLE[kind], locs);
     // keep the box on screen below the cursor line
-    if (this.rowsTo(this.head.line) + this.peek.height >= this.height) this.top = this.fromView(Math.max(0, this.toView(this.head.line) - Math.max(0, this.height - this.peek.height - 1)));
+    const { sub } = this.rowPos(this.head);
+    if (this.rowsTo(this.head.line, sub) + this.peek.height >= this.height) this.scrollTo(this.viewRow(this.head) - Math.max(0, this.height - this.peek.height - 1));
   }
   findAll(kind) {
     return this.track(this.locate(kind).then(locs => (locs.length ? this.showPanel(PEEK_TITLE[kind], locs) : this.noResult(kind))));
@@ -1329,7 +1400,7 @@ class Editor {
   mouseHover(ev) {
     if (this.hoverBox?.contains(ev)) return;
     const p = !this.prompt && !this.peek && ev.x > this.gutter && ev.y >= 2 && ev.y <= this.height + 1 && !this.lensRowAt(ev.y) ? this.cellToPos(ev.x, ev.y) : null;
-    const t = p && this.lines[p.line], over = p && p.col < t.length && W.displayCol(t, p.col, this.tab) === this.left + ev.x - 1 - this.gutter;
+    const t = p && this.lines[p.line], over = p && p.col < t.length && this.rowPos(p).x === this.left + ev.x - 1 - this.gutter;
     const w = over && (classOf(t[p.col]) === 1 ? this.wordAt(p) : this.problemsAt(p).length ? { start: p } : null);
     // Ctrl (⌘ when the terminal reports it) over a word: underlined like a link, a click goes to its definition
     const link = ev.ctrl && w?.text && this.lang.can("definition") ? { line: p.line, from: w.start.col, to: w.end.col } : null;
@@ -1560,6 +1631,14 @@ class Editor {
       noKey && I.keyHelp(cfg.provider) + (this.inline.keys.get(cfg.provider)?.loose ? ` (vscode-secrets.json is readable by others: chmod 600 it)` : "")].filter(Boolean);
     return { text: cfg.label + state, run: () => this.toggleInline(), hover: () => [...notes, I.usageText(cfg, I.usageOf(cfg.key))].join(" · ") };
   }
+  // The word wrap item: "Wrap" (with the column for wordWrapColumn / bounded) or a dimmed "No Wrap"; a click is Toggle
+  // Word Wrap (this file, this session, as VS Code's), the pointer on it says what it does.
+  wrapStatus() {
+    const mode = this.wordWrap, col = this.settings["editor.wordWrapColumn"], fixed = mode === "wordWrapColumn" || mode === "bounded";
+    const what = mode === "off" ? "No word wrap" : fixed ? `Word wrap at ${mode === "bounded" ? "the window or " : ""}column ${col} (${mode})` : "Word wrap at the window's width";
+    return { text: mode === "off" ? "No Wrap" : fixed ? `Wrap ${col}` : "Wrap", color: mode === "off" ? this.colors.lineNumber : null,
+      run: () => this.toggleWordWrap(), hover: () => `${what} · click to turn it ${mode === "off" ? "on" : "off"} for this file (${this.keymap.label("editor.action.toggleWordWrap") || "View: Toggle Word Wrap"})` };
+  }
   toggleInline() {
     const cfg = this.inlineCfg;
     this.inline.health.delete(cfg.key); this.inline.models.delete(cfg.key); this.inline.warmed.delete(cfg.key); this.inline.keys.clear(); this.inline.error = null;
@@ -1666,12 +1745,14 @@ class Editor {
   }
 
   // Terminal cell -> buffer position (rows: 1 breadcrumbs, 2..rows-1 text).
-  // A lens row gives its line's start; a row past the end, the last line.
+  // A lens row gives its line's start; a ghost row, a place on the cursor's row; a row past the end, the last row.
   cellToPos(x, y) {
     const row = y >= 2 && y <= this.height + 1 ? this.layoutRows(y - 1)[y - 2] : null;
-    const line = row ? (row.line >= 0 ? row.line : this.fromView(this.viewCount - 1)) : this.fromView(Math.max(0, Math.min(this.viewCount - 1, this.toView(this.top) + y - 2)));
+    const v = row && row.line >= 0 ? -1 : Math.max(0, Math.min(this.viewCount - 1, row ? Infinity : this.topRow + y - 2));
+    const line = v < 0 ? row.line : this.fromView(v);
     if (row?.lens) return { line, col: 0 };
-    return { line, col: W.indexAtCol(this.lines[line], Math.max(0, this.left + x - 1 - this.gutter), this.tab) };
+    const sub = v >= 0 ? v - this.toView(line) : row.ghost ? this.rowPos(this.head).sub : row.sub;
+    return { line, col: WR.colAt(this.wrapOf(line), sub, this.lines[line], Math.max(0, this.left + x - 1 - this.gutter), this.tab) };
   }
   // The lens row at screen row y, or null.
   lensRowAt(y) { const row = y >= 2 && y <= this.height + 1 && this.lensLines().size ? this.layoutRows(y - 1)[y - 2] : null; return row?.lens ? row : null; }
@@ -1685,28 +1766,29 @@ class Editor {
   // Returns true while the pointer is outside, so the auto-scroll timer keeps going.
   dragStep() {
     const { x, y } = this.drag, { dx, dy } = this.dragOverflow(x, y);
-    if (dy) this.top = this.scrolled(dy);
+    if (dy) this.scrollBy(dy);
     if (dx) this.left = Math.max(0, Math.min(this.left + dx * 2, Math.max(this.left, this.widest(this.top, this.height) - this.textWidth + 5)));
     const p = this.cellToPos(Math.max(this.gutter + 1, Math.min(x, this.gutter + this.textWidth)), Math.max(2, Math.min(y, this.height + 1)));
     this.sel = { anchor: this.sel.anchor, head: p };
     return !!(dx || dy);
   }
   stopDragScroll() { clearInterval(this.dragTimer); this.dragTimer = null; }
-  // Display width of the widest of `count` lines from `top` (a very long line counts its length: exact for ASCII, not walked).
+  // Display width of the widest of `count` lines from `top` (a very long line counts its length: exact for ASCII, not
+  // walked); while wrapping, at most the wrap width.
   widest(top, count) {
     let w = 0;
     for (let l = top, k = 0; l < this.lines.length && k < count; l = this.folds.next(l), k++) { const t = this.lines[l]; w = Math.max(w, t.length > 1000 ? t.length : W.textWidth(t, this.tab)); }
-    return w;
+    return Math.min(w, this.wrapWidth || Infinity);
   }
   // Shows the vertical bar when the file is taller than the view, the horizontal one when a line in view is wider; the
   // vertical one scrolls to the last line at the top (VS Code's scroll beyond last line), the horizontal one 5 columns past the widest line.
   layoutBars() {
     const base = Math.max(1, this.rows - 2 - (this.panel ? this.panel.height(this) : 0)), n = this.viewCount, widest = this.widest(this.top, base);
-    let v = n > base || this.top > 0 || this.problems().length > 0; // problems: the overview ruler always shows, as VS Code's
+    let v = n > base || this.topRow > 0 || this.problems().length > 0; // problems: the overview ruler always shows, as VS Code's
     const h = widest > this.cols - this.gutter - (v ? 1 : 0) || this.left > 0;
     if (h) v ||= n > base - 1;
     const height = Math.max(1, base - (h ? 1 : 0)), width = Math.max(1, this.cols - this.gutter - (v ? 1 : 0));
-    this.vbar.layout(v, 2, this.cols, height, height, n + height - 1, this.toView(this.top));
+    this.vbar.layout(v, 2, this.cols, height, height, n + height - 1, this.topRow);
     this.hbar.layout(h, height + 2, this.gutter + 1, width, width, widest + 5, this.left);
   }
   // Overview ruler marks on the vertical bar, like VS Code's: find matches, word / selection occurrences, the selection's
@@ -1749,7 +1831,8 @@ class Editor {
       if (covered && bar.drag === null) continue;
       const pos = bar.mouse(ev);
       if (pos === undefined) continue;
-      if (pos !== null) this[key] = key === "top" ? this.fromView(pos) : pos;
+      if (pos !== null && key === "top") this.scrollTo(pos);
+      else if (pos !== null) this.left = pos;
       return true;
     }
     return false;
@@ -1762,7 +1845,7 @@ class Editor {
     if (this.panel && this.panel.mouse(ev, this)) return;
     const wheel = ev.button === 64 || ev.button === 65;
     if (wheel && !ev.shift) {
-      this.top = this.scrolled(ev.button === 64 ? -3 : 3);
+      this.scrollBy(ev.button === 64 ? -3 : 3);
       return;
     }
     if (wheel || ev.button === 66 || ev.button === 67) { // horizontal wheel, or Shift+wheel
@@ -1826,13 +1909,15 @@ class Editor {
   render(budget = 60) {
     if (this.folds.any) this.foldRanges(); // collapsed folds follow the text
     this.top = this.folds.visible(Math.max(0, Math.min(this.top, this.lines.length - 1)));
+    this.topSub = Math.min(this.topSub, WR.last(this.wrapOf(this.top))); // a narrower or shorter line has fewer rows
     this.layoutBars();
     const P = new Painter(), c = this.colors, height = this.height, width = this.textWidth, gw = this.gutter;
     const deadline = Date.now() + budget;
-    // each text row: a line (-1 past the end; folded lines skipped), its lenses above it, or a line of a multi-line
-    // ghost text below the cursor line
+    // each text row: a line's row (-1 past the end; folded lines skipped), its lenses above it, or a line of a
+    // multi-line ghost text below the cursor's row; rows: the lines shown, each once
     const ghost = this.inlineGhostView(), layout = this.layoutRows(height, ghost);
-    const rows = layout.filter(r => !r.lens && !r.ghost).map(r => r.line);
+    const rows = layout.filter(r => !r.lens && !r.ghost && !r.sub).map(r => r.line);
+    if (this.topSub && layout[0]) rows.unshift(this.top);
     const end = Math.max(this.top, ...rows) + 1;
     // long lines get at most 25 ms a frame, so keys are handled between slices
     const done = this.hl.ensure(end, deadline) & this.hl.ensureLong(this.top, end, Math.min(deadline, Date.now() + 25));
@@ -1854,22 +1939,26 @@ class Editor {
     if (this.buf.dirty) { const w = W.textWidth(crumbs + " ", 8); if (w < this.cols) { P.move(1, w + 1); P.text("●", c.warn, c.bg); } }
 
     for (let r = 0, k = -1; r < height; r++) {
-      const { line: l, lens, ghost: gk } = layout[r], folded = l >= 0 && this.folds.has(l);
+      const { line: l, lens, ghost: gk, sub = 0 } = layout[r], folded = l >= 0 && this.folds.has(l);
       P.move(r + 2, 1);
       if (lens) { this.paintLens(P, l, lens); continue; }
-      if (gk) { // a ghost text line below the cursor line
+      if (gk) { // a ghost text line below the cursor's row
         P.text(" ".repeat(gw), c.fg, c.bg);
-        const x = this.paintGhostTail(P, ghost, gk, 0, 0, width, c.bg, () => null, null);
+        const r = this.wrapOf(ghost.line), gs = this.rowPos(ghost).sub, x = this.paintGhostTail(P, ghost, gk, 0, 0, width, c.bg, () => null, null, this.left, r, gs);
         if (x < width) P.text(" ".repeat(width - x), c.fg, c.bg);
         continue;
       }
-      k++; // the line's index in rows (guides)
+      if (!sub || (r === 0 && l >= 0)) k++; // the line's index in rows (guides)
       if (l < 0) { P.text(" ".repeat(this.cols), c.fg, c.bg); continue; }
-      const active = l === this.head.line;
+      const active = l === this.head.line, wrap = this.wrapOf(l), lastRow = sub === WR.last(wrap);
       const spans = []; // this line's squiggles, the most severe first
       for (const d of problems) { if (d.start.line > l) break; const s = Editor.problemSpan(d, l, this.lines[l]); if (s) spans.push({ ...s, color: c.diag[d.severity], severity: d.severity }); }
       spans.sort((a, b) => a.severity - b.severity);
-      this.paintGutter(P, l, active, changes.get(l), l === bulb ? c.lightBulb : spans[0]?.color, folded ? "›" : ranges && FD.rangeAt(ranges, l) ? "⌄" : " ", l === bulb ? "◆" : "●");
+      // a wrapped line: the number, marks and chevron on its first row; its change bar on every row, a deletion mark
+      // under its last row / over its first
+      const change = changes.get(l), rowChange = change === "deletedBelow" ? (lastRow ? change : null) : change === "deletedAbove" && sub ? null : change;
+      if (sub) this.paintGutter(P, l, active, rowChange, null, " ", "●", false);
+      else this.paintGutter(P, l, active, rowChange, l === bulb ? c.lightBulb : spans[0]?.color, folded ? "›" : ranges && FD.rangeAt(ranges, l) ? "⌄" : " ", l === bulb ? "◆" : "●");
       const lineBg = active && empty ? c.currentLine : folded ? c.foldBackground : c.bg;
       while (mi < ms.length && ms[mi].line < l) mi++;
       const lineMatches = [];
@@ -1877,14 +1966,14 @@ class Editor {
       while (hi < occ.length && occ[hi].line < l) hi++;
       const lineHits = [];
       for (let k = hi; k < occ.length && occ[k].line === l; k++) lineHits.push(occ[k]);
-      this.paintLine(P, l, lineBg, ss, se, lineMatches, width, { ghost: ghost && l === ghost.line ? ghost : null, guide: guides[k], brackets: brackets.filter(b => b.line === l), hits: lineHits, hitBg: hits?.bg, problems: spans, folded });
+      this.paintLine(P, l, lineBg, ss, se, lineMatches, width, { ghost: ghost && l === ghost.line && sub === this.rowPos(ghost).sub ? ghost : null, guide: guides[k], brackets: brackets.filter(b => b.line === l), hits: lineHits, hitBg: hits?.bg, problems: spans, folded, wrap, sub });
     }
     this.marks = this.vbar.shown ? this.rulerMarks(ms, hits, problems) : null;
     this.vbar.paint(P, c, this.marks);
     if (this.hbar.shown) { P.move(height + 2, 1); P.text(" ".repeat(this.cols), c.fg, c.bg); this.hbar.paint(P, c); }
 
     if (this.peek) {
-      this.peekRow = Math.max(2, Math.min(this.rowsTo(this.head.line) + 3, height + 2 - this.peek.height));
+      this.peekRow = Math.max(2, Math.min(this.screenOf(this.head).row + 1, height + 2 - this.peek.height));
       this.peek.render(P, this, this.peekRow);
     }
     if (this.panel) this.panel.render(P, this);
@@ -1896,8 +1985,8 @@ class Editor {
     if (cursor === "hide") P.out += "\x1b[?25l";
     else if (cursor) P.out += `\x1b[${cursor[0]};${cursor[1]}H\x1b[?25h`;
     else {
-      const { line, col } = this.head, x = W.displayCol(this.lines[line], col, this.tab) - this.left;
-      const row = this.rowsTo(line), visible = !this.folds.isHidden(line) && row >= 0 && row < height && x >= 0 && x < width;
+      const { line } = this.head, { sub, x: hx } = this.rowPos(this.head), x = hx - this.left;
+      const row = this.rowsTo(line, sub), visible = !this.folds.isHidden(line) && row >= 0 && row < height && x >= 0 && x < width;
       P.out += visible ? `\x1b[${row + 2};${gw + x + 1}H\x1b[?25h` : "\x1b[?25l";
     }
     return { out: P.out, done };
@@ -1994,15 +2083,17 @@ class Editor {
     return this._hits;
   }
   // The gutter, `gutter` cells: a problem's mark `●` or the light bulb `◆` in the glyph margin (the first column, `mark`
-  // its color), the line number, the git change bar (or a deletion marker), the fold chevron.
-  paintGutter(P, l, active, change, mark = null, fold = " ", glyph = "●") {
+  // its color), the line number (blank on a wrapped line's later rows: `number` false), the git change bar (or a
+  // deletion marker), the fold chevron.
+  paintGutter(P, l, active, change, mark = null, fold = " ", glyph = "●", number = true) {
     const c = this.colors;
     P.text(mark ? glyph : " ", mark ?? c.lineNumber, c.bg);
-    P.text(String(l + 1).padStart(this.gutter - 3), active ? c.lineNumberActive : c.lineNumber, c.bg);
+    P.text((number ? String(l + 1) : "").padStart(this.gutter - 3), active ? c.lineNumberActive : c.lineNumber, c.bg);
     P.text(GIT_GLYPHS[change] ?? " ", change ? c[GIT_COLORS[change]] : c.fg, c.bg);
     P.text(fold, c.foldControl, c.bg);
   }
-  // deco: { guide: { count, active }, brackets: [{ col }], hits: [{ col, len }], hitBg, problems: [{ from, to, color }], folded } for this line.
+  // deco: { guide: { count, active }, brackets: [{ col }], hits: [{ col, len }], hitBg, problems: [{ from, to, color }], folded,
+  // wrap, sub } for this line; wrap / sub: its rows (wrap.cjs) and the one to paint (all of it without them).
   paintLine(P, l, lineBg, ss, se, lineMatches, width, deco = {}) {
     const c = this.colors, text = this.lines[l], g = deco.guide, size = this.tab;
     const selFrom = l < ss.line || l > se.line ? -1 : l === ss.line ? ss.col : 0;
@@ -2022,39 +2113,54 @@ class Editor {
     // a guide at every indent step the line has, the active block's in its own color
     const guideAt = g?.count ? (k) => (k % size === 0 && k / size < g.count ? (k / size === g.active ? c.guideActive : c.guide) : null) : null;
     const curlyAt = deco.problems?.length ? (i) => deco.problems.find(s => i >= s.from && i < s.to)?.color ?? null : null;
-    if (deco.ghost) { // the line up to the cursor, the ghost text, then the rest of the line
+    // the row's part of the line: its wrap indent (with the guides in it, as VS Code draws them), then display columns
+    // [left, end) of the line in `width` cells
+    const r = deco.wrap ?? WR.ONE, sub = deco.sub ?? 0, last = sub === WR.last(r), ind = sub ? r.indent : 0;
+    const pad = Math.min(width, Math.max(0, ind - this.left)), left = r.cols[sub] + Math.max(0, this.left - ind);
+    const from = sub ? { i: r.starts[sub], col: r.cols[sub] } : null, end = last ? Infinity : r.cols[sub + 1];
+    if (pad) this.paintGuides(P, this.left, pad, guideAt, lineBg);
+    width -= pad;
+    const tw = Math.max(0, Math.min(width, end - left)), tokens = this.hl.tokens[l] ?? null, rowGuides = sub ? null : guideAt;
+    if (deco.ghost) { // the row up to the cursor, the ghost text, then the rest of the row
       const g = deco.ghost, cx = W.displayCol(text, g.col, size);
-      let gx = cx > this.left ? this.paintText(P, text, this.hl.tokens[l] ?? null, Math.min(width, cx - this.left), this.left, lineBg, bgAt, size, guideAt, curlyAt).x : 0;
-      gx = this.paintGhostTail(P, g, 0, cx, gx, width, lineBg, bgAt, curlyAt);
+      let gx = cx > left ? this.paintText(P, text, tokens, Math.min(tw, cx - left), left, lineBg, bgAt, size, rowGuides, curlyAt, null, from).x : 0;
+      gx = this.paintGhostTail(P, g, 0, cx, gx, width, lineBg, bgAt, curlyAt, left, r, sub);
       if (gx < width) P.text(" ".repeat(width - gx), c.fg, lineBg);
       return;
     }
     const link = this.link?.line === l ? this.link : null;
-    let { x, col } = this.paintText(P, text, this.hl.tokens[l] ?? null, width, this.left, lineBg, bgAt, this.tab, guideAt, curlyAt, link);
+    let { x, col } = this.paintText(P, text, tokens, tw, left, lineBg, bgAt, this.tab, rowGuides, curlyAt, link, from);
+    if (!last) return x < width && P.text(" ".repeat(width - x), c.fg, lineBg);
     // Selection past the line end shows one cell for the line break, like VS Code.
-    if (x < width && selFrom !== -1 && selTo > text.length && col >= this.left) { P.text(" ", c.fg, c.selection); x++; }
-    if (deco.folded && x < width && col >= this.left) { const m = " ⋯".slice(0, width - x); P.text(m, c.foldPlaceholder, lineBg); x += m.length; } // VS Code's collapsed marker
-    if (x >= width) return;
-    if (!guideAt) return P.text(" ".repeat(width - x), c.fg, lineBg);
-    let pad = ""; // a blank line's guides go on past its end
-    for (let k = this.left + x; k < this.left + width; k++) {
+    if (x < width && selFrom !== -1 && selTo > text.length && col >= left) { P.text(" ", c.fg, c.selection); x++; }
+    if (deco.folded && x < width && col >= left) { const m = " ⋯".slice(0, width - x); P.text(m, c.foldPlaceholder, lineBg); x += m.length; } // VS Code's collapsed marker
+    if (x < width) this.paintGuides(P, left + x, width - x, rowGuides, lineBg); // a blank line's guides go on past its end
+  }
+  // `count` cells from display column k: an indent guide where guideAt(k) has one, else a space.
+  paintGuides(P, k, count, guideAt, bg) {
+    const c = this.colors;
+    if (!guideAt) return P.text(" ".repeat(count), c.fg, bg);
+    let pad = "";
+    for (const e = k + count; k < e; k++) {
       const gc = guideAt(k);
       if (!gc) { pad += " "; continue; }
-      if (pad) { P.text(pad, c.fg, lineBg); pad = ""; }
-      P.text("│", gc, lineBg);
+      if (pad) { P.text(pad, c.fg, bg); pad = ""; }
+      P.text("│", gc, bg);
     }
-    if (pad) P.text(pad, c.fg, lineBg);
+    if (pad) P.text(pad, c.fg, bg);
   }
   // Paints a line's visible part [left, left+width) with token colors; bgAt(i) overrides the background at UTF-16 index i,
   // guideAt(col) gives an indent guide's color at a display column of the leading whitespace (not over a selection).
   // curlyAt(i) the squiggle color under UTF-16 index i; link { from, to }: indexes underlined in the link color. Returns
-  // { x: cells painted, col: the line's display width }.
-  paintText(P, text, tokens, width, left, lineBg, bgAt, tab, guideAt = null, curlyAt = null, link = null) {
+  // { x: cells painted, col: the line's display width }. from { i, col }: a known index and its display column at or
+  // before `left` to start at (a wrapped row's start).
+  paintText(P, text, tokens, width, left, lineBg, bgAt, tab, guideAt = null, curlyAt = null, link = null, from = null) {
     const c = this.colors;
-    let col = 0, ti = 0, x = 0, i = 0, lead = !!guideAt;
+    let col = from?.col ?? 0, ti = 0, x = 0, i = from?.i ?? 0, lead = !!guideAt;
     const right = left + width;
+    if (i && tokens) ti = H.tokenIndex(tokens, i);
     // A long line of single-width characters (a minified file): start at the first visible one instead of walking there.
-    if (left > 0 && text.length > 1000 && !/[^\x20-\x7e]/.test(text)) {
+    if (!from && left > 0 && text.length > 1000 && !/[^\x20-\x7e]/.test(text)) {
       i = col = Math.min(left, text.length);
       if (tokens) ti = H.tokenIndex(tokens, i);
     }
@@ -2084,18 +2190,19 @@ class Editor {
     return { x, col };
   }
   // Paints ghost text line k from display column `start` after `x` painted cells (in the ghost color, tabs to the next
-  // stop), then on its last line the rest of the cursor line, moved after it; returns the cells painted.
-  paintGhostTail(P, g, k, start, x, width, lineBg, bgAt, curlyAt) {
-    const c = this.colors, text = this.lines[g.line], tab = this.tab, right = this.left + width;
+  // stop), then on its last line the rest of the cursor's row (row `sub` of the line's rows r), moved after it; left: the
+  // first display column shown. Returns the cells painted.
+  paintGhostTail(P, g, k, start, x, width, lineBg, bgAt, curlyAt, left = this.left, r = WR.ONE, sub = 0) {
+    const c = this.colors, text = this.lines[g.line], tab = this.tab, right = left + width;
     let col = start;
     for (const ch of g.lines[k]) {
       const w = ch === "\t" ? tab - (col % tab) : W.charWidth(ch.codePointAt(0));
-      if (w && col >= this.left && col + w <= right) { P.text(ch === "\t" ? " ".repeat(w) : ch.codePointAt(0) < 0x20 ? " " : ch, c.ghost, lineBg); x += w; }
+      if (w && col >= left && col + w <= right) { P.text(ch === "\t" ? " ".repeat(w) : ch.codePointAt(0) < 0x20 ? " " : ch, c.ghost, lineBg); x += w; }
       col += w;
     }
     if (k === g.lines.length - 1 && x < width) {
-      const cx = W.displayCol(text, g.col, tab);
-      x += this.paintText(P, text, this.hl.tokens[g.line] ?? null, width - x, cx + Math.max(0, this.left - col), lineBg, bgAt, tab, null, curlyAt).x;
+      const cx = W.displayCol(text, g.col, tab), from = cx + Math.max(0, left - col), end = sub < WR.last(r) ? r.cols[sub + 1] : Infinity;
+      x += this.paintText(P, text, this.hl.tokens[g.line] ?? null, Math.max(0, Math.min(width - x, end - from)), from, lineBg, bgAt, tab, null, curlyAt, null, { i: g.col, col: cx }).x;
     }
     return x;
   }
@@ -2115,6 +2222,7 @@ class Editor {
       { text: this.indent.useTabs ? `Tab Size: ${this.tab}` : `Spaces: ${this.tab}`, run: () => this.pickIndent() },
       { text: this.doc.bom ? "UTF-8 with BOM" : "UTF-8" },
       { text: this.doc.eol === "\r\n" ? "CRLF" : "LF", run: () => this.pickEol() },
+      this.wrapStatus(),
       { text: this.language, run: () => this.pickLanguage() },
     ];
     if (this.settings["files.autoSave"] !== "off") parts.unshift({ text: "Auto Save" });
@@ -2145,9 +2253,13 @@ class Editor {
     this.statusHits = [];
     if (offer && !(this.prompt?.kind === "find" && this.find.query)) this.statusHits.push({ x: 3, w: Math.min(W.textWidth(leftText, 8), Math.max(0, this.cols - rw - 2)), run: () => this.installServer() });
     if (rw > this.cols) return;
-    P.text(rightText, c.barFg, c.bar);
     let x = this.cols - rw + 1;
-    for (const p of parts) { const w = W.textWidth(p.text, 8); if (p.run) this.statusHits.push({ x, w, run: p.run, hover: p.hover }); x += w + 3; }
+    parts.forEach((p, i) => {
+      const w = W.textWidth(p.text, 8);
+      P.text(p.text + (i < parts.length - 1 ? "   " : "  "), p.color ?? c.barFg, c.bar);
+      if (p.run) this.statusHits.push({ x, w, run: p.run, hover: p.hover });
+      x += w + 3;
+    });
   }
 
   // Draws the active prompt; returns [row, col] for the terminal cursor when it should sit in the prompt.

@@ -275,7 +275,7 @@ def run_mac_keys(tmp):
     t.send("\x0e"); t.send("\x05"); t.send("\x15")   # Ctrl+N down, Ctrl+E, Ctrl+U (⌘⌫) delete to the line start
     t.send("\x10")                                  # Ctrl+P up
     t.send("\x1b[107;9u")                           # ⌘K
-    assert "(⌘K) was pressed. Waiting for second key o" in plain(t), "no chord hint"
+    assert "(⌘K) was pressed. Waiting for" in plain(t), "no chord hint"
     t.send("\x1b[99;9u")                            # ⌘C: Add Line Comment
     t.send("\x1b[115;9u")                           # ⌘S
     assert t.read("Saved", timeout=2), "⌘S did not save"
@@ -1008,7 +1008,7 @@ def run_folding(tmp):
         t.send("\x1bOP"); t.send("Unfold All", wait=0.3); t.send("\r", wait=0.3)
     assert "one();" in last(), "Unfold All from the palette"
     t.send("\x1b[107;5u")                               # Ctrl+K: the chord's first key
-    assert "(Ctrl+K) was pressed. Waiting for second key o" in last(), "no chord hint: " + repr(last()[-500:])
+    assert "(Ctrl+K) was pressed. Waiting for" in last(), "no chord hint: " + repr(last()[-500:])
     t.send("\x1b[48;5u", wait=0.3)                      # Ctrl+0: Fold All
     assert "›function a() { ⋯" in last() and "if (x)" not in last(), "Ctrl+K Ctrl+0 Fold All"
     t.send("\x0b\x0c", wait=0.3)                         # legacy Ctrl+K Ctrl+L: Toggle Fold (the cursor's fold opens)
@@ -1018,6 +1018,41 @@ def run_folding(tmp):
     t.send(QUIT)
     assert t.wait_exit() == 0
     print("folding: ok")
+
+
+def run_word_wrap(tmp):
+    """editor.wordWrap "on" (Linux keys): a long line paints on 3 rows (the number on the first only), ↓ moves within it, a
+    click on its third row lands there; Alt+Z turns wrapping off (one row, "No Wrap" in the status bar) and a click on that
+    item turns it on again; narrowing the window rewraps onto more rows (5 at 52 columns) and the cursor keeps its line and column."""
+    file = os.path.join(tmp, "wrap.txt")
+    words = " ".join(f"word{i:02d}" for i in range(30))   # 209 characters: 3 rows at 92 columns
+    open(file, "w").write(f"short\n{words}\nend\n")
+    settings = os.path.join(tmp, "settings", "wrap.json")
+    open(settings, "w").write(json.dumps({**json.load(open(ISOLATED["VSEDIT_SETTINGS"])), "editor.wordWrap": "on"}))
+    t = Term(file, env={"VSEDIT_SETTINGS": settings})
+    assert t.read("Ln 1, Col 1")
+    t.read(timeout=0.4)
+    assert row_text(t, 3).startswith("   2  word00") and row_text(t, 4).startswith("      word") and "   3  end" in row_text(t, 6), \
+        "not wrapped onto 3 rows:\n" + "\n".join(row_text(t, r) for r in range(2, 7))
+    t.send("\x1b[B"); t.send("\x1b[B", wait=0.3)           # line 2's first row, then its second
+    second = int(re.findall(r"Ln 2, Col (\d+)", plain(t))[-1])
+    assert second > 80, f"↓ left the wrapped line: Col {second}"
+    t.send(f"\x1b[<0;10;5M\x1b[<0;10;5m", wait=0.3)        # x 3 on the third row
+    third = int(re.findall(r"Ln 2, Col (\d+)", plain(t))[-1])
+    assert third > second + 80, f"the click did not land on the third row: Col {third}"
+    t.send("\x1bz", wait=0.3)                               # Alt+Z: Toggle Word Wrap
+    assert row_text(t, 4).startswith("   3 ") and "No Wrap" in plain(t).split("\x1b[30;1H")[-1], "Alt+Z did not turn wrapping off"
+    x = status_col(t, "No Wrap") + 1
+    t.send(f"\x1b[<0;{x};30M\x1b[<0;{x};30m", wait=0.3)
+    assert "   3  end" in row_text(t, 6) and "No Wrap" not in plain(t).split("\x1b[30;1H")[-1], "the status bar item did not turn wrapping on"
+    fcntl.ioctl(t.fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 60, 0, 0))
+    os.kill(t.pid, signal.SIGWINCH)
+    t.read(timeout=0.5)
+    assert f"Ln 2, Col {third}" in plain(t).split("\x1b[30;1H")[-1], "the resize moved the cursor"
+    assert "   3  end" in row_text(t, 8), "not rewrapped onto 5 rows at 60 columns: " + " / ".join(row_text(t, r) for r in range(2, 9))
+    t.send(QUIT)
+    assert t.wait_exit() == 0
+    print("word wrap: ok")
 
 
 MED = ('export function greet(name: string) {\n  return "hi " + name;\n}\nconst n = greet("a").length;\nconst m = gret("b");\n'
@@ -1036,7 +1071,7 @@ def run_medium_language(tmp):
     file = os.path.join(proj, "m.ts")
     open(file, "w").write(MED)
     open(os.path.join(proj, "other.ts"), "w").write(OTHER)
-    t = Term(file, env=no_lenses(tmp))
+    t = Term(file, cols=120, env=no_lenses(tmp))       # room for the whole problem message beside the status items
     assert t.read("Ln 1, Col 1")
     t.send("\x07"); t.send("1:18\r")                     # on greet
     t.send("\x0b"); t.send("\x1b[105;5u", wait=0.3)      # Ctrl+K Ctrl+I (Kitty: Ctrl+I is Tab in legacy bytes)
@@ -1304,7 +1339,7 @@ def run_inline_suggest(tmp):
     secret = os.path.join(tmp, ".env")
     open(secret, "w").write("TOKEN=\n")
     asked = len(stub.requests)
-    t = Term(secret, env=env)
+    t = Term(secret, cols=120, env=env)                  # room for the whole message beside the status items
     assert t.read("Ln 1, Col 1")
     t.send("\x1b[1;5F"); t.send("x"); t.read(timeout=0.5)
     t.send("\x1b\\")                                    # Alt+\ (Trigger Inline Suggestion) says why not
@@ -1401,7 +1436,7 @@ def main():
     engines = os.path.join(tmp, "engines.log")
     ISOLATED.update(VSEDIT_ENGINE_LOG=engines, VSEDIT_INLINE_USAGE=os.path.join(tmp, "inline-usage.json"))
     scenarios = [run_tsx, run_go, run_crlf, run_hex, run_error_page, run_drag_scroll, run_shift_click, run_minified, run_scrollbars, run_decorations,
-                 run_autoclose, run_git_gutter, run_folding, run_menu_and_cmd_save, run_save_dialog, run_auto_save, run_cursor_style, run_hot_exit,
+                 run_autoclose, run_git_gutter, run_folding, run_word_wrap, run_menu_and_cmd_save, run_save_dialog, run_auto_save, run_cursor_style, run_hot_exit,
                  run_keybindings, run_mac_keys, run_format, run_typescript, run_find_and_status, run_symbols_and_problems, run_install_prompt, run_small_batch,
                  run_files_and_navigation, run_medium_language, run_medium_editing, run_inline_suggest, run_references_and_lenses, run_inline_hosted]
     only = set(sys.argv[1:])
