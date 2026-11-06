@@ -12,8 +12,13 @@ export const DEFAULTS = {
   "editor.formatOnSave": false,
   "editor.tabSize": 4,                // 1-16, for files without indentation to detect
   "editor.insertSpaces": true,
+  "editor.inlineSuggest.provider": "ollama", // the editor's inline suggestions (mods/vscode-viewer/editor/inline.cjs)
 };
-export const CHOICES = { "core.engine": ["js", "rust"], "editor.engine": ["js", "rust"], "files.autoSave": ["off", "afterDelay", "onFocusChange"] };
+export const CHOICES = { "core.engine": ["js", "rust"], "editor.engine": ["js", "rust"], "files.autoSave": ["off", "afterDelay", "onFocusChange"],
+  "editor.inlineSuggest.provider": ["ollama", "off"] };
+// editor.inlineSuggest.enabled: absent, the editor turns suggestions on when the provider can run there (Ollama
+// installed); the dialog shows that as on, and Reset to defaults removes the key again.
+const INLINE_ENABLED = "editor.inlineSuggest.enabled";
 const NUMBERS = { "files.autoSaveDelay": [0.1, 3600, false], "editor.tabSize": [1, 16, true] }; // [min, max, integer]
 
 // VS Code settings files allow comments and trailing commas (same rule as the editor's highlight.cjs `loose`).
@@ -29,6 +34,7 @@ export function parse(text) {
 
 // A known setting's value made valid, or undefined when it can't be (wrong type, not a number, unknown choice).
 export function coerce(key, value) {
+  if (key === INLINE_ENABLED) return typeof value === "boolean" ? value : undefined;
   if (CHOICES[key]) return CHOICES[key].includes(value) ? value : undefined;
   if (NUMBERS[key]) {
     const [lo, hi, int] = NUMBERS[key], n = Number(value);
@@ -48,6 +54,7 @@ export function normalize(raw = {}) {
   const v = {};
   for (const k of Object.keys(DEFAULTS)) v[k] = coerce(k, raw[k]) ?? DEFAULTS[k];
   v["editor.engine"] = coerce("editor.engine", raw["editor.engine"]) ?? (RUST_EDITOR_READY ? v["core.engine"] : "js");
+  v[INLINE_ENABLED] = coerce(INLINE_ENABLED, raw[INLINE_ENABLED]) ?? true;
   return v;
 }
 
@@ -64,7 +71,7 @@ export function withSetting(raw, key, value) {
 }
 
 // raw with every known setting back to its default (the editor's engine follows the core's again); unknown keys are kept.
-export const withDefaults = ({ "editor.engine": _, ...raw }) => ({ ...raw, ...DEFAULTS });
+export const withDefaults = ({ "editor.engine": _, [INLINE_ENABLED]: __, ...raw }) => ({ ...raw, ...DEFAULTS });
 
 export const serialize = (raw) => JSON.stringify(raw, null, 2) + "\n";
 

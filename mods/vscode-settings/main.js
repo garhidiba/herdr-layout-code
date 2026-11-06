@@ -355,7 +355,11 @@ export default class Settings extends View {
       .child(this.row(t, "Editor", "Format On Save", "Format the file when saving (needs a formatter for the language).", this.toggle(t, "editor.formatOnSave", "Format On Save")))
       .child(this.row(t, "Editor", "Tab Size", "Spaces a tab equals, for files with no indentation to detect (1–16).",
         this.stepper(t, "editor.tabSize", (v, dir) => v + dir)))
-      .child(this.row(t, "Editor", "Insert Spaces", "Insert spaces when pressing Tab, for files with no indentation to detect.", this.toggle(t, "editor.insertSpaces", "Insert Spaces")));
+      .child(this.row(t, "Editor", "Insert Spaces", "Insert spaces when pressing Tab, for files with no indentation to detect.", this.toggle(t, "editor.insertSpaces", "Insert Spaces")))
+      .child(this.row(t, "Editor", "Inline Suggestions", "Gray ghost text from a code model while you type: Tab accepts, Esc hides, ⌘→ / Ctrl+→ takes a word. The status bar item turns it on and off.",
+        this.toggle(t, "editor.inlineSuggest.enabled", "Inline Suggestions")))
+      .child(this.row(t, "Editor", "Inline Suggestion Provider", "Ollama runs the model on this machine (ollama pull qwen2.5-coder:7b); model, endpoint and limits are in settings.json.",
+        this.segmented(t, "editor.inlineSuggest.provider", [["ollama", "Ollama"], ["off", "Off"]])));
   }
 
   pageTab(t, page, text) {

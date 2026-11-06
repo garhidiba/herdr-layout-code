@@ -19,8 +19,8 @@ function memoryFile(text, { raceOnce = null } = {}) {
 }
 
 test("a missing or empty file means every default, engine js", () => {
-  assert.deepEqual(normalize(parse(null)), { ...DEFAULTS, "editor.engine": "js" });
-  assert.deepEqual(normalize(parse("  ")), { ...DEFAULTS, "editor.engine": "js" });
+  assert.deepEqual(normalize(parse(null)), { ...DEFAULTS, "editor.engine": "js", "editor.inlineSuggest.enabled": true });
+  assert.deepEqual(normalize(parse("  ")), { ...DEFAULTS, "editor.engine": "js", "editor.inlineSuggest.enabled": true });
   assert.equal(coreEngine({}), "js");
   assert.equal(coreEngine({ "core.engine": "rust" }), "rust");
   assert.equal(coreEngine({ "core.engine": "go" }), "js");
@@ -109,4 +109,13 @@ test("only a binary of the mods' major version counts as built", () => {
   assert.equal(coreCurrent('{"version":"0.1.0"}'), false);
   assert.equal(coreCurrent("ok"), false);
   assert.equal(coreCurrent(null), false);
+});
+
+test("inline suggestions: on unless set off, the provider one of the editor's, Reset to defaults removes the switch", () => {
+  assert.equal(normalize({})["editor.inlineSuggest.enabled"], true);
+  assert.equal(normalize({ "editor.inlineSuggest.enabled": false })["editor.inlineSuggest.enabled"], false);
+  assert.equal(normalize({ "editor.inlineSuggest.provider": "nope" })["editor.inlineSuggest.provider"], "ollama");
+  assert.deepEqual(withSetting({}, "editor.inlineSuggest.provider", "off"), { "editor.inlineSuggest.provider": "off" });
+  assert.throws(() => withSetting({}, "editor.inlineSuggest.enabled", "yes"));
+  assert.equal("editor.inlineSuggest.enabled" in withDefaults({ "editor.inlineSuggest.enabled": false }), false);
 });
