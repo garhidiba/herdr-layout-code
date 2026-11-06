@@ -10,7 +10,7 @@ import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { spaces, machines, panes, agents, run, openOverlay, exec, hc, theme, shared, setShared, watchFolder, window, layout, notify } from "herdr";
 import { spaceAgents, fit, describe } from "./agents.js";
-import { sync, interleave, forget, adopt, liveIndex, reopenArgs, load } from "./kept.js";
+import { sync, interleave, forget, adopt, liveIndex, moveTo, reopenArgs, load } from "./kept.js";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -111,14 +111,18 @@ export default class Spaces extends View {
       if (k && ask.action === "open") this.reopen(k, cx);
       if (k && ask.action === "forget") this.kept = forget(this.kept, k.id);
     }
-    const { list: next, fresh, color } = this.view(now, sp);
-    if (fresh) {
-      // The new space takes the kept row's place, color and position.
+    const { list: next, fresh, index, color } = this.view(now, sp);
+    const r = this.reopening;
+    if (fresh && !r.fresh) {
+      // The new space takes the kept row's place, color and position. Herdr put it last.
+      r.fresh = fresh.id;
+      r.index = index;
       if (color) setShared("space.colors", { ...(shared("space.colors") ?? {}), [fresh.id]: color });
-      const index = liveIndex(next, fresh.id, new Set(sp.map((s) => s.id)));
       if (index && index !== sp.findIndex((s) => s.id === fresh.id) + 1) run("space.move", { id: fresh.id, index });
-      this.reopening = null;
-    } else if (this.reopening && now - this.reopening.at > 15000) this.reopening = null;
+    }
+    // Done once Herdr shows it there (until then view() draws it there); given up after 15s.
+    const placed = r?.fresh && (!fresh || !r.index || sp.findIndex((s) => s.id === r.fresh) + 1 === r.index);
+    if (r && (placed || now - r.at > 15000)) this.reopening = null;
     // A worktree's space closes before its folder goes: forget it once the folder is gone.
     const was = new Map(this.kept.map((k) => [k.id, k.live]));
     for (const k of next) if (k.live === false && was.get(k.id) === true) this.forgetIfGone(k, 5000, cx);
@@ -132,21 +136,28 @@ export default class Spaces extends View {
 
   // The kept list as spaces() is now, without storing it: render draws this, so a
   // space Herdr just closed is a closed row in the same frame, not after keep()'s tick.
-  // `fresh`: the space reopened from a row (it already has the row's place); `color` the row's.
+  // `fresh`: the space reopened from a row, `index` the row's space.move index, `color`
+  // the row's; `order`: spaces() with it already at that index (Herdr adds it last and
+  // moves it a moment later), which the list is drawn and stored in.
   view(now, sp) {
     let list = this.kept;
     const r = this.reopening;
-    const fresh = r && sp.find((s) => !r.before.has(s.id) && (s.machine ?? null) === r.machine);
-    if (fresh) list = adopt(list, r.id, fresh.id);
+    const fresh = r && sp.find((s) => (r.fresh ? s.id === r.fresh : !r.before.has(s.id) && (s.machine ?? null) === r.machine));
+    let index = r?.index ?? null;
+    if (fresh && !r.fresh) {
+      list = adopt(list, r.id, fresh.id);
+      index = liveIndex(list, fresh.id, new Set(sp.map((s) => s.id)));
+    }
+    const order = fresh ? moveTo(sp, fresh.id, index) : sp;
     const color = fresh ? list.find((k) => k.id === fresh.id)?.color : undefined;
     const colors = { ...(shared("space.colors") ?? {}), ...(color ? { [fresh.id]: color } : {}) };
     const ps = panes();
-    const live = sp.map((s) => ({ id: s.id, name: s.name, named: s.named, folder: place(s, ps), machine: s.machine ?? null, color: colors[s.id] }));
+    const live = order.map((s) => ({ id: s.id, name: s.name, named: s.named, folder: place(s, ps), machine: s.machine ?? null, color: colors[s.id] }));
     const ms = machines();
     const ready = new Set(ms.filter((m) => m.layout === "ready").map((m) => m.name ?? null));
     // Without an entry for this computer, its spaces showing means its layout reads.
     if (!ms.some((m) => (m.name ?? null) === null) && sp.some((s) => !s.machine)) ready.add(null);
-    return { list: sync(list, live, ready, shared("vscode-spaces.closing") ?? {}, now), fresh, color };
+    return { list: sync(list, live, ready, shared("vscode-spaces.closing") ?? {}, now), order, fresh, index, color };
   }
 
   // Forgets a kept space whose folder is gone (true then); unsure (machine away): kept.
@@ -357,8 +368,9 @@ export default class Spaces extends View {
 
   // Spaces in order, each worktree space moved under its main checkout's.
   ordered() {
-    const sp = spaces(), ps = panes();
-    const view = this.view(Date.now(), sp);
+    // In view()'s order: a space reopened from a row is drawn at the row's place at once.
+    const view = this.view(Date.now(), spaces());
+    const sp = view.order, ps = panes();
     // A space reopened from a row has its place already: no wait for its git.
     if (view.fresh) this.shown.add(view.fresh.id);
     const ready = (w) => this.shown.has(w.id) || where(w, ps) in this.git || Date.now() - (this.born[w.id] ??= Date.now()) > 1500;

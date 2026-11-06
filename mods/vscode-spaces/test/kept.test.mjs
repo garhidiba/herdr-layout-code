@@ -1,7 +1,7 @@
 // node --test mods/vscode-spaces/test/kept.test.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
-import { sync, interleave, forget, adopt, liveIndex, reopenArgs, load, CLOSING_MS } from "../kept.js";
+import { sync, interleave, forget, adopt, liveIndex, moveTo, reopenArgs, load, CLOSING_MS } from "../kept.js";
 
 const sp = (id, extra = {}) => ({ id, name: id, named: false, folder: `/w/${id}`, machine: null, color: "ansi4", ...extra });
 const here = new Set([null]);
@@ -140,6 +140,57 @@ test("a space closed from the menu is never drawn as a closed row", () => {
 test("a remote space missing while its layout is unreadable is never drawn closed", () => {
   const stored = sync([], [sp("a"), sp("r", { machine: "vps" })], new Set([null, "vps"]));
   assert.deepEqual(draw(stored, [sp("a")], here), ["a"]);
+});
+
+// One reopening as vscode-spaces does it: Herdr adds the new space last; the row's
+// place gives its index; the list is synced in the order Herdr will have after the move.
+function reopen(list, rowId, newId, live) {
+  const adopted = adopt(list, rowId, newId);
+  const index = liveIndex(adopted, newId, new Set(live.map((s) => s.id)));
+  const order = moveTo(live, newId, index);
+  return { index, order, list: sync(adopted, order, here) };
+}
+
+test("a reopened space's index is the row's place, not last where Herdr added it", () => {
+  const list = sync(sync([], [sp("a"), sp("b"), sp("c")], here), [sp("a"), sp("c")], here);
+  const live = [sp("a"), sp("c"), sp("n")];
+  // Read after sync() (the bug), the new space is already last: no move was sent.
+  assert.equal(liveIndex(sync(adopt(list, "b", "n"), live, here), "n", new Set(["a", "c", "n"])), 3);
+  const r = reopen(list, "b", "n", live);
+  assert.equal(r.index, 2);
+  assert.deepEqual(r.order.map((s) => s.id), ["a", "n", "c"]);
+  assert.deepEqual(ids(r.list), ["a", "n", "c"]);
+});
+
+test("closed rows don't count in the index Herdr gets", () => {
+  const list = sync(sync([], [sp("a"), sp("x"), sp("b"), sp("c")], here), [sp("a"), sp("c")], here);
+  const r = reopen(list, "b", "n", [sp("a"), sp("c"), sp("n")]);
+  assert.equal(r.index, 2);
+  assert.deepEqual(ids(r.list), ["a", "x-", "n", "c"]);
+});
+
+test("same-named rows each reopen at their own place with their own color", () => {
+  const dup = (id, color) => sp(id, { name: "project", folder: "/w/project", color });
+  let list = sync([], [sp("a"), dup("p1", "ansi1"), sp("b"), dup("p2", "ansi2"), sp("c")], here);
+  list = sync(list, [sp("a"), sp("b"), sp("c")], here);
+  let r = reopen(list, "p2", "n2", [sp("a"), sp("b"), sp("c"), dup("n2")]);
+  assert.equal(r.index, 3);
+  assert.deepEqual(ids(r.list), ["a", "p1-", "b", "n2", "c"]);
+  assert.equal(r.list[3].color, "ansi2");
+  r = reopen(r.list, "p1", "n1", [...r.order, dup("n1")]);
+  assert.equal(r.index, 2);
+  assert.deepEqual(ids(r.list), ["a", "n1", "b", "n2", "c"]);
+  assert.equal(r.list[1].color, "ansi1");
+});
+
+test("moveTo puts one item at a 1-based index and leaves the rest in order", () => {
+  const items = ["a", "b", "c", "d"].map((id) => ({ id }));
+  const at = (id, index) => moveTo(items, id, index).map((x) => x.id).join("");
+  assert.equal(at("d", 2), "adbc");
+  assert.equal(at("a", 4), "bcda");
+  assert.equal(at("b", 9), "acdb");
+  assert.equal(at("z", 1), "abcd");
+  assert.equal(at("c", null), "abcd");
 });
 
 test("an unreadable stored list is empty", () => {

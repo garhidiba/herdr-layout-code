@@ -60,7 +60,19 @@ export const forget = (list, id) => (list ?? []).filter((r) => r.id !== id);
 // A reopened space takes the kept row's place: same position, color and name.
 export const adopt = (list, oldId, newId) => (list ?? []).map((r) => (r.id === oldId ? { ...r, id: newId, live: true } : r));
 
+// `items` with the one whose id is `id` at `index` (1 = first, space.move's), the
+// rest in order: what spaces() will be once Herdr has applied that move.
+export function moveTo(items, id, index) {
+  const from = items.findIndex((x) => x.id === id);
+  if (from < 0 || !(index >= 1)) return items;
+  const out = items.filter((_, i) => i !== from);
+  out.splice(Math.min(index - 1, out.length), 0, items[from]);
+  return out;
+}
+
 // Its space.move index (1 = first): after the live spaces listed before it.
+// Read it from the list adopt() gave, before sync(): sync puts live spaces in
+// Herdr's order, where a new space is last.
 export function liveIndex(list, id, liveIds) {
   const at = list.findIndex((r) => r.id === id);
   return at < 0 ? null : list.slice(0, at).filter((r) => liveIds.has(r.id)).length + 1;
