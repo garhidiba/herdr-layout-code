@@ -1284,7 +1284,9 @@ async function main() {
   }, 2000).unref();
 
   let pending = "";
+  const log = T.inputLog();
   process.stdin.on("data", (chunk) => {
+    log(chunk);
     const { events, rest } = parse(pending + chunk);
     pending = rest;
     let changed = !events.length;

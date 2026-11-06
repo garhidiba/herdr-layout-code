@@ -1,14 +1,23 @@
 // Terminal session shared by the editor, the hex viewer and the error page: the alternate screen and input modes, Herdr
 // right-click routing, and a raw-input loop that turns keys/mouse into events for a full-screen app.
+const fs = require("fs");
 const os = require("os");
 const { spawn, spawnSync } = require("child_process");
 const { parse } = require("./keys.cjs");
 const { which } = require("./lang/proc.cjs");
 
-// Alternate screen, bracketed paste, SGR mouse, focus reports (1004), Kitty keyboard "disambiguate" (CSI > 1 u: ⌘ keys
-// arrive as CSI-u with the super bit), bar cursor; LEAVE undoes each.
-const ENTER = "\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?1004h\x1b[>1u\x1b[5 q";
-const LEAVE = "\x1b[0m\x1b[<u\x1b[?1004l\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?2004l\x1b[0 q\x1b]112\x07\x1b[?25h\x1b[?1049l";
+// Alternate screen, bracketed paste, SGR mouse, alternate scroll off (1007: the terminal would turn the wheel into ↑/↓ on
+// the alternate screen; saved first with XTSAVE), focus reports (1004), Kitty keyboard "disambiguate" (CSI > 1 u: ⌘ keys
+// arrive as CSI-u with the super bit), bar cursor; LEAVE undoes each (1007 back as saved, XTRESTORE).
+const ENTER = "\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?1007s\x1b[?1007l\x1b[?1004h\x1b[>1u\x1b[5 q";
+const LEAVE = "\x1b[0m\x1b[<u\x1b[?1004l\x1b[?1007r\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?2004l\x1b[0 q\x1b]112\x07\x1b[?25h\x1b[?1049l";
+
+// VSEDIT_LOG_INPUT=<file>: each raw input chunk is appended to the file as `<ms> <JSON string>` (to see what a real
+// terminal sends for keys and the wheel); a no-op otherwise.
+function inputLog(file = process.env.VSEDIT_LOG_INPUT) {
+  if (!file) return () => {};
+  return (chunk) => { try { fs.appendFileSync(file, `${Date.now()} ${JSON.stringify(chunk)}\n`); } catch {} };
+}
 
 // `herdr-app <args>` (PATH plus the usual tool folders); `wait` blocks until it ends (at most 1.5 s).
 function herdr(args, wait) {
@@ -32,9 +41,11 @@ function rightClicksTo(to, wait) {
 // on exit, and signals or a closed input end the session and exit).
 function session(app) {
   let scheduled = false, pending = "", ended = false;
+  const log = inputLog();
   const frame = () => { scheduled = false; if (!ended) process.stdout.write("\x1b[?25l" + app.render(process.stdout.rows || 24, process.stdout.columns || 80)); };
   const draw = () => { if (!scheduled) { scheduled = true; setImmediate(frame); } };
   const onData = (chunk) => {
+    log(chunk);
     const { events, rest } = parse(pending + chunk);
     pending = rest;
     let changed = false;
@@ -70,4 +81,4 @@ function session(app) {
 // tab closes when it exits, and a file that isn't there is an error rather than a new file.
 const closeOnExit = () => process.argv.includes("--close-on-exit");
 
-module.exports = { ENTER, LEAVE, herdr, rightClicksTo, session, closeOnExit };
+module.exports = { ENTER, LEAVE, inputLog, herdr, rightClicksTo, session, closeOnExit };

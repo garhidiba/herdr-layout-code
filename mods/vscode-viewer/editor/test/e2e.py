@@ -124,6 +124,7 @@ def run_tsx(tmp):
     screen = t.out.decode("utf8", "replace")
     assert "TypeScript JSX" in screen and "Spaces: 2" in screen and "UTF-8" in screen and "LF" in screen
     assert "\x1b[?1049h" in screen and "\x1b[?2004h" in screen and "\x1b[?1006h" in screen
+    assert "\x1b[?1007s\x1b[?1007l" in screen, "alternate scroll (wheel as arrow keys) not turned off"
     check_colors(screen, file, [("import", "#C678DD"), ("createRoot", "#61AFEF"), ("App", "#E5C07B")])
     # Ctrl+G 5 Enter, End, type, Enter keeps indentation, Korean text, arrows, save, quit.
     t.send("\x07"); t.send("5\r"); t.send("\x1b[F")
@@ -459,7 +460,8 @@ def run_drag_scroll(tmp):
     Shift+wheel scroll sideways."""
     file = os.path.join(tmp, "long.txt")
     open(file, "w").write("0123456789" * 40 + "\n")
-    t = Term(file)
+    log = os.path.join(tmp, "input.log")
+    t = Term(file, env={"VSEDIT_LOG_INPUT": log})
     assert t.read("Ln 1, Col 1")
     t.send("\x1b[<0;7;2M")                        # press on column 1 of the text
     t.send("\x1b[<32;100;2M", wait=0.6)            # drag to the last column and hold
@@ -481,6 +483,8 @@ def run_drag_scroll(tmp):
     t.read(timeout=0.4); assert "1  6789012345" in plain(t), "Shift+wheel did not scroll sideways"
     t.send("\x11")
     assert t.wait_exit() == 0
+    assert b"\x1b[?1007r" in t.out[-300:], "alternate scroll not restored"
+    assert re.search(r'^\d+ "\\u001b\[<69;20;2M"$', open(log).read(), re.M), "VSEDIT_LOG_INPUT did not log the wheel"
     print("drag auto-scroll + horizontal wheel: ok")
 
 
