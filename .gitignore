@@ -5,3 +5,4 @@ gpui-kit.d.ts
 jsconfig.json
 .backups/
 mods/vscode-settings/native/target/
+__pycache__/
