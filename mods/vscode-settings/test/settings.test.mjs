@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { DEFAULTS, parse, normalize, coreEngine, editorEngine, withSetting, withDefaults, serialize, updateFile, stepDelay, coreStatus, coreCurrent,
-  editorStatus, editorCurrent } from "../settings.js";
+  editorStatus, editorCurrent, modelChoices, chosenModel, keyLine } from "../settings.js";
 
 // An in-memory file with writeTextFile's contract: writes only when `expected` still matches.
 function memoryFile(text, { raceOnce = null } = {}) {
@@ -126,4 +126,28 @@ test("inline suggestions: on unless set off, the provider one of the editor's, R
   for (const p of ["codestral", "deepseek", "mercury"]) assert.equal(normalize({ "editor.inlineSuggest.provider": p })["editor.inlineSuggest.provider"], p);
   assert.throws(() => withSetting({}, "editor.inlineSuggest.enabled", "yes"));
   assert.equal("editor.inlineSuggest.enabled" in withDefaults({ "editor.inlineSuggest.enabled": false }), false);
+});
+
+test("the Inline Suggestion Model row: the default first, base models recommended, pulled or not, the file's own model", () => {
+  const ollama = { models: ["qwen2.5-coder:1.5b-base", "qwen2.5-coder:7b-base", "qwen2.5-coder:7b"],
+    recommended: ["qwen2.5-coder:1.5b-base", "qwen2.5-coder:7b-base"], pulled: ["qwen2.5-coder:7b-base", "qwen2.5-coder:7b"] };
+  assert.deepEqual(modelChoices("", ollama), [["", "qwen2.5-coder:1.5b-base (default, not pulled)"],
+    ["qwen2.5-coder:7b-base", "qwen2.5-coder:7b-base (recommended)"], ["qwen2.5-coder:7b", "qwen2.5-coder:7b"]]);
+  assert.deepEqual(modelChoices("starcoder2:3b", ollama).at(-1), ["starcoder2:3b", "starcoder2:3b"]);
+  assert.deepEqual(modelChoices("", { models: ["codestral-latest", "codestral-2508"], recommended: ["codestral-latest"] }),
+    [["", "codestral-latest (default)"], ["codestral-2508", "codestral-2508"]]);
+  assert.equal(chosenModel("codestral-latest", { recommended: ["codestral-latest"] }), "", "the default's own name picks the default");
+  assert.equal(chosenModel("codestral-2508", { recommended: ["codestral-latest"] }), "codestral-2508");
+  assert.deepEqual(modelChoices("", null), [["", "Default"]]);
+  assert.equal(withSetting({}, "editor.inlineSuggest.model", " codestral-2508 ")["editor.inlineSuggest.model"], "codestral-2508");
+  assert.throws(() => withSetting({}, "editor.inlineSuggest.model", 3));
+});
+
+test("the API Key row shows where the key is and only its ends, or how to add one", () => {
+  assert.equal(keyLine({ from: "keychain", masked: "sk-a…mnop" }), "Saved in the macOS keychain: sk-a…mnop");
+  assert.match(keyLine({ from: "file", masked: "••••" }), /vscode-secrets.json \(mode 600\): ••••/);
+  assert.match(keyLine({ from: "env", masked: "sk-a…mnop" }), /Editors Herdr opens may not see it/);
+  assert.match(keyLine({ from: null, loose: true }), /^No key yet \(vscode-secrets.json is readable by others: chmod 600 it\)\. .*never to settings.json/);
+  assert.equal(keyLine(null), "Checking for a key…");
+  assert.match(keyLine({ error: "node: not found" }), /Cannot check the key: node: not found/);
 });

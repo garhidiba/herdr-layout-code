@@ -15,6 +15,7 @@ export const DEFAULTS = {
   "editor.cursorStyle": "line",       // the terminal editor's cursor shape; thin variants draw like the plain ones
   "editor.cursorBlinking": "blink",   // "solid" is steady, the others blink
   "editor.inlineSuggest.provider": "ollama", // the editor's inline suggestions (mods/vscode-viewer/editor/inline.cjs)
+  "editor.inlineSuggest.model": "",          // "": the provider's default
 };
 export const CHOICES = { "core.engine": ["js", "rust"], "editor.engine": ["js", "rust"], "files.autoSave": ["off", "afterDelay", "onFocusChange"],
   "editor.inlineSuggest.provider": ["ollama", "codestral", "deepseek", "mercury", "off"],
@@ -46,7 +47,34 @@ export function coerce(key, value) {
     return Math.round(Math.max(lo, Math.min(hi, n)) * 1000) / 1000;
   }
   if (typeof DEFAULTS[key] === "boolean") return typeof value === "boolean" ? value : undefined;
+  if (typeof DEFAULTS[key] === "string") return typeof value === "string" ? value.trim() : undefined;
   return value;
+}
+
+// ----- the Inline Suggestions rows (their data: `node mods/vscode-viewer/editor/inline.cjs --models / --key`) -----
+export const HOSTED_PROVIDERS = ["codestral", "deepseek", "mercury"];
+// The Model row's choices [value, label]: the provider's default first (value "": none in the file), the models it
+// lists (Ollama: the pulled ones, base models recommended), and the file's model when it is none of them.
+export function modelChoices(current, listed) {
+  const { models = [], recommended = [], pulled = null } = listed ?? {};
+  const def = recommended[0] ?? models[0];
+  const tag = (m) => [recommended.includes(m) && m !== def && "recommended", pulled && !pulled.includes(m) && "not pulled"].filter(Boolean).join(", ");
+  const label = (m, extra = []) => { const t = [...extra, tag(m)].filter(Boolean).join(", "); return t ? `${m} (${t})` : m; };
+  const rows = def ? [["", label(def, ["default"])]] : [["", "Default"]];
+  for (const m of models) if (m !== def) rows.push([m, label(m)]);
+  if (current && current !== def && !models.includes(current)) rows.push([current, current]);
+  return rows;
+}
+// Which choice the file's model picks (the default's own name picks the default).
+export const chosenModel = (current, listed) => (current === (listed?.recommended?.[0] ?? listed?.models?.[0]) ? "" : current);
+// The API Key row's line from `inline.cjs --key` (a stored key shows only its ends).
+export function keyLine(r) {
+  if (!r) return "Checking for a key…";
+  if (r.error) return `Cannot check the key: ${r.error}`;
+  if (r.from === "keychain") return `Saved in the macOS keychain: ${r.masked}`;
+  if (r.from === "file") return `Saved in vscode-secrets.json (mode 600): ${r.masked}`;
+  if (r.from === "env") return `From the environment: ${r.masked}. Editors Herdr opens may not see it; save it here.`;
+  return `No key yet${r.loose ? " (vscode-secrets.json is readable by others: chmod 600 it)" : ""}. Paste it and Save: it goes to the macOS keychain (elsewhere vscode-secrets.json, mode 600), never to settings.json.`;
 }
 
 // vsedit.sh's RUST_READY: the Rust editor has every JS editor feature, so without "editor.engine" it follows the core.

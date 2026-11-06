@@ -9,7 +9,7 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { theme, props, run, exec, hc, spaces, appHome, readTextFile, writeTextFile, closeOverlay, keys } from "herdr";
 import { FILE, normalize, parse, loose, withSetting, withDefaults, rewrite, updateFile, stepDelay, coreStatus, coreCurrent, DEFAULTS,
-  PAGE_FILE, requestedPage, editorStatus, editorCurrent } from "./settings.js";
+  PAGE_FILE, requestedPage, editorStatus, editorCurrent, HOSTED_PROVIDERS, modelChoices, chosenModel, keyLine } from "./settings.js";
 import { FILE as KB_FILE, fromHerdr, label, matchesRow, conflicts, parseFile, serializeFile, withKey, withoutKey, withReset,
   hasUserEntries, herdrRoute, withPassthrough, recordStep } from "./keybindings.js";
 import { createOpenTab } from "./launch.js";
@@ -22,6 +22,9 @@ const corePath = () => `${appHome()}/vscode-core/vscode-core`;
 const editorPath = () => `${appHome()}/vscode-core/vsedit`; // the Rust editor, built with the core
 const EDITOR = "mods/vscode-viewer/editor/vsedit.sh"; // same launcher the Explorer opens files with
 const KB_TABLE = "mods/vscode-viewer/editor/keybindings.cjs"; // `--table <file>`: the editor's commands and keys in effect
+// The editor's inline suggestion rules and key store: `--models`, `--key`, `--save-key <file>`, `--remove-key`, `--test`.
+const INLINE_CLI = "mods/vscode-viewer/editor/inline.cjs";
+const PROVIDER = "editor.inlineSuggest.provider", MODEL = "editor.inlineSuggest.model";
 // Herdr starts with PATH=/usr/bin:/bin, so node (Homebrew, ~/.local) is looked up there too (as the viewer does).
 const userExec = (cmd, args) => exec("sh", ["-c", 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; exec "$0" "$@"', cmd, ...args]);
 const fileIo = (path) => ({ read: () => readTextFile(path), write: (text, expected) => writeTextFile(path, text, expected) });
@@ -43,6 +46,14 @@ export default class Settings extends View {
       const text = await readTextFile(`${appHome()}/${PAGE_FILE}`).catch(() => null);
       if (requestedPage(text, Date.now()) === "keybindings") { this.page = "keybindings"; cx.notify(); }
     });
+    // Inline suggestions: the provider's models and stored key (loaded when the provider changes), what the last
+    // Save / Remove / Test said; the key field is masked and emptied once saved.
+    this.inl = { provider: null, listed: null, key: null, note: null, busy: false };
+    this.modelInput = InputState.new({ placeholder: "Another model name, then Enter" });
+    this.modelInput.on("submit", (_e, cx) => { const m = this.modelInput.value().trim(); if (m) { this.set(MODEL, m, cx); this.modelInput.set_value(""); } });
+    this.keyInput = InputState.new({ placeholder: "Paste the API key" });
+    this.keyInput.set_masked(true);
+    this.keyInput.on("submit", (_e, cx) => this.saveKey(cx));
     this.load(cx); this.checkCore(cx); this.loadKeys(cx);
     // Edits made elsewhere (settings.json in the editor, the palette) show up; a build shows up when it finishes.
     cx.timer.every(2000, (cx) => { this.load(cx); this.loadKeys(cx); if (this.building) this.checkCore(cx); });
@@ -73,7 +84,7 @@ export default class Settings extends View {
     if (this.writing) return;
     cx.spawn(async (cx) => {
       const text = await readTextFile(settingsPath()).catch(() => null);
-      try { this.show(normalize(parse(text))); this.error = null; }
+      try { this.show(normalize(parse(text))); this.error = null; if (this.v[PROVIDER] !== this.inl.provider) this.loadInline(cx); }
       catch { this.error = "vscode-settings.json has a syntax error. Fix it in settings.json; nothing is written until then."; }
       cx.notify();
     });
@@ -85,6 +96,7 @@ export default class Settings extends View {
       try {
         this.show(await updateFile(fileIo(settingsPath()), change));
         this.error = null;
+        if (this.v[PROVIDER] !== this.inl.provider) this.loadInline(cx);
         this.flashSaved(cx);
       } catch (e) {
         this.error = /Invalid value/.test(e?.message) ? e.message : `Cannot write settings: ${e?.message ?? e}`;
@@ -100,7 +112,70 @@ export default class Settings extends View {
     cx.timer.after(1500, (cx) => { if (this.saved === token) { this.saved = 0; cx.notify(); } });
   }
 
-  set(key, value, cx) { this.write((raw) => withSetting(raw, key, value), cx); }
+  // Another inline suggestion provider starts from its own default model.
+  set(key, value, cx) {
+    this.write((raw) => (key === PROVIDER && raw[key] !== value ? withSetting(withSetting(raw, key, value), MODEL, "") : withSetting(raw, key, value)), cx);
+  }
+
+  // ----- inline suggestions: models, the API key (never shown again in full, never in settings.json) -----
+  inlineCli(args) {
+    return userExec("node", [`${appHome()}/${INLINE_CLI}`, ...args])
+      .then((r) => JSON.parse(r.stdout.trim().split("\n").pop() || "null") ?? { error: (r.stderr || `exit ${r.code}`).trim() })
+      .catch((e) => ({ error: e?.message ?? String(e) }));
+  }
+  loadInline(cx) {
+    const p = this.v[PROVIDER];
+    this.inl = { provider: p, listed: null, key: null, note: null, busy: false };
+    if (p === "off") return;
+    cx.spawn(async (cx) => {
+      const [listed, key] = await Promise.all([this.inlineCli(["--models", p]), HOSTED_PROVIDERS.includes(p) ? this.inlineCli(["--key", p]) : null]);
+      if (this.inl.provider !== p) return;
+      Object.assign(this.inl, { listed, key });
+      cx.notify();
+    });
+  }
+  // The typed key goes to the store through a file in a folder only this user can open (exec has no stdin), which
+  // inline.cjs deletes; the key is never a command-line argument.
+  saveKey(cx) {
+    const p = this.inl.provider, key = this.keyInput.value().trim();
+    if (!key || this.inl.busy) return;
+    this.inl.busy = true;
+    cx.spawn(async (cx) => {
+      const dir = `${appHome()}/.vscode-key-${Date.now()}`;
+      try {
+        const mk = await exec("mkdir", ["-m", "700", dir]);
+        if (mk.code !== 0) throw new Error(mk.stderr.trim() || "mkdir failed");
+        await writeTextFile(`${dir}/key`, key, null);
+        const r = await this.inlineCli(["--save-key", p, `${dir}/key`]);
+        if (r.error) throw new Error(r.error);
+        this.keyInput.set_value("");
+        this.inl.key = r;
+        this.inl.note = null;
+      } catch (e) { this.inl.note = `Cannot save the key: ${e.message}`; }
+      await exec("rm", ["-rf", dir]).catch(() => {});
+      this.inl.busy = false;
+      cx.notify();
+    });
+  }
+  removeKey(cx) {
+    const p = this.inl.provider;
+    cx.spawn(async (cx) => {
+      const r = await this.inlineCli(["--remove-key", p]);
+      this.inl.note = r.error ? `Cannot remove the key: ${r.error}` : "Removed from the keychain and vscode-secrets.json.";
+      this.inl.key = await this.inlineCli(["--key", p]);
+      cx.notify();
+    });
+  }
+  // One short completion with the stored key, only on the button.
+  testKey(cx) {
+    const p = this.inl.provider;
+    this.inl.note = "Testing…";
+    cx.spawn(async (cx) => {
+      const r = await this.inlineCli(["--test", p, this.v[MODEL]]);
+      this.inl.note = r.ok ? `Works: a completion in ${r.ms} ms.` : `Test failed: ${r.error}`;
+      cx.notify();
+    });
+  }
 
   // ----- keyboard shortcuts -----
   // The user file's entries, and the editor's table for them (re-run only when the file's text changed).
@@ -362,8 +437,41 @@ export default class Settings extends View {
         this.segmented(t, "editor.cursorBlinking", [["blink", "Blink"], ["smooth", "Smooth"], ["phase", "Phase"], ["expand", "Expand"], ["solid", "Solid"]])))
       .child(this.row(t, "Editor", "Inline Suggestions", "Gray ghost text from a code model while you type: Tab accepts, Esc hides, ⌘→ / Ctrl+→ takes a word. The status bar item turns it on and off.",
         this.toggle(t, "editor.inlineSuggest.enabled", "Inline Suggestions")))
-      .child(this.row(t, "Editor", "Inline Suggestion Provider", "Ollama runs the model on this machine (ollama pull qwen2.5-coder:1.5b-base); model, endpoint and limits are in settings.json.",
-        this.segmented(t, "editor.inlineSuggest.provider", [["ollama", "Ollama"], ["off", "Off"]])));
+      .child(this.row(t, "Editor", "Inline Suggestion Provider", "Ollama runs a model on this machine, free. Codestral (Mistral), DeepSeek and Mercury (Inception) are paid APIs with your key; they get the code around the cursor, 2,000 requests a day by default, and the status bar shows the cost.",
+        this.segmented(t, PROVIDER, [["ollama", "Ollama"], ["codestral", "Codestral"], ["deepseek", "DeepSeek"], ["mercury", "Mercury"], ["off", "Off"]])))
+      .when(this.v[PROVIDER] !== "off", (el) => el.child(this.modelRow(t)))
+      .when(HOSTED_PROVIDERS.includes(this.v[PROVIDER]), (el) => el.child(this.keyRow(t)));
+  }
+
+  modelRow(t) {
+    const listed = this.inl.listed, current = this.v[MODEL], chosen = chosenModel(current, listed);
+    const desc = this.v[PROVIDER] === "ollama" ? "The models pulled here (ollama list). Pick a base model: an instruct / chat one answers in prose." : "The provider's code completion models.";
+    const chips = !listed ? div().text_size(11.5).text_color(t.dim).child("Loading models…")
+      : listed.error ? div().text_size(11.5).text_color(t.ansi3).child(`Cannot list models: ${listed.error}`)
+        : h_flex().flex_wrap().gap(6).children(modelChoices(current, listed).map(([value, label]) => {
+          const on = value === chosen;
+          return div().id(`model-${value || "default"}`).h(24).px(10).flex().items_center().rounded(4).text_size(12).cursor_pointer()
+            .role("radio_button").accessibility_label(label).border_1().border_color(on ? t.accent : t.input)
+            .bg(on ? t.accent : t.background).text_color(on ? t.accent_foreground : t.muted)
+            .when(!on, (e) => e.hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click((_e, cx) => this.set(MODEL, value, cx)))
+            .child(label);
+        }));
+    return this.row(t, "Editor", "Inline Suggestion Model", desc,
+      div().w(220).h(28).px(8).flex().items_center().rounded(4).border_1().border_color(t.input).bg(t.background).text_size(12).child(Input.new(this.modelInput).w_full()),
+      chips);
+  }
+
+  keyRow(t) {
+    const stored = Boolean(this.inl.key?.from && this.inl.key.from !== "env");
+    return this.row(t, "Editor", "API Key", "Saved in the macOS keychain (herdr-vscode-<provider>), elsewhere in vscode-secrets.json (mode 600); never in settings.json. Test sends one short completion.",
+      h_flex().gap(6).items_center()
+        .child(div().w(200).h(28).px(8).flex().items_center().rounded(4).border_1().border_color(t.input).bg(t.background).text_size(12).child(Input.new(this.keyInput).w_full()))
+        .child(this.button(t, "key-save", this.inl.busy ? "Saving…" : "Save", (_e, cx) => this.saveKey(cx), true))
+        .when(stored, (el) => el.child(this.button(t, "key-remove", "Remove", (_e, cx) => this.removeKey(cx))))
+        .when(Boolean(this.inl.key?.from), (el) => el.child(this.button(t, "key-test", "Test", (_e, cx) => this.testKey(cx)))),
+      v_flex().gap(3)
+        .child(div().text_size(11.5).text_color(this.inl.key?.from ? t.done : t.dim).child(keyLine(this.inl.key)))
+        .when(Boolean(this.inl.note), (el) => el.child(div().text_size(11.5).text_color(/^(Cannot|Test failed)/.test(this.inl.note ?? "") ? t.ansi3 : t.muted).child(this.inl.note))));
   }
 
   pageTab(t, page, text) {
