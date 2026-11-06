@@ -593,6 +593,24 @@ class Editor {
     if (!this.find.query) return this.openFind(false);
     this.findNext(dir);
   }
+  // The search a selection seeds (VS Code's getSelectionSearchString): a one-line selection, else the word at the cursor.
+  selectionSearch() {
+    const [s, e] = this.range();
+    return this.empty ? this.wordAt()?.text ?? null : s.line === e.line ? this.buf.getText(s, e) : null;
+  }
+  // Find With Selection (⌘E): the find widget with the selection (or the word at the cursor) as the search.
+  findWithSelection() {
+    const q = this.selectionSearch();
+    if (q) this.find.query = q;
+    this.openFind(false);
+  }
+  // Find Next / Previous Selection (⌘F3 / ⇧⌘F3): the selection (or the word at the cursor) becomes the search, then
+  // the next / previous match is selected; the find widget is not opened.
+  findSelection(dir) {
+    const q = this.selectionSearch();
+    if (q) this.find.query = q;
+    if (this.find.query) this.findNext(dir);
+  }
   openGoto() { this.popup = new O.Input({ label: `Go to line (1-${this.lines.length}), :col optional:`, onAccept: (v) => this.gotoText(v) }); }
   gotoText(text) {
     const [ln, col] = text.split(/[:,]/).map(Number);

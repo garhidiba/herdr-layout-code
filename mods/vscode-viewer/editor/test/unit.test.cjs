@@ -523,11 +523,11 @@ test("the editor runs the user's key and no longer runs a removed default", asyn
 test("live() reads the file again when it changes", () => {
   const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "vsedit-kb-")), "vscode-keybindings.json");
   const kb = K.live(file);
-  assert.equal(kb.keymap.byChord.get("cmd+e"), undefined);
+  assert.equal(kb.keymap.byChord.get("cmd+9"), undefined);
   assert.equal(kb.poll(), false);
-  fs.writeFileSync(file, JSON.stringify([{ key: "cmd+e", command: "undo" }]));
+  fs.writeFileSync(file, JSON.stringify([{ key: "cmd+9", command: "undo" }]));
   assert.equal(kb.poll(), true);
-  assert.equal(kb.keymap.byChord.get("cmd+e"), "undo");
+  assert.equal(kb.keymap.byChord.get("cmd+9"), "undo");
 });
 
 // ---------- per-OS default keys (keymap.json), labels and two-step chords ----------
@@ -1020,5 +1020,25 @@ test("Select to Bracket selects the pair with its brackets, backwards from the c
   ed.moveTo({ line: 0, col: 12 });
   ed.selectToBracket(); // nothing around or after: unchanged
   assert.deepEqual(sel(ed), [0, 12, 0, 12]);
+});
+
+test("Find With Selection opens Find with the selection or the word; Find Next / Previous Selection move without it", async () => {
+  const ed = await plainEditor(["foo bar foo", "bar"]);
+  ed.moveTo({ line: 0, col: 1 });
+  ed.runCommand("actions.findWithSelection");
+  assert.equal(ed.find.query, "foo");
+  assert.equal(ed.prompt.kind, "find");
+  ed.prompt = null;
+  ed.sel = { anchor: { line: 0, col: 4 }, head: { line: 0, col: 7 } };
+  ed.runCommand("editor.action.nextSelectionMatchFindAction");
+  assert.equal(ed.find.query, "bar");
+  assert.deepEqual(sel(ed), [1, 0, 1, 3]);
+  assert.equal(ed.prompt, null);
+  ed.moveTo({ line: 0, col: 9 });
+  ed.runCommand("editor.action.previousSelectionMatchFindAction");
+  assert.equal(ed.find.query, "foo");
+  assert.deepEqual(sel(ed), [0, 0, 0, 3]);
+  ed.findSelection(-1); // wraps
+  assert.deepEqual(sel(ed), [0, 8, 0, 11]);
 });
 
