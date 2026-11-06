@@ -57,9 +57,28 @@ test("an old Close request (dialog cancelled long ago) doesn't forget it", () =>
   assert.deepEqual(ids(sync(list, [sp("a")], here, { b: 1000 }, 1000 + CLOSING_MS)), ["a", "b-"]);
 });
 
-test("a live space with the same machine, folder and name replaces a closed one", () => {
+test("closing one of several spaces with the same name and folder keeps its row", () => {
+  const dup = (id, color) => sp(id, { name: "project", folder: "/w/project", color });
+  const list = sync([], [dup("p1", "ansi1"), dup("p2", "ansi2"), dup("p3", "ansi3")], here);
+  const next = sync(list, [dup("p1", "ansi1"), dup("p3", "ansi3")], here);
+  assert.deepEqual(ids(next), ["p1", "p2-", "p3"]);
+  assert.equal(next[1].color, "ansi2");
+});
+
+test("a new space made by hand in the same place doesn't replace a closed row", () => {
   const list = sync(sync([], [sp("a"), sp("b")], here), [sp("a")], here);
-  assert.deepEqual(ids(sync(list, [sp("a"), sp("n", { name: "b", folder: "/w/b" })], here)), ["a", "n"]);
+  assert.deepEqual(ids(sync(list, [sp("a"), sp("n", { name: "b", folder: "/w/b" })], here)), ["a", "b-", "n"]);
+});
+
+test("only reopening the row itself takes it out: same-named rows keep their places and colors", () => {
+  const dup = (id, color) => sp(id, { name: "project", folder: "/w/project", color });
+  let list = sync([], [sp("a"), dup("p1", "ansi1"), dup("p2", "ansi2")], here);
+  list = sync(list, [sp("a")], here);
+  list = adopt(list, "p2", "n");
+  assert.equal(liveIndex(list, "n", new Set(["a", "n"])), 2);
+  list = sync(list, [sp("a"), dup("n", "ansi2")], here);
+  assert.deepEqual(ids(list), ["a", "p1-", "n"]);
+  assert.equal(list[1].color, "ansi1");
 });
 
 test("a closed space keeps its last color when the live one has none", () => {

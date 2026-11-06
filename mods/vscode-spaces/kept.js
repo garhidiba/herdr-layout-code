@@ -26,11 +26,10 @@ export function sync(list, live, ready, closing = {}, now = Date.now()) {
     else if (!r.live || !ready.has(on(r))) kept.push(r);
     else if (!(now - (closing[r.id] ?? -Infinity) < CLOSING_MS)) kept.push({ ...r, live: false });
   }
-  // A live space where a kept one was (same machine, folder and name) stands for it.
-  const same = (a, b) => on(a) === on(b) && a.folder === b.folder && a.name === b.name;
-  const left = kept.filter((r) => byId.has(r.id) || !live.some((s) => same(s, r)));
-  const after = follow(left, (r) => byId.has(r.id));
-  const known = new Map(left.map((r) => [r.id, r]));
+  // A kept row goes only by its own reopening (adopt) or Remove from list: spaces
+  // sharing its name or folder are other spaces, as VS Code's recent list keeps both.
+  const after = follow(kept, (r) => byId.has(r.id));
+  const known = new Map(kept.map((r) => [r.id, r]));
   const out = [...(after.get(null) ?? [])];
   for (const s of live) out.push(known.get(s.id) ?? { ...s, live: true }, ...(after.get(s.id) ?? []));
   return out;
