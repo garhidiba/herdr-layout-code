@@ -342,3 +342,75 @@ Recommendation: do **not** start phase 2 for speed. If it is done, do it for (2)
 profiling of the editor itself (not the tokenizer) shows it is the bottleneck. Real tokenizer speed-ups
 would need changes the JS does not make (e.g. caching scanner results across lines), which would
 have to be re-proven against this parity harness.
+
+## Editor on Rust: phase 2 (editor body)
+
+### What exists
+
+A separate crate and binary, `vsedit` (`mods/vscode-settings/native/vsedit/`), not a `vscode-core edit`
+subcommand: the core stays a small C-free build that the Explorer and Source Control spawn on every refresh,
+while the editor needs the tokenizer (Oniguruma's C sources), `libc` for the terminal and its own launch
+contract. One module per JS file: `buffer`, `keys`, `width`, `paint`, `file`, `settings`, `commands`
+(commands.cjs + keybindings.cjs), `highlight`, `decorations`, `autoclose`, `find`, `folding`, `gitgutter`,
+`scrollbar`, `backup`, `overlays` (dialog, input, quick pick), `editor` + `view` (vsedit.cjs's Editor),
+`hexview`, `errorpage`, `term` / `app` (terminal.cjs). Same output conventions (SGR order, ENTER/LEAVE modes,
+`?1007s/l/r`, Kitty keyboard, SGR mouse, 1003 only while a bar shows), same settings/keybindings files and
+2 s live reload, same backup format and folder.
+
+- **Positions** are byte offsets in each line's UTF-8; UTF-16 is used only where the JS shows or stores it
+  (`(N selected)`, the backup's cursor), and the status bar's `Col` counts characters as the JS does.
+- **Tokenizer on a worker thread.** vscode-textmate's grammars are `Rc` (single-threaded), so the worker owns
+  the registry and grammars and mirrors the lines. The editor sends each batch of edits as one composed line
+  change with a sequence number; the worker keeps the rule stack after every line, re-tokenizes from the edit
+  until a line past it ends in the same state (highlight.cjs's rule), tokenizes the rest of the file in the
+  background, and sends batches every ~12 ms. Results for lines edited since they were computed are dropped;
+  others are mapped through the edits that followed. Lines over 4,000 UTF-16 units go in ~1,000-unit pieces
+  (cut after `;`/`}`), partial tokens shown as they come; typing in such a line keeps the pieces before it.
+  The first frame is painted before any grammar loads; the second waits up to 1 s for the visible lines.
+  Typing a quote waits up to 20 ms for the line's tokens (the string/comment check), as the JS tokenizes it inline.
+- **Find** uses Oniguruma (exported from vscode-textmate) in place of JavaScript's RegExp: `(?i)` for Match Case
+  off, `(?<![\p{L}\p{N}_$])…(?![\p{L}\p{N}_$])` for whole words; `$n`, `$&`, `$<name>`, `\n`, `\t` replacements.
+- **Semantic layer (phase 3 hook):** `highlight::SemanticLayer`, spans (line, start, end → fg, font style) painted
+  over the TextMate colors; spans move with edits below them and are dropped on edited lines. Empty in phase 2.
+- **Keys:** the defaults come from the shared table `mods/vscode-viewer/editor/keymap.json` (VS Code's
+  `{command, key, mac, win, linux}` shape) when it ships, else the built-in table (commands.cjs's keys, with room
+  for per-OS defaults); the user's `vscode-keybindings.json` applies on top as in keybindings.cjs.
+- Phase 3 (JS only for now): language features (tsserver/LSP: definition, references, rename, hover, format,
+  diagnostics, document symbols and symbol breadcrumbs), the context menu, the command palette — their keys show
+  `Not yet in the Rust editor`. Also still JS-only: Go to File (quick open) with its multi-file switching,
+  Open Settings/Keyboard Shortcuts (JSON), Go Back/Forward.
+
+### Launch and engine switch
+
+Every opener (`openArgs` in the Explorer, the Settings dialog's JSON files) runs
+`exec sh <herdr home>/mods/vscode-viewer/editor/vsedit.sh <file> [--close-on-exit]`. The launcher execs
+`<herdr home>/vscode-core/vsedit --vscode … --fallback …/vsedit.cjs` when `"editor.engine": "rust"` and
+`vsedit --api` prints `1`; otherwise `node vsedit.cjs`. The binary execs `node vsedit.cjs` itself (before touching
+the terminal) when it can't start. **`"core.engine": "rust"` does not route to the Rust editor yet** (`RUST_READY=0`
+in the launcher): Go to File and the multi-file switching are missing. `install.sh` (the dialog's Build Rust core)
+builds `vsedit` too when `core.engine` or `editor.engine` is `rust` (or `--engine rust`); a failed editor build
+(no C compiler) leaves the editor on JS and still installs the core. The dialog does not show the editor's status.
+
+### Tests
+
+- `cargo test -p vsedit` (61 tests: buffer/undo, key parsing, keybinding resolution and per-OS defaults, find,
+  folding, autoclose, decorations, git diff, scrollbars, settings, hex viewer, …).
+- `VSEDIT_BIN=<target>/release/vsedit python3 -I mods/vscode-viewer/editor/test/e2e.py`: the JS editor's e2e
+  scenarios through the launcher with the Rust engine forced; the four phase-3 scenarios are skipped, and the
+  table says which editor ran. All 17 phase-2 scenarios pass in Rust (and all 21 still pass in JS).
+
+### Measured (this Mac, USB disk; `mods/vscode-viewer/editor/test/latency.py --runs 3`, medians)
+
+first = start → first frame; colored = start → colored frame; key = typed character → the frame with the new
+column (40 keys; TS files at the end of the middle line, the minified file at the start of its line). The binary
+run directly; through the launcher add one `sh` and one `vsedit --api` (a few ms).
+
+| Input | first JS | first Rust | colored JS | colored Rust | key median JS / Rust | key p95 JS / Rust |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| (a) TS, 2,000 lines | 77 ms | 32 ms | 205 ms | 120 ms | 1.8 / 1.7 ms | 3.5 / 8.5 ms |
+| (b) TS, 20,000 lines | 72 ms | 17 ms | 205 ms | 109 ms | 1.1 / 1.6 ms | 28.8 / 7.1 ms |
+| (c) 500 KB one-line JS | 66 ms | 21 ms | 242 ms | 142 ms | 31.9 / 0.3 ms | 37.3 / 3.7 ms |
+
+Start-up is 2–4× faster (no Node, no WASM), and the minified line no longer blocks typing (the JS spends its
+25 ms slice per keystroke re-tokenizing it; the worker does that off the input thread). Typing in ordinary files
+was already ~2 ms in JS.
