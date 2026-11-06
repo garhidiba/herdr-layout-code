@@ -17,8 +17,7 @@ import { openArgs, wantsEditor } from "./paths.js";
 export const ROOT = ".local/share/herdr-vscode"; // under a Unix machine's $HOME; nothing is written outside it
 const WIN_ROOT = "herdr-vscode";                   // under a Windows machine's %LOCALAPPDATA%
 const BUNDLES = "vscode-core/remote";              // under <herdr home>
-const ASK_AGAIN = 24 * 3600 * 1000;                // a machine whose install wasn't confirmed is asked again after a day
-export const ASKED = "vscode-explorer.remote-asked", APPROVED = "vscode-explorer.remote-approved", INSTALL_REQUEST = "vscode-explorer.remote-install";
+export const APPROVED = "vscode-explorer.remote-approved", INSTALL_REQUEST = "vscode-explorer.remote-install";
 export const INSTALL_COMMAND = "vscode-explorer.install-remote";
 const REQUEST_AGE = 600000; // a confirm dialog answered later than this installs nothing
 
@@ -180,8 +179,9 @@ export const UPLOAD = 'PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$
 
 // exec, readTextFile, notify, appHome, platform (window().platform), shared/setShared and confirm(machine, size)
 // (asks to install; its yes runs INSTALL_COMMAND) come from Herdr. Returns:
-//   prepare(machine) → { launcher, args } to open a file in the editor there, or null for the viewer (no editor for
-//     its system, no bundle built, not installed yet: asks once a day, or the install failed);
+//   prepare(machine) → { launcher, args } to open a file in the editor there; { install: true } for the viewer when it
+//     isn't installed yet (asks on every open); null for the viewer (no editor for its system, no bundle built, or the
+//     install failed);
 //   install(machine) → the installed target (throws with the reason; toasts its progress), one at a time per machine;
 //   installRequested() → the confirm dialog's yes.
 export function createRemote({ exec, readTextFile, notify, appHome, platform = () => null, shared = () => null, setShared = () => {}, confirm = () => {}, now = Date.now }) {
@@ -263,14 +263,11 @@ export function createRemote({ exec, readTextFile, notify, appHome, platform = (
         ready.set(machine, t.dir);
         return launch(t);
       }
-      // a machine that said yes once updates on its own; the others are asked (the viewer opens meanwhile)
+      // a machine that said yes once updates on its own; the others are asked each time (the viewer opens meanwhile,
+      // with the same offer)
       if (shared(APPROVED)?.[machine]) return launch(await install(machine));
-      const asked = shared(ASKED) ?? {};
-      if (!(now() - (asked[machine] ?? 0) < ASK_AGAIN)) {
-        setShared(ASKED, { ...asked, [machine]: now() });
-        confirm(machine, megabytes(t.manifest.size));
-      }
-      return null;
+      confirm(machine, megabytes(t.manifest.size));
+      return { install: true };
     } catch (e) {
       notify({ title: `Editor on ${machine}: opening the viewer`, body: String(e?.message ?? e), level: "warning" });
       return null;

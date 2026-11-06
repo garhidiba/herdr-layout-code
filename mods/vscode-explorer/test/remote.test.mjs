@@ -6,7 +6,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, exist
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { platformOf, parseInfo, parseWindowsInfo, parseManifest, keysOs, megabytes, rootOf, dirOf, psQuote, encodeCommand, windowsInstall, SYSTEMS, REMOTE_INSTALL, UPLOAD, INFO, WIN_INFO, createRemote, createOpenFile, ASKED, APPROVED, INSTALL_REQUEST } from "../remote.js";
+import { platformOf, parseInfo, parseWindowsInfo, parseManifest, keysOs, megabytes, rootOf, dirOf, psQuote, encodeCommand, windowsInstall, SYSTEMS, REMOTE_INSTALL, UPLOAD, INFO, WIN_INFO, createRemote, createOpenFile, APPROVED, INSTALL_REQUEST } from "../remote.js";
 
 const VER = "1.0.0-0123456789ab", SUM = "a".repeat(64);
 const manifestText = (platform, version = VER, sha256 = SUM) => JSON.stringify({ version, platform, sha256, size: 2843587, files: {} });
@@ -175,15 +175,11 @@ test("an installed machine opens the editor with this computer's keys and settin
   assert.deepEqual(f.toasts, []);
 });
 
-test("not installed: the viewer opens and the machine is asked once a day", async () => {
+test("not installed: the viewer opens with the offer and the machine is asked on every open", async () => {
   const f = fake();
-  assert.equal(await f.remote.prepare("box"), null);
-  assert.equal(await f.remote.prepare("box"), null);
-  assert.deepEqual(f.asks, [["box", "2.8 MB"]]);
-  assert.equal(f.store[ASKED].box, f.t);
-  f.t += 25 * 3600 * 1000;
-  await f.remote.prepare("box");
-  assert.equal(f.asks.length, 2);
+  assert.deepEqual(await f.remote.prepare("box"), { install: true });
+  assert.deepEqual(await f.remote.prepare("box"), { install: true });
+  assert.deepEqual(f.asks, [["box", "2.8 MB"], ["box", "2.8 MB"]]);
   assert.ok(!f.runs.some(r => r.args[1] === UPLOAD)); // nothing sent without a yes
 });
 
@@ -261,8 +257,19 @@ test("openFile asks the machine only for files the editor takes", async () => {
   await openFile("/srv/a.rs", { on: "box", folder: "/srv" });
   await openFile("/srv/a.png", { on: "box", folder: "/srv" });
   await openFile("/p/a.rs", { folder: "/p" });
-  assert.deepEqual(asked, ["box"]);
+  await openFile("/srv/.env", { on: "box", folder: "/srv" });
+  await openFile("/srv/README.md", { on: "box", folder: "/srv" });
+  assert.deepEqual(asked, ["box", "box", "box"]);
   assert.equal(opened[0].argv[2], "/r/vsedit.sh");
   assert.equal(opened[1].mod, "vscode-viewer");
   assert.equal(opened[2].argv[2], "/h/mods/vscode-viewer/editor/vsedit.sh");
+  assert.equal(opened[3].argv[3], "/srv/.env");
+  assert.equal(opened[4].argv[3], "/srv/README.md");
+});
+
+test("openFile on a machine without the editor: the viewer with the install offer", async () => {
+  const opened = [];
+  const openFile = createOpenFile({ openTab: async (args) => opened.push(args), appHome: () => "/h", remote: fake().remote });
+  await openFile("/srv/x.toml", { on: "box", folder: "/srv" });
+  assert.deepEqual(opened[0], { name: "x.toml", mod: "vscode-viewer", props: { file: "/srv/x.toml", on: "box", install: true } });
 });

@@ -1,6 +1,6 @@
 // A lazy file explorer for the focused pane's folder, with Material Icon Theme icons.
-// Click a code/text file to edit it in a new terminal tab (vsedit); images, markdown and remote files
-// open in the vscode-viewer mod tab. Cmd+click opens it in VS Code. Right-click opens a VS Code-style menu
+// Click a file to edit it in a new terminal tab (vsedit, on the remote machine for a remote space once installed
+// there); images open in the vscode-viewer mod tab. Cmd+click opens it in VS Code. Right-click opens a VS Code-style menu
 // (menu.js), which runs as an overlay of this same mod.
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";

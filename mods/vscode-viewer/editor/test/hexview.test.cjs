@@ -128,6 +128,19 @@ test("NUL bytes mark a file binary; Open Anyway decodes it as text", () => {
   assert.deepEqual(F.load(f, { lossy: true }).lines, ["a\0b"]);
 });
 
+test("text is told by content, not the name: any name without NUL bytes opens as text", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vsedit-sniff-"));
+  for (const name of [".env", ".env.dev", "x.toml", "x.yaml", "Dockerfile", "LICENSE", "no-extension", "data.unknownext"]) {
+    const f = path.join(dir, name);
+    fs.writeFileSync(f, "KEY=value\n");
+    assert.deepEqual(F.load(f).lines, ["KEY=value"], name);
+    assert.ok(!HV.binaryName(f), name);
+  }
+  fs.writeFileSync(path.join(dir, "notes.txt"), "a\0b");
+  assert.equal(F.load(path.join(dir, "notes.txt")).binary, true);
+  fs.rmSync(dir, { recursive: true });
+});
+
 test("names that are clearly binary skip the prompt", () => {
   for (const f of ["/x/.DS_Store", "a.png", "b.zip", "c.wasm", "d.woff2", "e.pdf", "f.sqlite", "g.exe"]) assert.ok(HV.binaryName(f), f);
   for (const f of ["a.ts", "README.md", "logo.svg", "notes.txt"]) assert.ok(!HV.binaryName(f), f);

@@ -1,22 +1,27 @@
 // Pure rules for the Explorer: where a file opens, path text, names for new/pasted entries, the context menu's items.
 
-const VIEWER_EXT = /\.(png|jpe?g|gif|webp|bmp|ico|svg|tiff?|md|markdown|mdx|mkd)$/i;
+// What the viewer previews: images. Everything else opens in the editor, as in VS Code: it reads the file's first
+// bytes and shows text (any name or extension, dotfiles and files without one too) or, with NUL bytes, the hex viewer.
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|ico|svg|tiff?)$/i;
+const MARKDOWN_EXT = /\.(md|markdown|mdx|mkd)$/i;
 // The editor launcher: the Rust editor when vscode-settings.json picks it (and it is built), else vsedit.cjs.
 export const EDITOR = "mods/vscode-viewer/editor/vsedit.sh";
 
 export const baseName = (p) => p.slice(p.lastIndexOf("/") + 1);
 export const parentOf = (p) => p.slice(0, p.lastIndexOf("/")) || "/";
 
-// Whether a file opens in the terminal editor (else the viewer): code and text files, or when asked.
-export const wantsEditor = (file, how = "auto") => how === "editor" || (how === "auto" && !VIEWER_EXT.test(baseName(file)));
+// Whether a file opens in the terminal editor (else the viewer): all but images, or when asked.
+export const wantsEditor = (file, how = "auto") => how === "editor" || (how === "auto" && !IMAGE_EXT.test(baseName(file)));
+export const isMarkdown = (file) => MARKDOWN_EXT.test(baseName(file));
 
 // tab.new args: the terminal editor (started in `folder`, default the file's own), or the vscode-viewer tab
-// (images, markdown, or when asked). Every way of opening a file goes through here, the remote ones too: a remote
+// (images, Open Preview, or when asked). Every way of opening a file goes through here, the remote ones too: a remote
 // file takes the editor only with `remote` ({launcher, args}, remote.js: the bundle installed on that machine; the
-// tab is in the remote space, so it runs there), else the viewer.
+// tab is in the remote space, so it runs there), else the viewer, which offers the install when `remote` is
+// { install: true } (not installed there yet).
 export function openArgs(file, { on = null, appHome, how = "auto", folder = parentOf(file), remote = null }) {
   const name = baseName(file);
-  if (!wantsEditor(file, how) || (on && !remote)) return { name, mod: "vscode-viewer", props: { file, on } };
+  if (!wantsEditor(file, how) || (on && !remote?.launcher)) return { name, mod: "vscode-viewer", props: { file, on, ...(remote?.install ? { install: true } : {}) } };
   // exec: the editor replaces the tab's shell, so the tab closes when it exits (see vsedit's --close-on-exit)
   if (on) return { name, folder, argv: ["exec", "sh", remote.launcher, file, "--close-on-exit", ...remote.args] };
   return { name, folder, argv: ["exec", "sh", `${appHome}/${EDITOR}`, file, "--close-on-exit"] };
@@ -51,10 +56,11 @@ export function nameProblem(name, taken) {
 }
 
 // Context menu rows: [label, action, hint] or "-" for a separator. A remote entry has the same items but Reveal in
-// Finder: Finder only sees this computer, and Copy Path already gives the remote path.
-export function menuItems({ dir, remote, canPaste }) {
+// Finder: Finder only sees this computer, and Copy Path already gives the remote path. Markdown adds Open Preview.
+export function menuItems({ dir, remote, canPaste, markdown = false }) {
   const groups = [
-    dir ? [["New File…", "newFile"], ["New Folder…", "newFolder"]] : [["Open Preview", "open"], ["Open With…", "openWith"]],
+    dir ? [["New File…", "newFile"], ["New Folder…", "newFolder"]]
+      : [["Open", "open"], ...(markdown ? [["Open Preview", "preview"]] : []), ["Open With…", "openWith"]],
     [...(remote ? [] : [["Reveal in Finder", "reveal", "⌥⌘R"]]), ["Open in Integrated Terminal", "terminal"]],
     [["Cut", "cut", "⌘X"], ["Copy", "copy", "⌘C"], ...(canPaste ? [["Paste", "paste", "⌘V"]] : [])],
     [["Copy Path", "copyPath", "⌥⌘C"], ["Copy Relative Path", "copyRelative", "⇧⌥⌘C"]],

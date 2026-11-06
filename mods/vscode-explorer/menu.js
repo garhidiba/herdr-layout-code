@@ -4,18 +4,18 @@ import { div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { exec, hc, run, spaces, props, openOverlay, closeOverlay, theme, shared, setShared, appHome, readTextFile, writeTextFile, notify, window } from "herdr";
 import { createOpenTab } from "./launch.js";
-import { menuItems, menuHeight, openWith, baseName, parentOf, relativeTo, nameProblem, vscodeRemoteArgs } from "./paths.js";
+import { menuItems, menuHeight, openWith, baseName, parentOf, relativeTo, nameProblem, vscodeRemoteArgs, isMarkdown } from "./paths.js";
 import { createOps } from "./ops.js";
 import { createRemote, createOpenFile, ROOT, INSTALL_COMMAND, INSTALL_REQUEST } from "./remote.js";
 
 const openTab = createOpenTab({ hc, run, spaces });
-// The editor on a remote space's machine (remote.js): installing it is asked once with the shipped confirm dialog,
+// The editor on a remote space's machine (remote.js): installing it is asked on each open with the shipped confirm dialog,
 // whose yes runs INSTALL_COMMAND for the tree (main.js), naming the machine in the shared value INSTALL_REQUEST.
 const askInstall = (machine, size) => {
   setShared(INSTALL_REQUEST, { machine, at: Date.now() });
   openOverlay({ mod: "confirm", kind: "dialog", width: 420, height: 180, props: {
     title: `Install the editor on ${machine} (${size})?`,
-    detail: `Its files then open in the terminal editor on ${machine}, with its language servers; it goes into ~/${ROOT}. This file opens in the viewer meanwhile.`,
+    detail: `Its files then open in the terminal editor on ${machine}, with its language servers; it goes into ~/${ROOT}. This file opens in the viewer meanwhile (read-only).`,
     command: { name: INSTALL_COMMAND, args: {} },
   } });
 };
@@ -34,7 +34,7 @@ const TRASH = 'if command -v trash >/dev/null 2>&1; then trash "$1"; else osascr
 
 // Opens the menu for an entry: { path (absolute), root, dir, on }.
 export function openMenu(target) {
-  const rows = menuItems({ dir: target.dir, remote: !!target.on, canPaste: !!shared(CLIPBOARD) });
+  const rows = menuItems({ dir: target.dir, remote: !!target.on, canPaste: !!shared(CLIPBOARD), markdown: isMarkdown(target.path) });
   openOverlay({ mod: "vscode-explorer", kind: "popup", width: 270, height: menuHeight(rows), props: { menu: target } });
 }
 
@@ -73,7 +73,7 @@ export class ExplorerMenu {
 
   rows() {
     const t = this.target;
-    return this.withList ? openWith(!!t.on) : menuItems({ dir: t.dir, remote: !!t.on, canPaste: !!shared(CLIPBOARD) });
+    return this.withList ? openWith(!!t.on) : menuItems({ dir: t.dir, remote: !!t.on, canPaste: !!shared(CLIPBOARD), markdown: isMarkdown(t.path) });
   }
 
   close() { closeOverlay(props().overlay); }
@@ -84,6 +84,7 @@ export class ExplorerMenu {
     // Closed once the tab is shown: closing first could end the wait. A second pick meanwhile is ignored.
     const open = (how) => !this.opening && (this.opening = true) && cx.spawn(async cx => { try { await openFile(t.path, { on: t.on, how, folder: t.root }, cx); } finally { this.close(); } });
     if (action === "open") return open("auto");
+    if (action === "preview") return open("viewer");
     if (action === "editor" || action === "viewer") return open(action);
     this.close();
     const fail = (e) => e?.unreachable ? toast(e) : dialog({ kind: "error", text: String(e?.message ?? e) }, 150);

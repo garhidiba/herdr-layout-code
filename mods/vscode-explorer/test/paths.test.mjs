@@ -1,14 +1,25 @@
 // node --test mods/vscode-explorer/test/paths.test.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
-import { openArgs, relativeTo, within, copyName, freeName, nameProblem, menuItems, menuHeight, parentOf, openWith, vscodeRemoteArgs } from "../paths.js";
+import { openArgs, wantsEditor, isMarkdown, relativeTo, within, copyName, freeName, nameProblem, menuItems, menuHeight, parentOf, openWith, vscodeRemoteArgs } from "../paths.js";
 
 const home = "/Users/me/.config/herdr-app";
 
-test("code opens in the terminal editor, images/markdown (and remote files without the remote editor) in the viewer", () => {
+test("every file but an image opens in the terminal editor, which shows text or (NUL bytes) the hex viewer", () => {
+  const text = ["x.toml", "x.yaml", "x.yml", ".env", ".env.dev", ".env.example", ".profile", "Dockerfile", "Makefile",
+    "README.md", "notes.markdown", "LICENSE", "no-extension", "big.log", "data.unknownext", "app.min.js", "a.pdf", "a.bin"];
+  for (const name of text) assert.ok(wantsEditor(`/p/${name}`), name);
+  for (const name of ["logo.PNG", "a.jpg", "a.jpeg", "a.gif", "a.webp", "a.bmp", "a.ico", "a.svg", "a.tif", "a.tiff"]) assert.ok(!wantsEditor(`/p/${name}`), name);
+  assert.ok(!wantsEditor("/p/a.ts", "viewer"));
+  assert.ok(wantsEditor("/p/a.png", "editor"));
+  assert.ok(isMarkdown("/p/README.md") && isMarkdown("/p/a.MDX") && !isMarkdown("/p/md") && !isMarkdown("/p/a.toml"));
+});
+
+test("code opens in the terminal editor, images (and remote files without the remote editor) in the viewer", () => {
   assert.deepEqual(openArgs("/p/src/a.ts", { appHome: home }),
     { name: "a.ts", folder: "/p/src", argv: ["exec", "sh", `${home}/mods/vscode-viewer/editor/vsedit.sh`, "/p/src/a.ts", "--close-on-exit"] });
-  assert.equal(openArgs("/p/README.md", { appHome: home }).mod, "vscode-viewer");
+  for (const f of ["/p/README.md", "/p/.env", "/p/x.toml", "/p/deploy.yml", "/p/Dockerfile"]) assert.equal(openArgs(f, { appHome: home }).argv[3], f);
+  assert.equal(openArgs("/p/README.md", { appHome: home, how: "viewer" }).mod, "vscode-viewer"); // Open Preview
   assert.equal(openArgs("/p/logo.PNG", { appHome: home }).mod, "vscode-viewer");
   assert.deepEqual(openArgs("/p/a.ts", { on: "box", appHome: home }), { name: "a.ts", mod: "vscode-viewer", props: { file: "/p/a.ts", on: "box" } });
   assert.equal(openArgs("/p/a.ts", { on: "box", appHome: home, how: "editor" }).mod, "vscode-viewer"); // not installed on box
@@ -22,9 +33,15 @@ test("a remote file opens in the editor installed on its machine, with the launc
   const remote = { launcher: "/root/.local/share/herdr-vscode/1.0.0-0123456789ab/vsedit.sh", args: ["--os", "mac"] };
   assert.deepEqual(openArgs("/srv/a b.ts", { on: "box", appHome: home, folder: "/srv", remote }),
     { name: "a b.ts", folder: "/srv", argv: ["exec", "sh", remote.launcher, "/srv/a b.ts", "--close-on-exit", "--os", "mac"] });
-  assert.equal(openArgs("/srv/README.md", { on: "box", appHome: home, remote }).mod, "vscode-viewer"); // still the viewer's kind
-  assert.equal(openArgs("/srv/README.md", { on: "box", appHome: home, how: "editor", remote }).argv[2], remote.launcher);
+  for (const f of ["/srv/README.md", "/srv/.env.dev", "/srv/x.toml", "/srv/compose.yaml"]) assert.equal(openArgs(f, { on: "box", appHome: home, remote }).argv[2], remote.launcher);
+  assert.equal(openArgs("/srv/a.png", { on: "box", appHome: home, remote }).mod, "vscode-viewer");
   assert.equal(openArgs("/srv/a.ts", { on: "box", appHome: home, how: "viewer", remote }).mod, "vscode-viewer");
+});
+
+test("a remote file on a machine without the editor opens the viewer with the install offer", () => {
+  assert.deepEqual(openArgs("/srv/.env", { on: "box", appHome: home, remote: { install: true } }),
+    { name: ".env", mod: "vscode-viewer", props: { file: "/srv/.env", on: "box", install: true } });
+  assert.deepEqual(openArgs("/srv/.env", { on: "box", appHome: home }).props, { file: "/srv/.env", on: "box" });
 });
 
 test("relative paths are relative to the Explorer root", () => {
@@ -63,13 +80,14 @@ test("the menu groups items like VS Code; a remote entry has every item but Reve
     "New File…", "New Folder…", "-", "Reveal in Finder", "Open in Integrated Terminal", "-", "Cut", "Copy", "Paste", "-",
     "Copy Path", "Copy Relative Path", "-", "Rename…", "Delete"]);
   assert.deepEqual(labels(menuItems({ dir: false, remote: false, canPaste: false })), [
-    "Open Preview", "Open With…", "-", "Reveal in Finder", "Open in Integrated Terminal", "-", "Cut", "Copy", "-",
+    "Open", "Open With…", "-", "Reveal in Finder", "Open in Integrated Terminal", "-", "Cut", "Copy", "-",
     "Copy Path", "Copy Relative Path", "-", "Rename…", "Delete"]);
   assert.deepEqual(labels(menuItems({ dir: true, remote: true, canPaste: true })), [
     "New File…", "New Folder…", "-", "Open in Integrated Terminal", "-", "Cut", "Copy", "Paste", "-",
     "Copy Path", "Copy Relative Path", "-", "Rename…", "Delete"]);
+  assert.deepEqual(labels(menuItems({ dir: false, remote: false, canPaste: false, markdown: true })).slice(0, 3), ["Open", "Open Preview", "Open With…"]);
   assert.deepEqual(labels(menuItems({ dir: false, remote: true, canPaste: false })), [
-    "Open Preview", "Open With…", "-", "Open in Integrated Terminal", "-", "Cut", "Copy", "-",
+    "Open", "Open With…", "-", "Open in Integrated Terminal", "-", "Cut", "Copy", "-",
     "Copy Path", "Copy Relative Path", "-", "Rename…", "Delete"]);
   assert.equal(menuHeight(["-", ["a"]]), 10 + 9 + 26);
 });

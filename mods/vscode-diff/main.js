@@ -13,6 +13,11 @@ const MAX_LINES = 20000, MAX_OUTPUT = 8 * 1024 * 1024 - 1024, ROW = 20, GUTTER =
 // Atom One Dark (akamud.vscode-theme-onedark): editor background/foreground and line numbers; diff fills.
 const BG = "#282c34", FG = "#abb2bf", NUMBER = "#636d83", REMOVED = "#e06c7520", ADDED = "#98c37920", FOLD = "#2c313c", FOLD_TEXT = "#7f848e";
 const short = (rev) => rev ? rev.slice(0, 7) : "∅";
+// Open File as the Explorer opens a local file (vscode-explorer paths.js openArgs): the terminal editor in a tab of its
+// own, images in the viewer. A remote file opens in the viewer (the Explorer finds the editor installed on its machine).
+const IMAGE = /\.(png|jpe?g|gif|webp|bmp|ico|svg|tiff?)$/i;
+const openFileArgs = (file, name, folder, on) => (on || IMAGE.test(name) ? { name, mod: "vscode-viewer", props: { file, on } }
+  : { name, folder, argv: ["exec", "sh", `${appHome()}/mods/vscode-viewer/editor/vsedit.sh`, file, "--close-on-exit"] });
 const tabs = (s) => s.replace(/\t/g, "    ");
 
 // Material Icon Theme icon for a file name (the Explorer's table): exact name, then the longest extension.
@@ -150,7 +155,7 @@ export default class Diff extends View {
     return v_flex().id("diff").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
       .child(h_flex().h(30).flex_none().pl(16).pr(10).gap(6).items_center()
         .child(crumbs)
-        .child(button("open-file", "Open File", () => run("tab.new", { name, mod: "vscode-viewer", props: { file, on: this.on } })))
+        .child(button("open-file", "Open File", () => run("tab.new", openFileArgs(file, name, this.repo, this.on))))
         .when(!this.on, (el) => el.child(button("vscode", "Open in VS Code", () => userExec("code", [file]).catch(() => {})))))
       .child(this.body(t));
   }

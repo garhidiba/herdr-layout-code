@@ -1,4 +1,5 @@
-// A file editor for a tab: props { file: absolute path, on?: machine }.
+// A file editor for a tab: props { file: absolute path, on?: machine, install?: true (the terminal editor isn't on that
+// machine yet: an Install Editor button asks the Explorer to install it, as its confirm dialog's yes does) }.
 // Opens straight into Herdr's built-in editor (Atom One Dark colors, VS Code's file-type recognition from langs.json),
 // saves with Cmd+S ("vscode-viewer.save" in keys.json), flags changes on disk, and shows a VS Code-style status bar.
 // Images open as a preview; markdown opens rendered, with Edit to switch to the editor.
@@ -6,7 +7,7 @@
 // its tab from closing, so unsaved text is kept as a hot-exit backup in close() and offered back on the next open.
 import { View, div, image, PathBuilder, Background } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState, TextView } from "gpui-base";
-import { props, readTextFile, writeTextFile, exec, theme, appHome, nextCommand, focused, panes } from "herdr";
+import { props, readTextFile, writeTextFile, exec, theme, appHome, nextCommand, focused, panes, run, setShared } from "herdr";
 // Herdr starts with PATH=/usr/bin:/bin, so Homebrew/user tools (node, code, codex, trash) are looked up here too.
 const userExec = (cmd, args, opts) => exec("sh", ["-c", 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; exec "$0" "$@"', cmd, ...args], opts);
 
@@ -113,7 +114,7 @@ function facts(text) {
 export default class Viewer extends View {
   init(given, cx) {
     const p = { ...props(), ...given };
-    this.file = p.file; this.on = p.on ?? null;
+    this.file = p.file; this.on = p.on ?? null; this.install = p.on && p.install ? "offer" : null;
     this.text = null;          // what is on disk, as last read or written
     this.code = null; this.dirty = false; this.conflict = false; this.wrap = false;
     this.error = null; this.table = null; this.language = "Plain Text"; this.facts = null;
@@ -236,6 +237,15 @@ export default class Viewer extends View {
     cx.notify();
   }
 
+  // The Explorer's install (vscode-explorer remote.js: INSTALL_REQUEST, then its install-remote command); its toasts
+  // tell how it went, and the file's next open takes the editor.
+  installEditor(cx) {
+    setShared("vscode-explorer.remote-install", { machine: this.on, at: Date.now() });
+    run("vscode-explorer.install-remote");
+    this.install = "asked";
+    cx.notify();
+  }
+
   revert(cx) { this.dirty = false; this.conflict = false; this.text = null; this.restore = null; this.removeBackup(); this.load(cx); }
 
   toggleWrap(cx) {
@@ -273,6 +283,7 @@ export default class Viewer extends View {
         .when(this.kind === "markdown", el => el.child(button("preview", this.preview ? "Edit" : "Preview", cx => { this.preview = !this.preview; cx.notify(); })))
         .when(text && !this.preview, el => el.child(button("wrap", "Wrap", cx => this.toggleWrap(cx), this.wrap)))
         .when(this.dirty, el => el.child(button("revert", "Revert", cx => this.revert(cx))))
+        .when(Boolean(this.install), el => el.child(button("install", this.install === "asked" ? "Installing…" : `Install Editor on ${this.on}`, cx => this.install === "offer" && this.installEditor(cx))))
         .when(!this.on, el => el.child(button("vscode", "Open in VS Code", () => userExec("code", [this.file]).catch(() => {}))))
         .when(text && !this.on, el => el.child(button("save", this.dirty ? "Save ⌘S" : "Saved", cx => this.save(cx), this.dirty))))
       .when(this.conflict, el => el.child(h_flex().flex_none().px(14).py(6).gap(10).items_center().bg(t.chrome).border_b(1).border_color(t.border).text_size(12)
