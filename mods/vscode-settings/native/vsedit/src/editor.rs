@@ -23,7 +23,9 @@ use crate::paint::{Color, Palette};
 use crate::scrollbar::Bar;
 use crate::settings::{self, AutoSave, Settings};
 use crate::term::{self, Term};
-use crate::width::{display_col, index_at_col, next_index, prev_index};
+use crate::width::{display_col, next_index, prev_index};
+use crate::wrap::{self, Rows};
+use std::rc::Rc;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -185,6 +187,7 @@ pub struct DocState {
     sel: Sel,
     goal: Option<usize>,
     top: usize,
+    top_sub: usize,
     left: usize,
     folds: Folds,
     ranges: Option<(u64, usize, Vec<Range>)>,
@@ -192,6 +195,29 @@ pub struct DocState {
     seen_version: u64,
     closers: (u64, Vec<Pos>),
     lang: LangDoc,
+    wrap_toggle: Option<&'static str>,
+    wrap_rows: WrapRows,
+}
+
+/// Rows per line while wrapping (-1 where an edit changed the line, counted again on the next ensure_rows) and the
+/// first view row of each line, for one wrap width/tab/indent mode, text version and fold version.
+#[derive(Default)]
+pub struct WrapRows {
+    key: (usize, usize, &'static str),
+    counts: Vec<i32>,
+    start: Vec<usize>,
+    version: u64,
+    fold_version: u64,
+}
+
+impl WrapRows {
+    fn edited(&mut self, c: Change) {
+        if self.counts.is_empty() {
+            return;
+        }
+        let end = (c.start + c.removed).min(self.counts.len());
+        self.counts.splice(c.start.min(end)..end, std::iter::repeat_n(-1, c.inserted));
+    }
 }
 
 impl DocState {
@@ -217,12 +243,15 @@ impl DocState {
             sel: Sel::default(),
             goal: None,
             top: 0,
+            top_sub: 0,
             left: 0,
             folds: Folds::default(),
             ranges: None,
             seen_version: 0,
             closers: (0, vec![]),
             lang: LangDoc::default(),
+            wrap_toggle: None,
+            wrap_rows: WrapRows::default(),
         }
     }
 }
@@ -243,6 +272,8 @@ pub struct Editor {
     pub sel: Sel,
     goal: Option<usize>,
     pub top: usize,
+    /// The first row of `top` shown (a wrapped line's rows).
+    pub top_sub: usize,
     pub left: usize,
     pub rows: i32,
     pub cols: i32,
@@ -292,6 +323,11 @@ pub struct Editor {
     pub ls: LangState,
     /// Inline suggestions: the ghost text, the debounce, the request in flight.
     pub inline: inline_ui::InlineState,
+    /// Toggle Word Wrap's choice for this file (None: editor.wordWrap).
+    wrap_toggle: Option<&'static str>,
+    wrap_rows: WrapRows,
+    /// Each line text's rows at the current wrap width.
+    wraps: wrap::Cache,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -304,6 +340,8 @@ pub enum StatusAct {
     Language,
     /// The inline suggestion item: on/off.
     Inline,
+    /// The word wrap item: Toggle Word Wrap.
+    Wrap,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -340,6 +378,7 @@ impl Editor {
             sel: st.sel,
             goal: st.goal,
             top: st.top,
+            top_sub: st.top_sub,
             left: st.left,
             rows: 24,
             cols: 80,
@@ -382,6 +421,9 @@ impl Editor {
             lang: st.lang,
             ls: LangState::new(theme),
             inline: inline_ui::InlineState::default(),
+            wrap_toggle: st.wrap_toggle,
+            wrap_rows: st.wrap_rows,
+            wraps: wrap::Cache::default(),
         }
     }
 
@@ -400,7 +442,10 @@ impl Editor {
         swap(&mut self.sel, &mut st.sel);
         swap(&mut self.goal, &mut st.goal);
         swap(&mut self.top, &mut st.top);
+        swap(&mut self.top_sub, &mut st.top_sub);
         swap(&mut self.left, &mut st.left);
+        swap(&mut self.wrap_toggle, &mut st.wrap_toggle);
+        swap(&mut self.wrap_rows, &mut st.wrap_rows);
         swap(&mut self.folds, &mut st.folds);
         swap(&mut self.ranges, &mut st.ranges);
         swap(&mut self.git, &mut st.git);
@@ -451,21 +496,132 @@ impl Editor {
     pub fn text_width(&self) -> usize {
         (self.cols - self.gutter() as i32 - self.vbar.shown as i32).max(1) as usize
     }
+
+    // ----- word wrap (wrap.rs): editor.wordWrap, or Toggle Word Wrap's choice for this file -----
+    pub fn word_wrap(&self) -> &'static str {
+        self.wrap_toggle.unwrap_or(self.settings.word_wrap)
+    }
+    /// Columns a row holds, 0 while not wrapping. "on" leaves the scrollbar's column and one for the caret free.
+    pub fn wrap_width(&self) -> usize {
+        let (view, col) = ((self.cols - self.gutter() as i32 - 2).max(1) as usize, self.settings.word_wrap_column);
+        match self.word_wrap() {
+            "on" => view,
+            "bounded" => view.min(col),
+            "wordWrapColumn" => col,
+            _ => 0,
+        }
+    }
+    /// A line's rows (one while not wrapping or when it fits).
+    pub fn wrap_of(&mut self, line: usize) -> Rc<Rows> {
+        let (w, tab, mode) = (self.wrap_width(), self.tab(), self.settings.wrapping_indent);
+        self.wraps.get(&self.buf.lines[line], w, tab, mode)
+    }
+    /// p's row within its line and its x there (cells from the row's left edge, the wrap indent included).
+    pub fn row_pos(&mut self, p: Pos) -> (usize, usize) {
+        let r = self.wrap_of(p.line);
+        let sub = r.row_of(p.col);
+        (sub, r.x_of(sub, &self.buf.lines[p.line], p.col, self.tab()))
+    }
+    /// VS Code's Toggle Word Wrap: off <-> on (or the configured mode), for this file and session.
+    pub fn toggle_word_wrap(&mut self) {
+        let set = self.settings.word_wrap;
+        let next = if self.word_wrap() == "off" { if set == "off" { "on" } else { set } } else { "off" };
+        self.wrap_toggle = (next != set).then_some(next);
+        self.left = 0;
+        self.reveal();
+    }
+    /// The status bar item: "Wrap" (with the column for wordWrapColumn / bounded) or "No Wrap" (shown dimmed), and
+    /// what the pointer on it says.
+    pub fn wrap_status(&self) -> (String, String) {
+        let (mode, col) = (self.word_wrap(), self.settings.word_wrap_column);
+        let fixed = mode == "wordWrapColumn" || mode == "bounded";
+        let text = if mode == "off" { "No Wrap".into() } else if fixed { format!("Wrap {col}") } else { "Wrap".into() };
+        let what = if mode == "off" {
+            "No word wrap".into()
+        } else if fixed {
+            format!("Word wrap at {}column {col} ({mode})", if mode == "bounded" { "the window or " } else { "" })
+        } else {
+            "Word wrap at the window's width".into()
+        };
+        let key = self.keys.keymap.label("editor.action.toggleWordWrap");
+        let key = if key.is_empty() { "View: Toggle Word Wrap".into() } else { key };
+        (text, format!("{what} · click to turn it {} for this file ({key})", if mode == "off" { "on" } else { "off" }))
+    }
+    /// While wrapping, brings wrap_rows up to date (only the lines edited since are wrapped again); false when not wrapping.
+    fn ensure_rows(&mut self) -> bool {
+        let w = self.wrap_width();
+        if w == 0 {
+            return false;
+        }
+        self.sync();
+        let (key, n) = ((w, self.tab(), self.settings.wrapping_indent), self.buf.lines.len());
+        let st = &mut self.wrap_rows;
+        if st.key == key && st.version == self.buf.version && st.fold_version == self.folds.version && st.start.len() == n + 1 {
+            return true;
+        }
+        if st.key != key || st.counts.len() != n {
+            st.key = key;
+            st.counts = vec![-1; n];
+        }
+        for (l, c) in st.counts.iter_mut().enumerate() {
+            if *c < 0 {
+                *c = self.wraps.get(&self.buf.lines[l], key.0, key.1, key.2).starts.len() as i32;
+            }
+        }
+        st.start.resize(n + 1, 0);
+        let mut v = 0;
+        let mut l = 0;
+        while l < n {
+            let next = if self.folds.any() { self.folds.next(l) } else { l + 1 };
+            st.start[l] = v;
+            v += st.counts[l] as usize;
+            for h in l + 1..next.min(n) {
+                st.start[h] = v;
+            }
+            l = next;
+        }
+        st.start[n] = v;
+        (st.version, st.fold_version) = (self.buf.version, self.folds.version);
+        true
+    }
+    /// View rows (the lines collapsed folds hide skipped, a wrapped line's rows each) <-> buffer lines; `top` is always
+    /// a visible line, `top_sub` its first row shown. row_of: a line's first row (a hidden line: its header's).
     pub fn row_of(&mut self, line: usize) -> usize {
-        self.folds.row_of(line)
+        if !self.ensure_rows() {
+            return self.folds.row_of(line);
+        }
+        let l = self.folds.visible(line);
+        self.wrap_rows.start[l]
     }
     pub fn line_at_row(&mut self, v: usize) -> usize {
-        self.folds.line_at_row(v)
+        if !self.ensure_rows() {
+            return self.folds.line_at_row(v);
+        }
+        let n = self.buf.lines.len();
+        let l = self.wrap_rows.start[..n].partition_point(|&s| s <= v).saturating_sub(1);
+        self.folds.visible(l)
     }
     pub fn view_count(&mut self) -> usize {
         let n = self.buf.lines.len();
-        self.folds.view_count(n)
+        if self.ensure_rows() { self.wrap_rows.start[n] } else { self.folds.view_count(n) }
     }
-    /// The line `rows` view rows from top, clamped to [0, max].
-    pub fn scrolled(&mut self, rows: i64, max: Option<usize>) -> usize {
+    pub fn top_row(&mut self) -> usize {
+        self.row_of(self.top) + self.top_sub
+    }
+    /// p's view row.
+    pub fn view_row(&mut self, p: Pos) -> usize {
+        self.row_of(p.line) + self.row_pos(p).0
+    }
+    /// Scrolls view row v (clamped to [0, max]) to the first text row.
+    pub fn scroll_to(&mut self, v: i64, max: Option<usize>) {
         let max = max.unwrap_or_else(|| self.view_count().saturating_sub(1)) as i64;
-        let t = self.row_of(self.top) as i64;
-        self.line_at_row((t + rows).clamp(0, max.max(0)) as usize)
+        let v = v.clamp(0, max.max(0)) as usize;
+        self.top = self.line_at_row(v);
+        self.top_sub = v.saturating_sub(self.row_of(self.top));
+    }
+    pub fn scroll_by(&mut self, rows: i64, max: Option<usize>) {
+        let t = self.top_row() as i64;
+        self.scroll_to(t + rows, max);
     }
 
     // ----- after edits: the highlighter, folds, git and the semantic layer follow the buffer -----
@@ -478,6 +634,7 @@ impl Editor {
         self.semantic.edited(&changes);
         for c in &changes {
             self.folds.edited(*c);
+            self.wrap_rows.edited(*c);
             lang_ui::shift_lenses(&mut self.lang.lenses, *c);
         }
         self.git.changed();
@@ -501,21 +658,21 @@ impl Editor {
         self.reveal();
     }
     pub fn reveal(&mut self) {
-        let Pos { line, col } = self.head();
-        self.folds.reveal(line);
-        let row = self.row_of(line) as i64 - self.row_of(self.top) as i64;
-        if row < 0 {
-            self.top = line;
-        }
+        let head = self.head();
+        self.folds.reveal(head.line);
+        let (sub, x) = self.row_pos(head);
+        let v = self.row_of(head.line) + sub;
+        let row = v as i64 - self.top_row() as i64;
         let h = self.height();
+        if row < 0 {
+            self.scroll_to(v as i64, None);
+        }
         if row >= h as i64 {
-            let v = self.row_of(line) + 1 - h;
-            self.top = self.line_at_row(v);
+            self.scroll_to((v + 1 - h) as i64, None);
         }
-        while self.top < line && self.rows_to(line) >= h as i64 {
-            self.top = self.folds.next(self.top); // CodeLens rows take room too
+        while self.top_row() < v && self.rows_to(head.line, sub) >= h as i64 {
+            self.scroll_by(1, None); // CodeLens rows take room too
         }
-        let x = display_col(&self.buf.lines[line], col, self.tab());
         if x < self.left {
             self.left = x.saturating_sub(4);
         }
@@ -524,9 +681,10 @@ impl Editor {
         }
     }
     fn vertical(&mut self, delta: i64, extend: bool) {
-        let Pos { line, col } = self.head();
-        let goal = *self.goal.get_or_insert_with(|| display_col(&self.buf.lines[line], col, self.indent.size));
-        let v = self.row_of(line) as i64 + delta;
+        let head = self.head();
+        let (sub, x) = self.row_pos(head);
+        let goal = *self.goal.get_or_insert(x);
+        let v = self.row_of(head.line) as i64 + sub as i64 + delta; // by view rows: over folds and wrapped rows
         let end = self.view_count() as i64 - 1;
         if v < 0 {
             return self.move_to(pos(0, 0), extend);
@@ -536,7 +694,8 @@ impl Editor {
             return self.move_to(pos(l, self.buf.lines[l].len()), extend);
         }
         let target = self.line_at_row(v as usize);
-        let col = index_at_col(&self.buf.lines[target], goal, self.tab());
+        let k = v as usize - self.row_of(target);
+        let col = self.wrap_of(target).col_at(k, &self.buf.lines[target], goal, self.tab());
         self.move_keep(pos(target, col), extend, true);
     }
     fn horizontal(&mut self, dir: i32, extend: bool, word: bool) {
@@ -565,15 +724,24 @@ impl Editor {
         }
         self.move_to(pos(line, col), extend);
     }
+    /// VS Code's cursorHome: on a wrapped row past its start, the row's start; else the first non-blank, then column 0.
     fn home(&mut self, extend: bool) {
         let Pos { line, col } = self.head();
+        let r = self.wrap_of(line);
+        let sub = r.row_of(col);
         let t = &self.buf.lines[line];
         let first = t.find(|c: char| !c.is_whitespace()).unwrap_or(t.len());
-        self.move_to(pos(line, if col == first { 0 } else { first }), extend);
+        let to = if sub > 0 && col != r.starts[sub] { r.starts[sub] } else if col == first { 0 } else { first };
+        self.move_to(pos(line, to), extend);
     }
-    fn line_end(&mut self, extend: bool) {
-        let l = self.head().line;
-        self.move_to(pos(l, self.buf.lines[l].len()), extend);
+    /// The cursor row's start / end (cursorLineStart, cursorLineEnd: `row`); cursorEnd: the row's end, then the line's.
+    fn line_edge(&mut self, end: bool, extend: bool, row: bool) {
+        let Pos { line, col } = self.head();
+        let r = self.wrap_of(line);
+        let sub = r.row_of(col);
+        let (text, e) = (&self.buf.lines[line], r.row_end(sub, &self.buf.lines[line]));
+        let to = if !end { r.starts[sub] } else if row || col != e { e } else { text.len() };
+        self.move_to(pos(line, to), extend);
     }
     fn doc_end(&mut self, extend: bool) {
         let last = self.buf.lines.len() - 1;
@@ -1492,8 +1660,8 @@ impl Editor {
         }
         if let Some(p) = at {
             self.move_to(p, false);
-            let v = self.row_of(self.head().line).saturating_sub(self.height() / 3);
-            self.top = self.line_at_row(v);
+            let v = self.view_row(self.head()) as i64 - (self.height() / 3) as i64;
+            self.scroll_to(v, None);
         }
         true
     }
@@ -1512,6 +1680,7 @@ impl Editor {
         if self.open(&file, None, false) {
             self.move_to(p, false);
             self.top = top.min(self.buf.lines.len() - 1);
+            self.top_sub = 0;
         }
     }
     /// The folder Go to File lists: the git root, else the file's folder.
@@ -1752,7 +1921,7 @@ impl Editor {
         let hl = Highlight::start(self.vscode.clone(), term::wake);
         let mut st = DocState::new(target.clone(), doc, hl, &self.index, &self.settings);
         st.hl.reset(st.scope.as_deref(), &st.buf.lines);
-        (st.sel, st.top, st.left, st.indent, st.seen_version) = (self.sel, self.top, self.left, self.indent, st.buf.version);
+        (st.sel, st.top, st.top_sub, st.left, st.indent, st.seen_version) = (self.sel, self.top, self.top_sub, self.left, self.indent, st.buf.version);
         st.buf.saved_version = None; // unsaved until written
         let old = self.file.clone();
         self.docs.retain(|d| d.file != target);
@@ -1829,8 +1998,8 @@ impl Editor {
         let col = parts.next().flatten().filter(|c| *c >= 1.0).map_or(0, |c| c as usize - 1);
         let col = utf16_to_byte(&self.buf.lines[line], col);
         self.move_to(pos(line, col), false);
-        let v = self.row_of(line).saturating_sub(self.height() / 2);
-        self.top = self.line_at_row(v);
+        let v = self.row_of(line) as i64 - (self.height() / 2) as i64;
+        self.scroll_to(v, None);
     }
     fn input_act(&mut self, a: IAct, text: String) {
         match a {
@@ -2229,20 +2398,16 @@ impl Editor {
             Act::Horizontal(dir, extend, word) => self.horizontal(dir, extend, word),
             Act::Vertical(rows, extend) => self.vertical(rows as i64, extend),
             Act::Home(extend) => self.home(extend),
-            Act::LineEdge(true, extend) => self.line_end(extend),
-            Act::LineEdge(false, extend) => {
-                let l = self.head().line;
-                self.move_to(pos(l, 0), extend);
-            }
+            Act::LineEdge(end, extend, row) => self.line_edge(end, extend, row),
             Act::DocEdge(true, extend) => self.doc_end(extend),
             Act::DocEdge(false, extend) => self.move_to(pos(0, 0), extend),
             Act::Page(dir, extend) => {
                 let d = dir as i64 * self.height() as i64;
                 let max = self.view_count().saturating_sub(self.height());
-                self.top = self.scrolled(d, Some(max));
+                self.scroll_by(d, Some(max));
                 self.vertical(d, extend);
             }
-            Act::ScrollLine(dir) => self.top = self.scrolled(dir as i64, None),
+            Act::ScrollLine(dir) => self.scroll_by(dir as i64, None),
             Act::Backspace(word) => self.backspace(word),
             Act::DeleteForward(word) => self.delete_forward(word),
             Act::DeleteAll(dir) => {
@@ -2295,6 +2460,7 @@ impl Editor {
             Act::UnfoldAll => {
                 self.folds.clear();
             }
+            Act::ToggleWordWrap => self.toggle_word_wrap(),
         }
     }
 }
@@ -2636,7 +2802,7 @@ mod tests {
         for t in ["1 reference", "bar", "baz"] {
             assert!(frame.contains(t), "{t}");
         }
-        assert_eq!(ed.rows_to(2), 5, "line 2 sits below the lens and the two ghost rows");
+        assert_eq!(ed.rows_to(2, 0), 5, "line 2 sits below the lens and the two ghost rows");
         assert_eq!(ed.screen_of(pos(2, 0)).0, 7);
         let gw = ed.gutter() as i32;
         assert_eq!(ed.cell_to_pos(gw + 1, 7), pos(2, 0), "a click below the ghost text lands on its line");
@@ -2651,7 +2817,7 @@ mod tests {
         ed.rows = 8; // 6 text rows
         ed.lang.lenses = vec![lens(2, 0, "0 references"), lens(3, 0, "0 references"), lens(4, 0, "0 references")];
         ed.move_to(pos(4, 0), false);
-        assert!(ed.rows_to(4) < ed.height() as i64);
+        assert!(ed.rows_to(4, 0) < ed.height() as i64);
         assert_eq!(ed.top, 2);
     }
 
@@ -3117,5 +3283,171 @@ mod tests {
         assert_eq!(visible_column("\t한x", 4, 4), 5);
         assert_eq!(utf16_to_byte("a한b", 2), 4);
         assert_eq!(shift_closers(&[pos(0, 3), pos(1, 3)], 0, 2, 2), vec![pos(0, 5), pos(1, 3)]);
+    }
+
+
+    /// An editor with editor.wordWrap "on" (or `mode`), `rows` × `cols`.
+    fn wrapped(lines: &[&str], mode: &'static str, rows: i32, cols: i32) -> Editor {
+        let mut ed = editor("/tmp/wrap.txt", lines);
+        ed.settings.word_wrap = mode;
+        (ed.rows, ed.cols) = (rows, cols);
+        ed
+    }
+    /// The painted frame as text rows (cursor moves placed, escapes dropped, one cell per character).
+    fn screen(ed: &mut Editor) -> Vec<String> {
+        let out = ed.render();
+        let mut grid = vec![vec![' '; ed.cols as usize + 4]; ed.rows as usize];
+        let (mut row, mut col, mut chars) = (0usize, 0usize, out.chars().peekable());
+        while let Some(ch) = chars.next() {
+            if ch == '\x1b' {
+                let mut seq = String::new();
+                while let Some(&c) = chars.peek() {
+                    chars.next();
+                    seq.push(c);
+                    if c.is_ascii_alphabetic() || (seq.len() == 1 && (c == '7' || c == '8')) {
+                        break;
+                    }
+                }
+                if let Some(rc) = seq.strip_prefix('[').and_then(|s| s.strip_suffix('H')) {
+                    if let Some((r, c)) = rc.split_once(';') {
+                        (row, col) = (r.parse::<usize>().unwrap() - 1, c.parse::<usize>().unwrap() - 1);
+                    }
+                }
+                continue;
+            }
+            if row < grid.len() && col < grid[row].len() {
+                grid[row][col] = ch;
+            }
+            col += 1;
+        }
+        grid.into_iter().map(|r| r.into_iter().collect::<String>().trim_end().to_string()).collect()
+    }
+
+    #[test]
+    fn a_long_line_paints_on_several_rows_numbered_once_with_the_wrap_indent() {
+        let mut ed = wrapped(&["one", "alpha beta gamma delta epsilon zeta eta theta", "two"], "on", 8, 30); // 30 - 6 - 2 = 22
+        assert_eq!(ed.wrap_width(), 22);
+        let s = screen(&mut ed);
+        assert_eq!(s[1..6], ["   1  one", "   2  alpha beta gamma", "      delta epsilon zeta", "      eta theta", "   3  two"]);
+        assert!(!ed.hbar.shown);
+        assert_eq!(ed.view_count(), 5);
+    }
+
+    #[test]
+    fn cursor_moves_by_row_and_home_end_take_the_row_edge_first() {
+        let mut ed = wrapped(&["alpha beta gamma delta epsilon zeta eta theta", "x"], "on", 8, 30);
+        ed.move_to(pos(0, 2), false);
+        run(&mut ed, "cursorDown");
+        assert_eq!(ed.head(), pos(0, 19), "row 2 starts at delta (17); x 2 there");
+        run(&mut ed, "cursorDown");
+        assert_eq!(ed.head(), pos(0, 38));
+        run(&mut ed, "cursorDown");
+        assert_eq!(ed.head(), pos(1, 1));
+        run(&mut ed, "cursorUp");
+        assert_eq!(ed.head(), pos(0, 38), "the goal column is kept");
+        ed.move_to(pos(0, 20), false);
+        run(&mut ed, "cursorEnd");
+        assert_eq!(ed.head().col, 35, "End: the row's end (before its break space)");
+        run(&mut ed, "cursorEnd");
+        assert_eq!(ed.head().col, 45, "End again: the line's end");
+        ed.move_to(pos(0, 20), false);
+        run(&mut ed, "cursorHome");
+        assert_eq!(ed.head().col, 17, "Home: the row's start");
+        run(&mut ed, "cursorHome");
+        assert_eq!(ed.head().col, 0);
+        ed.move_to(pos(0, 20), false);
+        run(&mut ed, "cursorLineEnd");
+        run(&mut ed, "cursorLineEnd");
+        assert_eq!(ed.head().col, 35, "cursorLineEnd stays at the row's end");
+    }
+
+    #[test]
+    fn a_click_on_a_continuation_row_lands_there_and_the_cursor_shows_there() {
+        let mut ed = wrapped(&["alpha beta gamma delta epsilon zeta eta theta"], "on", 8, 30);
+        screen(&mut ed);
+        let gw = ed.gutter() as i32;
+        assert_eq!(ed.cell_to_pos(gw + 3, 3), pos(0, 19));
+        assert_eq!(ed.cell_to_pos(gw + 30, 3), pos(0, 35), "past the row's end");
+        ed.move_to(pos(0, 19), false);
+        assert_eq!(ed.screen_of(ed.head()), (3, gw + 3));
+        assert!(ed.render().ends_with(&format!("\x1b[3;{}H\x1b[?25h", gw + 3)));
+    }
+
+    #[test]
+    fn scrolling_goes_by_rows_and_a_fold_hides_its_wrapped_rows() {
+        let long = format!("  {}", ["word"; 20].join(" "));
+        let mut lines = vec!["head {", long.as_str(), "}"];
+        let tail: Vec<String> = (0..20).map(|i| format!("l{i}")).collect();
+        lines.extend(tail.iter().map(String::as_str));
+        let mut ed = wrapped(&lines, "on", 8, 30);
+        screen(&mut ed);
+        let n = crate::wrap::Rows::wrap(&long, 22, 4, "same").starts.len();
+        assert_eq!(ed.row_of(2), 1 + n);
+        ed.scroll_by(2, None);
+        assert_eq!((ed.top, ed.top_sub), (1, 1), "the top can be a line's second row");
+        assert!(screen(&mut ed)[1].starts_with("      "), "the first text row is a continuation row");
+        ed.scroll_to(0, None);
+        ed.collapse(&[Range { start: 0, end: 1 }]);
+        assert_eq!(ed.row_of(2), 1);
+        assert_eq!(ed.view_count(), 22);
+    }
+
+    #[test]
+    fn resizing_rewraps_and_keeps_the_cursor_position_in_view() {
+        let mut ed = wrapped(&["alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma"], "on", 8, 30);
+        ed.move_to(pos(0, 90), false);
+        screen(&mut ed);
+        let narrow = ed.row_pos(ed.head()).0;
+        ed.cols = 60;
+        ed.reveal();
+        screen(&mut ed);
+        assert_eq!(ed.head(), pos(0, 90));
+        assert!(ed.row_pos(ed.head()).0 < narrow);
+        (ed.cols, ed.rows) = (16, 5);
+        ed.reveal();
+        screen(&mut ed);
+        let sub = ed.row_pos(ed.head()).0;
+        let row = ed.rows_to(0, sub);
+        assert!(row >= 0 && row < ed.height() as i64, "cursor row {row}");
+    }
+
+    #[test]
+    fn toggle_word_wrap_and_the_status_item_switch_wrapping_for_this_file() {
+        let line = "alpha beta gamma delta epsilon zeta eta theta ".repeat(3);
+        let mut ed = wrapped(&[line.as_str()], "off", 8, 70);
+        assert!(screen(&mut ed)[7].contains("No Wrap"));
+        run(&mut ed, "editor.action.toggleWordWrap");
+        assert_eq!(ed.word_wrap(), "on");
+        assert!(screen(&mut ed)[7].contains(" Wrap "));
+        assert!(ed.status_hits.iter().any(|h| matches!(h.2, StatusAct::Wrap)));
+        ed.toggle_word_wrap();
+        assert_eq!((ed.word_wrap(), ed.settings.word_wrap), ("off", "off"), "the settings are untouched");
+        let mut col = wrapped(&["x"], "bounded", 8, 100);
+        col.settings.word_wrap_column = 40;
+        assert!(screen(&mut col)[7].contains("Wrap 40"));
+        assert_eq!(col.wrap_width(), 40);
+    }
+
+    #[test]
+    fn a_500_kb_single_line_wraps_in_time() {
+        let line = "abc, ".repeat(100_000);
+        let mut ed = wrapped(&[line.as_str()], "on", 30, 100);
+        let t = Instant::now();
+        screen(&mut ed);
+        assert!(t.elapsed() < Duration::from_millis(1500), "first frame {:?}", t.elapsed());
+        ed.move_to(pos(0, 499_999), false);
+        let t = Instant::now();
+        screen(&mut ed);
+        assert!(t.elapsed() < Duration::from_millis(500), "frame at the end {:?}", t.elapsed());
+        let sub = ed.row_pos(ed.head()).0;
+        assert!(ed.rows_to(0, sub) < ed.height() as i64);
+    }
+
+    #[test]
+    fn wrap_settings_default_to_vs_codes_and_reject_bad_values() {
+        let v = settings::normalize(&json!({}));
+        assert_eq!((v.word_wrap, v.word_wrap_column, v.wrapping_indent), ("off", 80, "same"));
+        let w = settings::normalize(&json!({ "editor.wordWrap": "sometimes", "editor.wordWrapColumn": 0, "editor.wrappingIndent": "deep" }));
+        assert_eq!((w.word_wrap, w.word_wrap_column, w.wrapping_indent), ("off", 1, "same"));
     }
 }

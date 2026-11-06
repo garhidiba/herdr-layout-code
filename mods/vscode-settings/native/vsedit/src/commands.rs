@@ -13,7 +13,7 @@ use std::sync::OnceLock;
 /// What a command does in the editor.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Act {
-    /// What the JS editor doesn't have either (NOT_YET_IDS): multiple cursors, suggestions, word wrap, ….
+    /// What the JS editor doesn't have either (NOT_YET_IDS): multiple cursors, suggestions, ….
     NotYet,
     /// Go to Definition / Type Definition / Implementation / References (the language operation).
     GoTo(&'static str),
@@ -96,14 +96,15 @@ pub enum Act {
     Unfold,
     ToggleFold,
     FoldAll,
+    ToggleWordWrap,
     UnfoldAll,
     /// (dir, extend, word)
     Horizontal(i32, bool, bool),
     /// (rows, extend)
     Vertical(i32, bool),
     Home(bool),
-    /// (end, extend)
-    LineEdge(bool, bool),
+    /// (end, extend, row): row = the cursor row's edge only (cursorLineStart / cursorLineEnd)
+    LineEdge(bool, bool, bool),
     DocEdge(bool, bool),
     Page(i32, bool),
     ScrollLine(i32),
@@ -119,12 +120,12 @@ pub enum FindOption {
     Regex,
 }
 
-/// VS Code ids neither editor has yet (multiple cursors, suggestions, parameter hints, word wrap, declarations, …):
+/// VS Code ids neither editor has yet (multiple cursors, suggestions, parameter hints, declarations, …):
 /// bound by the user, their keys say NOT_YET.
 const NOT_YET_IDS: &[&str] = &[
     "editor.action.codeAction", "editor.action.organizeImports", "editor.action.showDefinitionPreviewHover", "editor.action.triggerSuggest",
     "editor.action.triggerParameterHints", "editor.action.revealDeclaration", "editor.action.peekDeclaration", "editor.action.insertCursorAbove",
-    "editor.action.insertCursorBelow", "editor.action.insertCursorAtEndOfEachLineSelected", "editor.action.selectHighlights", "editor.action.toggleWordWrap",
+    "editor.action.insertCursorBelow", "editor.action.insertCursorAtEndOfEachLineSelected", "editor.action.selectHighlights",
 ];
 
 /// What each command id runs (commands.cjs's RUNS): `NotYet` for NOT_YET_IDS; None for an id this editor has never
@@ -233,6 +234,7 @@ pub fn act_of(id: &str) -> Option<Act> {
         "editor.fold" => Fold,
         "editor.unfold" => Unfold,
         "editor.toggleFold" => ToggleFold,
+        "editor.action.toggleWordWrap" => ToggleWordWrap,
         "editor.foldAll" => FoldAll,
         "editor.unfoldAll" => UnfoldAll,
         "cursorLeft" => Horizontal(-1, false, false),
@@ -249,10 +251,12 @@ pub fn act_of(id: &str) -> Option<Act> {
         "cursorWordEndRightSelect" => Horizontal(1, true, true),
         "cursorHome" => Home(false),
         "cursorHomeSelect" => Home(true),
-        "cursorEnd" | "cursorLineEnd" => LineEdge(true, false),
-        "cursorEndSelect" | "cursorLineEndSelect" => LineEdge(true, true),
-        "cursorLineStart" => LineEdge(false, false),
-        "cursorLineStartSelect" => LineEdge(false, true),
+        "cursorEnd" => LineEdge(true, false, false),
+        "cursorEndSelect" => LineEdge(true, true, false),
+        "cursorLineEnd" => LineEdge(true, false, true),
+        "cursorLineEndSelect" => LineEdge(true, true, true),
+        "cursorLineStart" => LineEdge(false, false, true),
+        "cursorLineStartSelect" => LineEdge(false, true, true),
         "cursorTop" => DocEdge(false, false),
         "cursorTopSelect" => DocEdge(false, true),
         "cursorBottom" => DocEdge(true, false),
@@ -622,7 +626,7 @@ mod tests {
 
     #[test]
     fn only_what_js_lacks_too_says_not_yet_and_unheard_of_ids_send_the_file_to_js() {
-        for id in ["editor.action.insertCursorAbove", "editor.action.triggerSuggest", "editor.action.toggleWordWrap"] {
+        for id in ["editor.action.insertCursorAbove", "editor.action.triggerSuggest", "editor.action.selectHighlights"] {
             assert_eq!(act_of(id), Some(Act::NotYet), "{id}");
         }
         for c in commands() {

@@ -376,7 +376,7 @@ contract. One module per JS file: `buffer`, `keys`, `width`, `paint`, `file`, `s
 - **Keys:** ids, titles and default keys per OS come from the shared table `mods/vscode-viewer/editor/keymap.json`
   (`{ id, title, keys: { mac, win, linux } }`, read at start next to `--vscode`). An id the binary implements runs; an
   id in `commands.rs`'s `NOT_YET_IDS` (only what the JS editor lacks too, bound by the user: multiple cursors,
-  suggestions, parameter hints, word wrap, declarations) shows `Not yet in the Rust editor`; any other id means the
+  suggestions, parameter hints, declarations) shows `Not yet in the Rust editor`; any other id means the
   table is newer than the binary, and the file goes to the JS editor rather than lose a command. So a new JS command
   needs its Rust port before a release. The OS is `VSEDIT_OS`, else the platform, as in commands.cjs. Two-step chords as
   keybindings.cjs: the first key shows `(⌘K) was pressed. Waiting for second key of chord...`, the second runs the

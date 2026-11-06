@@ -14,7 +14,9 @@ use crate::overlays::Area;
 use crate::paint::{fit, Painter};
 use crate::scrollbar::{self, BarMouse};
 use crate::term::Term;
-use crate::width::{char_width, display_col, index_at_col, next_index, text_width};
+use crate::width::{char_width, display_col, next_index, text_width};
+use crate::wrap::Rows;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 const WORD_DELAY: Duration = Duration::from_millis(250);
@@ -28,10 +30,12 @@ struct Hits {
     ruler: String,
 }
 
-/// A text row: a line (None past the end) or, on the row above it, that line's CodeLens.
+/// A text row: a line's row (None past the end) or, on the row above it, that line's CodeLens.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Row {
     pub line: Option<usize>,
+    /// The line's row when it wraps (0: its first).
+    pub sub: usize,
     pub lens: bool,
     /// k > 0: line k of a multi-line ghost text (inline suggestion), below its line.
     pub ghost: usize,
@@ -48,6 +52,9 @@ struct Deco<'a> {
     ghost: Option<(usize, &'a [String])>,
     /// This line's squiggles (bytes [from, to), color), the most severe first.
     problems: Vec<(usize, usize, String)>,
+    /// The line's rows (wrap.rs) and the one to paint.
+    wrap: Rc<Rows>,
+    sub: usize,
 }
 
 /// Where a Shift+click at `p` puts the head, VS Code's way: on the gutter by whole lines (through the clicked line, or
@@ -75,14 +82,19 @@ impl Editor {
         }
         let t = self.top.min(self.buf.lines.len() - 1);
         self.top = self.folds.visible(t);
+        self.top_sub = self.top_sub.min(self.wrap_of(self.top).last()); // a narrower or shorter line has fewer rows
         self.layout_bars();
         let mut p = Painter::default();
         let (height, width, gw) = (self.height(), self.text_width(), self.gutter());
-        // each text row: a line (folded lines skipped), its lenses above it, or a line of a multi-line ghost text below
-        // the cursor line
+        // each text row: a line's row (folded lines skipped), its lenses above it, or a line of a multi-line ghost text
+        // below the cursor's row; rows: the lines shown, each once
         let ghost = self.ghost_view();
+        let ghost_sub = ghost.as_ref().map(|g| self.row_pos(pos(g.0, g.1)).0);
         let layout = self.layout_rows(height);
-        let rows: Vec<Option<usize>> = layout.iter().filter(|r| !r.lens && r.ghost == 0).map(|r| r.line).collect();
+        let mut rows: Vec<Option<usize>> = layout.iter().filter(|r| !r.lens && r.ghost == 0 && r.sub == 0).map(|r| r.line).collect();
+        if self.top_sub > 0 && !layout.is_empty() {
+            rows.insert(0, Some(self.top));
+        }
         let end = rows.iter().flatten().max().copied().unwrap_or(self.top) + 1;
         let (ss, se) = self.range();
         let empty = self.empty();
@@ -128,14 +140,18 @@ impl Editor {
                 let g = ghost.as_ref().unwrap();
                 p.text(&" ".repeat(gw), &self.c.fg, &self.c.bg);
                 let bg = self.c.bg.clone();
-                let x = self.paint_ghost_tail(&mut p, g.0, g.1, &g.2, row.ghost, 0, 0, width, &bg, &|_| None, None);
+                let (r0, gs) = (self.wrap_of(g.0), ghost_sub.unwrap_or(0));
+                let end = if gs < r0.last() { r0.cols[gs + 1] } else { usize::MAX };
+                let x = self.paint_ghost_tail(&mut p, g.0, g.1, &g.2, row.ghost, 0, 0, width, &bg, &|_| None, None, self.left, end);
                 if x < width {
                     p.text(&" ".repeat(width - x), &self.c.fg, &self.c.bg);
                 }
                 continue;
             }
-            let g_row = k_row; // the line's index in rows (guides)
-            k_row += 1;
+            if row.sub == 0 || r == 0 {
+                k_row += 1;
+            }
+            let g_row = k_row - 1; // the line's index in rows (guides)
             let Some(l) = row.line else {
                 p.text(&" ".repeat(self.cols as usize), &self.c.fg, &self.c.bg);
                 continue;
@@ -154,7 +170,19 @@ impl Editor {
             }
             spans.sort_by_key(|s| s.3);
             let mark = if bulb == Some(l) { Some(("◆", self.c.light_bulb.clone())) } else { spans.first().map(|s| ("●", s.2.clone())) };
-            self.paint_gutter(&mut p, l, active, changes.get(&l).copied(), chevron, mark);
+            // a wrapped line: the number, marks and chevron on its first row; its change bar on every row, a deletion
+            // mark under its last row / over its first
+            let (wrap, sub) = (self.wrap_of(l), row.sub);
+            let change = match changes.get(&l).copied() {
+                Some(Mark::DeletedBelow) if sub < wrap.last() => None,
+                Some(Mark::DeletedAbove) if sub > 0 => None,
+                c => c,
+            };
+            if sub > 0 {
+                self.paint_gutter(&mut p, l, active, change, " ", None, false);
+            } else {
+                self.paint_gutter(&mut p, l, active, change, chevron, mark, true);
+            }
             let line_bg = if active && empty { self.c.current_line.clone() } else if folded { self.c.fold_background.clone() } else { self.c.bg.clone() };
             while mi < ms.len() && ms[mi].0 < l {
                 mi += 1;
@@ -173,7 +201,7 @@ impl Editor {
                 kh += 1;
             }
             let deco = Deco {
-                ghost: ghost.as_ref().filter(|g| g.0 == l).map(|g| (g.1, g.2.as_slice())),
+                ghost: ghost.as_ref().filter(|g| g.0 == l && ghost_sub == Some(sub)).map(|g| (g.1, g.2.as_slice())),
                 guide: guides.get(g_row).copied().unwrap_or_default(),
                 brackets: brackets.iter().filter(|b| b.line == l).map(|b| b.col).collect(),
                 hits: &occ[hi..kh],
@@ -181,6 +209,8 @@ impl Editor {
                 hit_bg: hits.as_ref().map_or("", |h| h.bg.as_str()),
                 folded,
                 problems: spans.into_iter().map(|s| (s.0, s.1, s.2)).collect(),
+                wrap,
+                sub,
             };
             self.paint_line(&mut p, l, &line_bg, (ss, se), &ms[mi..k], current, width, &deco);
         }
@@ -192,7 +222,7 @@ impl Editor {
             self.hbar.paint(&mut p, &self.c, None);
         }
         if self.ls.peek.is_some() {
-            let v = self.rows_to(self.head().line) as i32 + 3;
+            let v = self.screen_of(self.head()).0 + 1;
             self.ls.peek_row = v.min(height as i32 + 2 - crate::overlays::Peek::HEIGHT).max(2);
             self.render_peek(&mut p);
         }
@@ -233,9 +263,11 @@ impl Editor {
             Some((-1, _)) => p.out.push_str("\x1b[?25l"),
             Some((row, col)) => p.out.push_str(&format!("\x1b[{row};{col}H\x1b[?25h")),
             None => {
-                let Pos { line, col } = self.head();
-                let x = display_col(&self.buf.lines[line], col, self.tab()) as i64 - self.left as i64;
-                let row = self.rows_to(line);
+                let head = self.head();
+                let line = head.line;
+                let (sub, hx) = self.row_pos(head);
+                let x = hx as i64 - self.left as i64;
+                let row = self.rows_to(line, sub);
                 let hidden = self.folds.is_hidden(line);
                 if !hidden && row >= 0 && row < height as i64 && x >= 0 && x < width as i64 {
                     p.out.push_str(&format!("\x1b[{};{}H\x1b[?25h", row + 2, gw as i64 + x + 1));
@@ -293,7 +325,7 @@ impl Editor {
             let from = crate::lang::edits::byte_of(text, it.col);
             let to = it.end.filter(|e| e.line == l).map_or(from, |e| crate::lang::edits::byte_of(text, e.col));
             let bg_at = |i: usize| -> Option<&str> { (target && i >= from && i < to).then_some(c.find_match.as_str()) };
-            let (x, _) = self.paint_text(p, None, text, hl.line(l), (w as usize).saturating_sub(gw), 0, bg, &bg_at, tab, None, None, None);
+            let (x, _) = self.paint_text(p, None, text, hl.line(l), (w as usize).saturating_sub(gw), 0, bg, &bg_at, tab, None, None, None, None);
             if x < (w as usize).saturating_sub(gw) {
                 p.text(&" ".repeat(w as usize - gw - x), &c.fg, bg);
             }
@@ -308,19 +340,20 @@ impl Editor {
         let widest = self.widest(self.top, base);
         let gw = self.gutter();
         // A file with problems always shows the bar: its overview ruler carries their marks, as VS Code's always does.
-        let mut v = n > base || self.top > 0 || !self.problems().is_empty();
+        let mut v = n > base || self.top_row() > 0 || !self.problems().is_empty();
         let h = widest as i64 > self.cols as i64 - gw as i64 - v as i64 || self.left > 0;
         if h {
             v = v || n > base - 1;
         }
         let height = (base - h as usize).max(1);
         let width = (self.cols - gw as i32 - v as i32).max(1);
-        let tv = self.row_of(self.top);
+        let tv = self.top_row();
         self.vbar.layout(v, 2, self.cols, height as i64, height as i64, (n + height - 1) as i64, tv as i64);
         self.hbar.layout(h, height as i32 + 2, gw as i32 + 1, width as i64, width as i64, widest as i64 + 5, self.left as i64);
     }
 
-    /// Display width of the widest of `count` lines from `top` (a very long line counts its length).
+    /// Display width of the widest of `count` lines from `top` (a very long line counts its length); while wrapping,
+    /// at most the wrap width.
     pub fn widest(&mut self, top: usize, count: usize) -> usize {
         let (mut w, mut l) = (0, top);
         for _ in 0..count {
@@ -331,7 +364,10 @@ impl Editor {
             w = w.max(if t.len() > 1000 { t.len() } else { text_width(t, self.indent.size) });
             l = self.folds.next(l);
         }
-        w
+        match self.wrap_width() {
+            0 => w,
+            ww => w.min(ww),
+        }
     }
 
     fn ruler_marks(&mut self, ms: &[Hit], hits: Option<&Hits>, problems: &[crate::editor::Problem]) -> Vec<Option<String>> {
@@ -449,15 +485,17 @@ impl Editor {
         })
     }
 
-    /// The gutter: a problem's mark `●` or the light bulb `◆` (`mark`: glyph and color), the line number, the git
-    /// change bar, the fold chevron.
-    fn paint_gutter(&self, p: &mut Painter, l: usize, active: bool, change: Option<Mark>, fold: &str, mark: Option<(&str, String)>) {
+    /// The gutter: a problem's mark `●` or the light bulb `◆` (`mark`: glyph and color), the line number (blank on a
+    /// wrapped line's later rows: `number` false), the git change bar, the fold chevron.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_gutter(&self, p: &mut Painter, l: usize, active: bool, change: Option<Mark>, fold: &str, mark: Option<(&str, String)>, number: bool) {
         let c = &self.c;
         match &mark {
             Some((g, color)) => p.text(g, color, &c.bg),
             None => p.text(" ", &c.line_number, &c.bg),
         }
-        p.text(&format!("{:>w$}", l + 1, w = self.gutter() - 3), if active { &c.line_number_active } else { &c.line_number }, &c.bg);
+        let n = if number { (l + 1).to_string() } else { String::new() };
+        p.text(&format!("{n:>w$}", w = self.gutter() - 3), if active { &c.line_number_active } else { &c.line_number }, &c.bg);
         let (glyph, color) = match change {
             Some(Mark::Added) => ("▎", &c.git_added),
             Some(Mark::Modified) => ("▎", &c.git_modified),
@@ -500,53 +538,78 @@ impl Editor {
         };
         let curly_at = |i: usize| -> Option<&'a str> { deco.problems.iter().find(|s| i >= s.0 && i < s.1).map(|s| s.2.as_str()) };
         let curly: Option<&dyn Fn(usize) -> Option<&'a str>> = if deco.problems.is_empty() { None } else { Some(&curly_at) };
+        // the row's part of the line: its wrap indent (with the guides in it, as VS Code draws them), then display
+        // columns [left, end) of the line
+        let (r, sub) = (&deco.wrap, deco.sub);
+        let last = sub == r.last();
+        let ind = if sub > 0 { r.indent } else { 0 };
+        let pad = width.min(ind.saturating_sub(self.left));
+        let left = r.cols[sub] + self.left.saturating_sub(ind);
+        let from = (sub > 0).then(|| (r.starts[sub], r.cols[sub]));
+        let end = if last { usize::MAX } else { r.cols[sub + 1] };
+        let guides: Option<&dyn Fn(usize) -> Option<&'a str>> = if g.count > 0 { Some(&guide_at) } else { None };
+        if pad > 0 {
+            self.paint_guides(p, self.left, pad, guides, line_bg);
+        }
+        let width = width - pad;
+        let tw = width.min(end.saturating_sub(left));
+        let row_guides: Option<&dyn Fn(usize) -> Option<&'a str>> = if sub == 0 { Some(&guide_at) } else { None };
         if let Some((gc, lines)) = deco.ghost {
-            // the line up to the cursor, the ghost text, then the rest of the line
+            // the row up to the cursor, the ghost text, then the rest of the row
             let cx = display_col(text, gc, size);
-            let mut x = if cx > self.left { self.paint_text(p, Some(l), text, self.hl.line(l), width.min(cx - self.left), self.left, line_bg, &bg_at, size, Some(&guide_at), curly, None).0 } else { 0 };
-            x = self.paint_ghost_tail(p, l, gc, lines, 0, cx, x, width, line_bg, &bg_at, curly);
+            let mut x = if cx > left { self.paint_text(p, Some(l), text, self.hl.line(l), tw.min(cx - left), left, line_bg, &bg_at, size, row_guides, curly, None, from).0 } else { 0 };
+            x = self.paint_ghost_tail(p, l, gc, lines, 0, cx, x, width, line_bg, &bg_at, curly, left, end);
             if x < width {
                 p.text(&" ".repeat(width - x), &c.fg, line_bg);
             }
             return;
         }
         let link = self.ls.link.filter(|k| k.0 == l).map(|k| (k.1, k.2));
-        let (mut x, col) = self.paint_text(p, Some(l), text, self.hl.line(l), width, self.left, line_bg, &bg_at, size, Some(&guide_at), curly, link);
-        if x < width && sel_from.is_some() && sel_to > text.len() && col >= self.left {
+        let (mut x, col) = self.paint_text(p, Some(l), text, self.hl.line(l), tw, left, line_bg, &bg_at, size, row_guides, curly, link, from);
+        if !last {
+            if x < width {
+                p.text(&" ".repeat(width - x), &c.fg, line_bg);
+            }
+            return;
+        }
+        if x < width && sel_from.is_some() && sel_to > text.len() && col >= left {
             p.text(" ", &c.fg, &c.selection);
             x += 1;
         }
-        if deco.folded && x < width && col >= self.left {
+        if deco.folded && x < width && col >= left {
             let m: String = " ⋯".chars().take(width - x).collect();
             p.text(&m, &c.fold_placeholder, line_bg);
             x += m.chars().count();
         }
-        if x >= width {
-            return;
+        if x < width {
+            self.paint_guides(p, left + x, width - x, if sub == 0 { guides } else { None }, line_bg); // a blank line's guides go on past its end
         }
-        if g.count == 0 {
-            return p.text(&" ".repeat(width - x), &c.fg, line_bg);
-        }
+    }
+
+    /// `count` cells from display column k: an indent guide where guide_at(k) has one, else a space.
+    fn paint_guides<'a>(&self, p: &mut Painter, k: usize, count: usize, guide_at: Option<&dyn Fn(usize) -> Option<&'a str>>, bg: &str) {
+        let Some(guide_at) = guide_at else { return p.text(&" ".repeat(count), &self.c.fg, bg) };
         let mut pad = String::new();
-        for k in self.left + x..self.left + width {
+        for k in k..k + count {
             match guide_at(k) {
                 None => pad.push(' '),
                 Some(gc) => {
                     if !pad.is_empty() {
-                        p.text(&pad, &c.fg, line_bg);
+                        p.text(&pad, &self.c.fg, bg);
                         pad.clear();
                     }
-                    p.text("│", gc, line_bg);
+                    p.text("│", gc, bg);
                 }
             }
         }
         if !pad.is_empty() {
-            p.text(&pad, &c.fg, line_bg);
+            p.text(&pad, &self.c.fg, bg);
         }
     }
 
     /// Paints a line's visible part [left, left+width) with token colors (and, for a line of the current file, the
-    /// semantic layer over them); `curly_at`: the squiggle color at a byte. Returns (cells painted, display width).
+    /// semantic layer over them); `curly_at`: the squiggle color at a byte; `from`: a known (byte, display column) at
+    /// or before `left` to start at (a wrapped row's start). Returns (cells painted, display width).
     #[allow(clippy::too_many_arguments)]
     fn paint_text<'a>(
         &'a self,
@@ -562,14 +625,19 @@ impl Editor {
         guide_at: Option<&dyn Fn(usize) -> Option<&'a str>>,
         curly_at: Option<&dyn Fn(usize) -> Option<&'a str>>,
         link: Option<(usize, usize)>,
+        from: Option<(usize, usize)>,
     ) -> (usize, usize) {
         let c = &self.c;
-        let (mut col, mut ti, mut x, mut start) = (0usize, 0usize, 0usize, 0usize);
+        let (mut start, mut col) = from.map_or((0, 0), |(i, col)| (i.min(text.len()), col));
+        let (mut ti, mut x) = (0usize, 0usize);
         let mut lead = guide_at.is_some();
         let right = left + width;
         let tokens = tokens.filter(|t| !t.is_empty());
+        if let (Some(t), true) = (tokens, start > 0) {
+            ti = token_index(t, start);
+        }
         // a long line of single-width characters: start at the first visible one
-        if left > 0 && text.len() > 1000 && text.bytes().all(|b| (0x20..0x7f).contains(&b)) {
+        if from.is_none() && left > 0 && text.len() > 1000 && text.bytes().all(|b| (0x20..0x7f).contains(&b)) {
             start = left.min(text.len());
             col = start;
             if let Some(t) = tokens {
@@ -643,8 +711,8 @@ impl Editor {
     }
 
     /// Paints ghost text line k (of the suggestion at line `l`, byte `gc`) from display column `start` after `x` painted
-    /// cells, in the ghost color with tabs to the next stop, then on its last line the rest of line `l`, moved after it;
-    /// returns the cells painted.
+    /// cells, in the ghost color with tabs to the next stop, then on its last line the rest of the cursor's row of line
+    /// `l` (up to display column `end`), moved after it; `left`: the first display column shown. Returns the cells painted.
     #[allow(clippy::too_many_arguments)]
     fn paint_ghost_tail<'a>(
         &'a self,
@@ -659,12 +727,14 @@ impl Editor {
         line_bg: &'a str,
         bg_at: &dyn Fn(usize) -> Option<&'a str>,
         curly: Option<&dyn Fn(usize) -> Option<&'a str>>,
+        left: usize,
+        end: usize,
     ) -> usize {
-        let (tab, right) = (self.tab(), self.left + width);
+        let (tab, right) = (self.tab(), left + width);
         let mut col = start;
         for ch in lines[k].chars() {
             let w = if ch == '\t' { tab - col % tab } else { char_width(ch) };
-            if w > 0 && col >= self.left && col + w <= right {
+            if w > 0 && col >= left && col + w <= right {
                 let glyph = if ch == '\t' { " ".repeat(w) } else if (ch as u32) < 0x20 { " ".into() } else { ch.to_string() };
                 p.text(&glyph, &self.c.ghost, line_bg);
                 x += w;
@@ -674,7 +744,8 @@ impl Editor {
         if k + 1 == lines.len() && x < width {
             let text = &self.buf.lines[l];
             let cx = display_col(text, gc, tab);
-            x += self.paint_text(p, Some(l), text, self.hl.line(l), width - x, cx + self.left.saturating_sub(col), line_bg, bg_at, tab, None, curly, None).0;
+            let from = cx + left.saturating_sub(col);
+            x += self.paint_text(p, Some(l), text, self.hl.line(l), (width - x).min(end.saturating_sub(from)), from, line_bg, bg_at, tab, None, curly, None, Some((gc, cx))).0;
         }
         x
     }
@@ -688,6 +759,7 @@ impl Editor {
             (if self.indent.use_tabs { format!("Tab Size: {}", self.tab()) } else { format!("Spaces: {}", self.tab()) }, Some(StatusAct::Indent)),
             ((if self.doc.bom { "UTF-8 with BOM" } else { "UTF-8" }).into(), None),
             ((if self.doc.crlf { "CRLF" } else { "LF" }).into(), Some(StatusAct::Eol)),
+            (self.wrap_status().0, Some(StatusAct::Wrap)),
             (self.language.clone(), Some(StatusAct::Language)),
         ];
         if self.settings.auto_save != crate::settings::AutoSave::Off {
@@ -736,10 +808,12 @@ impl Editor {
         if rw > self.cols {
             return;
         }
-        p.text(&right, &self.c.bar_fg, &self.c.bar);
         let mut x = self.cols - rw + 1;
-        for (text, act) in parts {
+        let n = parts.len();
+        for (i, (text, act)) in parts.into_iter().enumerate() {
             let w = tw(&text);
+            let dim = matches!(act, Some(StatusAct::Wrap)) && self.word_wrap() == "off"; // "No Wrap"
+            p.text(&format!("{text}{}", if i + 1 < n { "   " } else { "  " }), if dim { &self.c.line_number } else { &self.c.bar_fg }, &self.c.bar);
             if let Some(a) = act {
                 self.status_hits.push((x, w, a));
             }
@@ -846,9 +920,10 @@ impl Editor {
         if !m.motion || m.button != 3 {
             return None;
         }
-        if m.y == self.rows && self.status_hits.iter().any(|h| matches!(h.2, StatusAct::Inline) && m.x >= h.0 && m.x < h.0 + h.1) {
-            // the inline suggestion item: today's usage
-            let text = self.inline_usage();
+        let item = self.status_hits.iter().find(|h| m.y == self.rows && m.x >= h.0 && m.x < h.0 + h.1).map(|h| h.2);
+        if matches!(item, Some(StatusAct::Inline | StatusAct::Wrap)) {
+            // the inline suggestion item: today's usage; the word wrap item: what a click does
+            let text = if matches!(item, Some(StatusAct::Wrap)) { self.wrap_status().1 } else { self.inline_usage() };
             if self.message.as_ref().is_none_or(|msg| msg.text != text) {
                 self.say(text, None, 6000);
                 return None;
@@ -878,17 +953,18 @@ impl Editor {
     pub fn cell_to_pos(&mut self, x: i32, y: i32) -> Pos {
         let max = self.view_count() as i64 - 1;
         let row = if y >= 2 && y <= self.height() as i32 + 1 { self.layout_rows(y as usize - 1).get(y as usize - 2).copied() } else { None };
-        let line = match row {
+        let (line, sub) = match row {
             Some(Row { line: Some(l), lens: true, .. }) => return pos(l, 0),
-            Some(Row { line: Some(l), .. }) => l,
-            Some(Row { line: None, .. }) => self.line_at_row(max.max(0) as usize),
-            None => {
-                let v = (self.row_of(self.top) as i64 + y as i64 - 2).clamp(0, max.max(0)) as usize;
-                self.line_at_row(v)
+            Some(Row { line: Some(l), ghost, sub, .. }) => (l, if ghost > 0 { self.row_pos(self.head()).0 } else { sub }),
+            other => {
+                let v = if other.is_some() { max } else { self.top_row() as i64 + y as i64 - 2 }.clamp(0, max.max(0)) as usize;
+                let l = self.line_at_row(v);
+                (l, v - self.row_of(l))
             }
         };
-        let col = (self.left as i64 + x as i64 - 1 - self.gutter() as i64).max(0) as usize;
-        pos(line, index_at_col(&self.buf.lines[line], col, self.tab()))
+        let x = (self.left as i64 + x as i64 - 1 - self.gutter() as i64).max(0) as usize;
+        let r = self.wrap_of(line);
+        pos(line, r.col_at(sub.min(r.last()), &self.buf.lines[line], x, self.tab()))
     }
 
     /// How far past the text area a drag pointer is.
@@ -906,7 +982,7 @@ impl Editor {
         let Some((x, y)) = self.drag else { return false };
         let (dx, dy) = self.drag_overflow(x, y);
         if dy != 0 {
-            self.top = self.scrolled(dy as i64, None);
+            self.scroll_by(dy as i64, None);
         }
         if dx != 0 {
             let h = self.height();
@@ -938,7 +1014,7 @@ impl Editor {
                 BarMouse::No => {}
                 BarMouse::Took => return true,
                 BarMouse::To(v) => {
-                    self.top = self.line_at_row(v.max(0) as usize);
+                    self.scroll_to(v, None);
                     return true;
                 }
             }
@@ -997,7 +1073,7 @@ impl Editor {
             }
         }
         if m.wheel() && !m.shift {
-            self.top = self.scrolled(if m.button == 64 { -3 } else { 3 }, None);
+            self.scroll_by(if m.button == 64 { -3 } else { 3 }, None);
             return;
         }
         if m.wheel() || m.button == 66 || m.button == 67 {
@@ -1029,6 +1105,7 @@ impl Editor {
                         StatusAct::Eol => self.pick_eol(),
                         StatusAct::Language => self.pick_language(),
                         StatusAct::Inline => self.toggle_inline(),
+                        StatusAct::Wrap => self.toggle_word_wrap(),
                     }
                 }
             }
@@ -1109,45 +1186,54 @@ impl Editor {
     fn has_lens(&self, line: usize) -> bool {
         self.lens_items().iter().any(|l| l.at.line == line)
     }
-    /// Text rows from the top line to `line`'s row: view rows plus the lens rows above the lines in between (and
-    /// `line`).
-    pub fn rows_to(&mut self, line: usize) -> i64 {
-        let mut n = self.row_of(line) as i64 - self.row_of(self.top) as i64;
+    /// Text rows from the first shown row to row `sub` of `line`: view rows plus the lens rows above the lines in
+    /// between (and `line`) and a multi-line ghost text's extra rows below a row before it.
+    pub fn rows_to(&mut self, line: usize, sub: usize) -> i64 {
+        let (target, first) = ((self.row_of(line) + sub) as i64, self.top_row() as i64);
+        let mut n = target - first;
         if n >= 0 {
-            let mut lines: Vec<usize> = self.lens_items().iter().map(|l| l.at.line).filter(|&l| l >= self.top && l <= line).collect();
+            let (top, top_sub) = (self.top, self.top_sub);
+            let mut lines: Vec<usize> = self.lens_items().iter().map(|l| l.at.line).filter(|&l| (l > top || (l == top && top_sub == 0)) && l <= line).collect();
             lines.dedup();
             n += lines.into_iter().filter(|&l| !self.folds.is_hidden(l)).count() as i64;
-            if let Some(g) = self.ghost_view().filter(|g| g.0 >= self.top && g.0 < line) {
-                n += g.2.len() as i64 - 1; // a multi-line ghost text's rows below its line
+            if let Some(g) = self.ghost_view() {
+                let gv = self.view_row(pos(g.0, g.1)) as i64;
+                if gv >= first && gv < target {
+                    n += g.2.len() as i64 - 1; // a multi-line ghost text's rows below its row
+                }
             }
         }
         n
     }
-    /// The first `count` text rows from the top line.
+    /// The first `count` text rows from the first shown row.
     pub fn layout_rows(&mut self, count: usize) -> Vec<Row> {
-        let ghost = self.ghost_view().map(|g| (g.0, g.2.len()));
+        let ghost = self.ghost_view().map(|g| (g.0, g.2.len(), g.1));
+        let ghost_sub = ghost.map(|g| self.row_pos(pos(g.0, g.2)).0);
         let mut rows = Vec::with_capacity(count);
-        let mut l = self.top;
-        let row = |line, lens, ghost| Row { line, lens, ghost };
+        let (mut l, mut k) = (self.top, self.top_sub);
+        let row = |line, sub, lens, ghost| Row { line, sub, lens, ghost };
         while rows.len() < count {
             if l >= self.buf.lines.len() {
-                rows.push(row(None, false, 0));
+                rows.push(row(None, 0, false, 0));
                 continue;
             }
-            if self.has_lens(l) {
-                rows.push(row(Some(l), true, 0));
+            if k == 0 && self.has_lens(l) {
+                rows.push(row(Some(l), 0, true, 0));
             }
-            if rows.len() < count {
-                rows.push(row(Some(l), false, 0));
-            }
-            if let Some((_, n)) = ghost.filter(|g| g.0 == l) {
-                for k in 1..n {
-                    if rows.len() < count {
-                        rows.push(row(Some(l), false, k));
+            let n = self.wrap_of(l).starts.len();
+            while k < n && rows.len() < count {
+                rows.push(row(Some(l), k, false, 0));
+                if let Some((_, gn, _)) = ghost.filter(|g| g.0 == l && ghost_sub == Some(k)) {
+                    for j in 1..gn {
+                        if rows.len() < count {
+                            rows.push(row(Some(l), 0, false, j));
+                        }
                     }
                 }
+                k += 1;
             }
             l = self.folds.next(l);
+            k = 0;
         }
         rows
     }

@@ -30,6 +30,7 @@ mod symbols;
 mod term;
 mod view;
 mod width;
+mod wrap;
 
 use editor::Editor;
 use highlight::Highlight;

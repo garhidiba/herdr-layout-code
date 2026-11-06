@@ -51,6 +51,12 @@ pub struct Settings {
     pub cursor_style: &'static str,
     /// editor.cursorBlinking: "blink" | "smooth" | "phase" | "expand" | "solid"
     pub cursor_blinking: &'static str,
+    /// editor.wordWrap: "off" | "on" | "wordWrapColumn" | "bounded" (wrap.rs)
+    pub word_wrap: &'static str,
+    /// editor.wordWrapColumn: 1-500
+    pub word_wrap_column: usize,
+    /// editor.wrappingIndent: "none" | "same" | "indent" | "deepIndent"
+    pub wrapping_indent: &'static str,
 }
 
 impl Default for Settings {
@@ -72,6 +78,9 @@ impl Default for Settings {
             find_in_selection: "never",
             cursor_style: "line",
             cursor_blinking: "blink",
+            word_wrap: "off",
+            word_wrap_column: 80,
+            wrapping_indent: "same",
         }
     }
 }
@@ -83,6 +92,7 @@ fn defaults_json() -> Value {
         "breadcrumbs.enabled": true, "editor.hover.enabled": true, "extensions.ignoreRecommendations": false, "editor.codeLens": true,
         "editor.find.seedSearchStringFromSelection": "always", "editor.find.autoFindInSelection": "never",
         "editor.cursorStyle": "line", "editor.cursorBlinking": "blink",
+        "editor.wordWrap": "off", "editor.wordWrapColumn": 80, "editor.wrappingIndent": "same",
     })
 }
 
@@ -121,6 +131,11 @@ pub fn normalize(raw: &Value) -> Settings {
     v.find_in_selection = pick("editor.find.autoFindInSelection", &["never", "always", "multiline"], "never");
     v.cursor_style = pick("editor.cursorStyle", &["line", "block", "underline", "line-thin", "underline-thin", "block-outline"], "line");
     v.cursor_blinking = pick("editor.cursorBlinking", &["blink", "smooth", "phase", "expand", "solid"], "blink");
+    v.word_wrap = pick("editor.wordWrap", crate::wrap::MODES, "off");
+    v.wrapping_indent = pick("editor.wrappingIndent", crate::wrap::INDENTS, "same");
+    if let Some(c) = num("editor.wordWrapColumn").filter(|c| c.fract() == 0.0) {
+        v.word_wrap_column = c.clamp(1.0, 500.0) as usize;
+    }
     v
 }
 

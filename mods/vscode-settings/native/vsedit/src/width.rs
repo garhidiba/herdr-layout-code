@@ -66,13 +66,14 @@ pub fn display_col(line: &str, index: usize, tab: usize) -> usize {
     text_width(&line[..index.min(line.len())], tab)
 }
 
-/// Byte offset of the character boundary nearest display column `col` (the right half of a wide char goes after it).
-pub fn index_at_col(line: &str, col: usize, tab: usize) -> usize {
-    let mut c = 0;
-    for (i, ch) in line.char_indices() {
+/// Byte offset of the character boundary nearest display column `col` (the right half of a wide char goes after it),
+/// walking from a known byte offset `from` at display column `from_col` (0, 0: the line's start; a wrapped row's start).
+pub fn index_at_col(line: &str, col: usize, tab: usize, from: usize, from_col: usize) -> usize {
+    let mut c = from_col;
+    for (i, ch) in line[from.min(line.len())..].char_indices() {
         let w = width_at(ch, c, tab);
         if c + w > col && w > 0 {
-            return if (col - c) * 2 >= w { i + ch.len_utf8() } else { i };
+            return from + if (col - c) * 2 >= w { i + ch.len_utf8() } else { i };
         }
         c += w;
     }
@@ -126,8 +127,8 @@ mod tests {
 
     #[test]
     fn a_column_inside_a_wide_char_rounds_to_the_nearer_edge() {
-        assert_eq!(index_at_col("한글", 1, 4), 3);
-        assert_eq!(index_at_col("한글", 2, 4), 3);
-        assert_eq!(index_at_col("ab", 9, 4), 2);
+        assert_eq!(index_at_col("한글", 1, 4, 0, 0), 3);
+        assert_eq!(index_at_col("한글", 2, 4, 0, 0), 3);
+        assert_eq!(index_at_col("ab", 9, 4, 0, 0), 2);
     }
 }

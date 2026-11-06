@@ -15,7 +15,6 @@ use crate::overlays::{filter, fuzzy, item, sep, step_menu, Hover, Input, Item, M
 use crate::smartselect;
 use crate::symbols::{symbol_path, Symbol};
 use crate::term::Term;
-use crate::width::display_col;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -372,10 +371,12 @@ impl Editor {
                     0 | 1 => {
                         ed.ls.peek = Some(Peek { title: peek_title(kind).into(), items: locs, index: 0 });
                         // keep the box on screen below the cursor line
-                        let (row, h) = (ed.rows_to(ed.head().line), ed.height() as i64);
+                        let head = ed.head();
+                        let sub = ed.row_pos(head).0;
+                        let (row, h) = (ed.rows_to(head.line, sub), ed.height() as i64);
                         if row + Peek::HEIGHT as i64 >= h {
-                            let v = (ed.row_of(ed.head().line) as i64 - (h - Peek::HEIGHT as i64 - 1).max(0)).max(0);
-                            ed.top = ed.line_at_row(v as usize);
+                            let v = ed.view_row(head) as i64 - (h - Peek::HEIGHT as i64 - 1).max(0);
+                            ed.scroll_to(v, None);
                         }
                     }
                     _ => ed.show_panel(peek_title(kind), locs, None),
@@ -437,8 +438,8 @@ impl Editor {
             let line = l.line.min(self.buf.lines.len() - 1);
             let at = pos(line, byte_of(&self.buf.lines[line], l.col));
             self.move_to(at, false);
-            let v = self.row_of(at.line).saturating_sub(self.height() / 3);
-            self.top = self.line_at_row(v);
+            let v = self.view_row(at) as i64 - (self.height() / 3) as i64;
+            self.scroll_to(v, None);
         }
     }
     /// An open file's state for drawing (the peek box), loading it once.
@@ -457,9 +458,11 @@ impl Editor {
         let (row, col) = self.screen_of(p);
         ((self.rows - 3).min(row + 1), (col - 1).max(1))
     }
+    /// The screen cell of a buffer position (its wrapped row's), for popups placed at it.
     pub fn screen_of(&mut self, p: Pos) -> (i32, i32) {
-        let row = self.rows_to(p.line) as i32 + 2;
-        (row, self.gutter() as i32 + display_col(&self.buf.lines[p.line], p.col, self.tab()) as i32 - self.left as i32 + 1)
+        let (sub, x) = self.row_pos(p);
+        let row = self.rows_to(p.line, sub) as i32 + 2;
+        (row, self.gutter() as i32 + x as i32 - self.left as i32 + 1)
     }
     fn rename_symbol(&mut self) {
         let Some((word, start, _)) = self.word_at(self.head()) else { return self.warn("The element can't be renamed.") };
@@ -801,8 +804,9 @@ impl Editor {
         let mut w = None;
         if over_text {
             let p = self.cell_to_pos(m.x, m.y);
+            let x = self.row_pos(p).1;
             let t = &self.buf.lines[p.line];
-            let over = p.col < t.len() && display_col(t, p.col, self.tab()) as i64 == self.left as i64 + m.x as i64 - 1 - gw as i64;
+            let over = p.col < t.len() && x as i64 == self.left as i64 + m.x as i64 - 1 - gw as i64;
             if over {
                 let word = t[p.col..].chars().next().is_some_and(crate::decorations::is_word_char);
                 w = if word { self.word_at(p).map(|w| (p, w.1)) } else if !self.problems_at(p).is_empty() { Some((p, p)) } else { None };
@@ -892,8 +896,8 @@ impl Editor {
         let at = d.start;
         self.push_nav();
         self.move_to(at, false);
-        let v = self.row_of(at.line).saturating_sub(self.height() / 3);
-        self.top = self.line_at_row(v);
+        let v = self.view_row(at) as i64 - (self.height() / 3) as i64;
+        self.scroll_to(v, None);
     }
 
     // ----- document symbols: Go to Symbol, breadcrumbs -----
@@ -1098,6 +1102,7 @@ impl Editor {
         if dir < 0 { h.redo.push(last) } else { h.undo.push(last) }
         h.last = st;
         (self.sel, self.top, self.left) = st;
+        self.top_sub = 0;
         self.goal = None;
         self.buf.seal();
     }
