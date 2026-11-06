@@ -1,8 +1,9 @@
 // A VS Code–style Source Control panel for the focused pane's folder: its git repos (nested ones too),
-// the selected repo's changes with diff and commit (as Herdr's shipped `changes` mod does), and its commit graph.
-import { View, div, svg } from "gpui-kit";
+// the selected repo's changes and commit (as Herdr's shipped `changes` mod does), and its commit graph.
+// Commits expand to their changed files; a file opens a diff tab (vscode-diff mod).
+import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list } from "gpui-base";
-import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings } from "herdr";
+import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, run, appHome } from "herdr";
 
 function location() {
   const space = spaces().find((s) => s.active), f = focused();
@@ -14,11 +15,10 @@ const key = () => JSON.stringify(location());
 // Reads write nothing under .git (no index refresh or lock, no fsmonitor cookie):
 // the folder watch would see it, and every refresh would start the next one.
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
-const countLines = (text) => text ? text.split("\n").length - Number(text.endsWith("\n")) : 0;
 const ROW = 22, LANE = 12, MAX_LANES = 12, COMMITS = 300, FILES = 1000;
 
 // VS Code's git decoration colors (as vscode-explorer) and its scmGraph.foreground1–5 lane colors.
-const GIT_COLOR = { M: "#e2c08d", A: "#73c991", U: "#73c991", D: "#c74e39", "!": "#e4676b" };
+const GIT_COLOR = { M: "#e2c08d", A: "#73c991", U: "#73c991", D: "#c74e39", R: "#73c991", "!": "#e4676b" };
 const gitLetter = (xy) => xy === "??" ? "U" : /U|AA|DD/.test(xy) ? "!" : xy.includes("D") ? "D" : xy.includes("A") ? "A" : "M";
 const LANE_COLORS = ["#ffb000", "#dc267f", "#994f00", "#40b0a6", "#b66dff"];
 const laneColor = (i) => LANE_COLORS[i % LANE_COLORS.length];
@@ -84,23 +84,45 @@ function graph(commits) {
   });
 }
 
-// Numbers each diff line once, so a frame only draws the rows on screen (from the shipped `changes` mod).
-function diffRows(lines) {
-  let old = 0, next = 0;
-  return lines.map((line) => {
-    const match = /^@@ -(\d+)(?:,\d+)? \+(\d+)/.exec(line);
-    if (match) { old = +match[1]; next = +match[2]; return { kind: "@", text: line }; }
-    const kind = line[0];
-    if (kind === "-") return { kind, number: old++, text: line.slice(1) || " " };
-    if (kind === "+") return { kind, number: next++, text: line.slice(1) || " " };
-    if (kind === " ") { old++; return { kind, number: next++, text: line.slice(1) || " " }; }
-    return { kind: "", text: line };
-  });
+// `git show --name-status -z` -> [{ status, path, oldPath? }]: renames and copies carry the old path first.
+const NAME_STATUS = { M: "M", A: "A", D: "D", R: "R", C: "A", T: "M", U: "!" };
+function parseNameStatus(text) {
+  const fields = text.split("\0"), files = [];
+  for (let i = 0; i < fields.length; i++) {
+    const code = fields[i].trim();
+    if (!code) continue;
+    if (code[0] === "R" || code[0] === "C") { files.push({ status: NAME_STATUS[code[0]], oldPath: fields[i + 1], path: fields[i + 2] }); i += 2; }
+    else { files.push({ status: NAME_STATUS[code[0]] ?? "M", path: fields[i + 1] }); i += 1; }
+  }
+  return files.filter((f) => f.path);
+}
+
+// Material Icon Theme (the Explorer's table): exact file name, then the longest extension, then the default.
+function fileIcon(name, m) {
+  if (!m?.names) return null;
+  const n = name.toLowerCase();
+  if (m.names[n]) return m.names[n];
+  const parts = n.split(".");
+  for (let i = 1; i < parts.length; i++) { const e = m.ext[parts.slice(i).join(".")]; if (e) return e; }
+  return m.file;
+}
+
+const short = (hash) => hash ? hash.slice(0, 7) : "∅";
+const baseName = (path) => path.split("/").pop();
+// A diff tab named as VS Code names it: "<old name> (<left>) ↔ <name> (<right>)". commit null: HEAD ↔ the working tree.
+function openDiff(repo, on, file, commit, parent) {
+  const left = commit ? short(parent) : "HEAD", right = commit ? short(commit) : "Working Tree";
+  run("tab.new", { name: `${baseName(file.oldPath ?? file.path)} (${left}) ↔ ${baseName(file.path)} (${right})`, mod: "vscode-diff",
+    props: { repo, commit, parent: commit ? parent : "HEAD", path: file.path, ...(file.oldPath ? { oldPath: file.oldPath } : {}), on } });
 }
 
 export default class SourceControl extends View {
   init(_props, cx) {
-    this.repos = []; this.chosen = new Map(); this.handle = cx.focus_handle(); this.last = 0;
+    this.repos = []; this.chosen = new Map(); this.handle = cx.focus_handle(); this.last = 0; this.icons = null;
+    cx.spawn(async (cx) => {
+      try { this.icons = JSON.parse(await readTextFile(`${appHome()}/mods/vscode-explorer/icons.json`)); } catch {}
+      cx.notify();
+    });
     try { this.collapsed = JSON.parse(localStorage.getItem("collapsed") ?? "{}"); } catch { this.collapsed = {}; }
     this.clearRepo();
     this.input = InputState.new({ placeholder: "Message (Enter to commit)" });
@@ -117,8 +139,8 @@ export default class SourceControl extends View {
   }
 
   clearRepo() {
-    this.files = []; this.commits = []; this.open = null; this.note = null; this.limited = false; this.hasHead = true;
-    this.setLines([]);
+    this.files = []; this.commits = []; this.note = null; this.limited = false; this.hasHead = true;
+    this.expanded = new Set(); this.commitFiles = new Map();
     if (this.message) this.input.set_value("");
     this.message = "";
   }
@@ -170,7 +192,7 @@ export default class SourceControl extends View {
     const status = await git(["status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"]);
     if (status.code !== 0) throw new Error(status.stderr);
     const entries = status.stdout.split("\0").filter(Boolean);
-    const files = entries.slice(0, FILES).map((entry) => ({ path: entry.slice(3), status: gitLetter(entry.slice(0, 2)), fresh: entry.startsWith("??") }));
+    const files = entries.slice(0, FILES).map((entry) => ({ path: entry.slice(3), status: gitLetter(entry.slice(0, 2)) }));
     const hasHead = repo?.oid !== "(initial)";
     let commits = [];
     if (hasHead) {
@@ -180,35 +202,6 @@ export default class SourceControl extends View {
     }
     if (key() !== context || this.selected !== root) return;
     this.files = files; this.limited = entries.length > FILES; this.hasHead = hasHead; this.commits = commits;
-    if (this.open && !files.some((f) => f.path === this.open)) { this.open = null; this.setLines([]); }
-    if (this.open) {
-      try { await this.load(this.open, context, root); }
-      catch { if (key() === context) this.setLines(["Cannot preview this diff (too large or unreadable)"]); }
-    }
-  }
-
-  // From the shipped `changes` mod: untracked (and, before the first commit, added) files show whole.
-  async load(path, context, root) {
-    const file = this.files.find((f) => f.path === path), on = this.on;
-    if (!file) return;
-    let lines;
-    if (file.fresh || (!this.hasHead && file.status === "A")) {
-      const text = await readTextFile(`${root}/${path}`, { on }).catch(() => null);
-      if (text === null) lines = ["Cannot preview this file (binary, too large, or unreadable)"];
-      else if (text.includes("\0")) lines = ["Binary file · no text diff"];
-      else lines = [`@@ -0,0 +1,${countLines(text)} @@`, ...text.slice(0, 400000).replace(/\n$/, "").split("\n").slice(0, 1500).map(l => `+${l}`)];
-    } else {
-      const r = await exec("git", [...READ, "diff", ...(this.hasHead ? ["HEAD"] : []), "--no-ext-diff", "--no-textconv", "--no-color", "--", path], { cwd: root, on });
-      if (r.code !== 0) throw new Error(r.stderr);
-      const all = r.stdout.replace(/\n$/, "").split("\n"), first = all.findIndex((l) => l.startsWith("@@"));
-      lines = first < 0 ? ["No text diff (binary file or mode change)"] : all.slice(first);
-    }
-    if (key() === context && this.selected === root && this.open === path) this.setLines(lines.slice(0, 1500).map(line => line.length > 4000 ? line.slice(0, 4000) + "… (line truncated)" : line));
-  }
-
-  setLines(lines) {
-    this.diff = diffRows(lines);
-    this.diffWidth = Math.max(300, ...lines.map(line => line.length * 7 + 50));
   }
 
   select(path, cx) {
@@ -218,15 +211,46 @@ export default class SourceControl extends View {
     cx.notify();
   }
 
-  pick(path, cx) {
-    this.open = this.open === path ? null : path; this.setLines([]); this.note = null;
-    const context = this.context, root = this.selected;
-    if (this.open) cx.spawn(async (cx) => {
-      try { await this.load(path, context, root); }
-      catch (e) { if (key() === context && this.open === path) this.note = `Cannot preview this diff (too large or unreadable): ${e}`; }
-      cx.notify();
-    });
+  // Expands a commit to its changed files (against its first parent), loaded once per commit.
+  toggleCommit(row, cx) {
+    if (this.expanded.delete(row.hash)) return cx.notify();
+    this.expanded.add(row.hash);
+    if (!this.commitFiles.has(row.hash)) {
+      const root = this.selected, context = this.context, on = this.on, files = this.commitFiles;
+      files.set(row.hash, "Loading…");
+      cx.spawn(async (cx) => {
+        try {
+          const r = await exec("git", [...READ, "show", "--name-status", "-z", "--format=", "-M", "-m", "--first-parent", row.hash], { cwd: root, on });
+          if (r.code !== 0) throw new Error(r.stderr.trim());
+          const list = parseNameStatus(r.stdout).slice(0, FILES);
+          files.set(row.hash, list.length ? list : "No changed files");
+        } catch (e) { files.set(row.hash, `Cannot list the files: ${e}`); }
+        if (this.context === context && this.selected === root) cx.notify();
+      });
+    }
     cx.notify();
+  }
+
+  // Keys from the graph list: "c:<hash>" toggles a commit, "f:<hash>:<path>" opens that file's diff.
+  graphClick(id, cx) {
+    const hash = id.slice(2, 42), row = this.commits.find((c) => c.hash === hash);
+    if (!row) return;
+    if (id.startsWith("c:")) return this.toggleCommit(row, cx);
+    const files = this.commitFiles.get(hash), file = Array.isArray(files) && files.find((f) => f.path === id.slice(43));
+    if (id.startsWith("f:") && file) openDiff(this.selected, this.on, file, row.hash, row.parents[0] ?? null);
+  }
+
+  // The graph's rows: each commit, then the files of the expanded ones (or a note while they load).
+  graphItems() {
+    const items = [];
+    for (const row of this.commits) {
+      items.push({ key: `c:${row.hash}`, row });
+      if (!this.expanded.has(row.hash)) continue;
+      const files = this.commitFiles.get(row.hash);
+      if (Array.isArray(files)) for (const file of files) items.push({ key: `f:${row.hash}:${file.path}`, row, file });
+      else items.push({ key: `n:${row.hash}`, row, note: files ?? "Loading…" });
+    }
+    return items;
   }
 
   // As the shipped `changes` mod: stages everything in the repo, then commits.
@@ -277,20 +301,18 @@ export default class SourceControl extends View {
       .when(r.ahead !== null, (e) => e.child(div().flex_none().text_size(11).text_color(t.dim).child(`↑${r.ahead} ↓${r.behind}`)));
   }
 
-  fileRow(f, t) {
+  // A changed file: name in its git color (struck through when deleted), folder dimmed, letter on the right.
+  fileLabel(f, t) {
     const parts = f.path.split("/"), name = parts.pop(), color = GIT_COLOR[f.status];
-    return h_flex().id(`scm-file-${f.path}`).h(ROW).flex_none().pl(22).pr(10).gap(6).items_center().cursor_pointer().when(this.open === f.path, (e) => e.bg(t.selected)).hover((s) => s.bg(t.hover))
-      .on_click((_e, cx) => this.pick(f.path, cx))
-      .child(div().max_w(220).flex_none().truncate().text_color(color).when(f.status === "D", (e) => e.line_through()).child(name))
-      .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.dim).child(parts.join("/")))
-      .child(div().w(12).flex_none().text_size(11).text_color(color).child(f.status));
+    return [div().max_w(220).flex_none().truncate().text_color(color).when(f.status === "D", (e) => e.line_through()).child(name),
+      div().flex_1().min_w(0).truncate().text_size(12).text_color(t.dim).child(parts.join("/")),
+      div().w(12).flex_none().text_size(11).text_color(color).child(f.status)];
   }
 
-  diffRow({ kind, number, text }, t) {
-    if (kind === "@") return div().w_full().px(12).h(20).flex_none().truncate().bg(t.raised).text_color(t.dim).child(text);
-    return h_flex().w_full().h(20).flex_none().gap(10).when(kind === "+", (e) => e.bg(t.ansi2 + "18")).when(kind === "-", (e) => e.bg(t.ansi1 + "18"))
-      .child(div().w(30).flex_none().text_right().text_color(t.dim).child(number === undefined ? "" : String(number)))
-      .child(div().flex_1().min_w(0).truncate().child(text));
+  fileRow(f, t) {
+    return h_flex().id(`scm-file-${f.path}`).h(ROW).flex_none().pl(22).pr(10).gap(6).items_center().cursor_pointer().hover((s) => s.bg(t.hover))
+      .on_click(() => openDiff(this.selected, this.on, f, null, null))
+      .children(this.fileLabel(f, t));
   }
 
   // The lane column: half lines per lane, horizontal links to the node, and the node (a ring for merges).
@@ -311,9 +333,25 @@ export default class SourceControl extends View {
     return div().relative().w(8 + Math.min(Math.max(row.width, 1), MAX_LANES) * LANE).h(ROW).flex_none().children(parts);
   }
 
+  // Under an expanded commit: the lanes that go on below it, at full height.
+  throughLanes(row) {
+    const parts = row.lines.filter((l) => l.bottom && l.lane < MAX_LANES)
+      .map(({ lane }) => div().absolute().left(4 + lane * LANE + LANE / 2 - 1).top(0).w(2).h(ROW).bg(laneColor(lane)));
+    return div().relative().w(8 + Math.min(Math.max(row.width, 1), MAX_LANES) * LANE).h(ROW).flex_none().children(parts);
+  }
+
+  // A file of an expanded commit (or the note while its files load), indented under the subject.
+  graphFileRow({ row, file, note }, t) {
+    const el = h_flex().w_full().h(ROW).flex_none().pr(10).gap(6).items_center().child(this.throughLanes(row)).child(div().w(10).flex_none());
+    if (!file) return el.child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.dim).child(note));
+    const icon = fileIcon(baseName(file.path), this.icons);
+    return el.cursor_pointer().child(icon ? image(`mods/vscode-explorer/icons/${icon}.svg`).w(16).h(16).flex_none() : div().w(16).flex_none())
+      .children(this.fileLabel(file, t));
+  }
+
   graphRow(row, t) {
     const color = laneColor(row.col);
-    return h_flex().w_full().h(ROW).flex_none().pr(10).gap(6).items_center()
+    return h_flex().w_full().h(ROW).flex_none().pr(10).gap(6).items_center().cursor_pointer().when(this.expanded.has(row.hash), (e) => e.bg(t.selected))
       .child(this.lanes(row, t))
       .child(div().flex_1().min_w(0).truncate().when(row.refs.some((r) => r.head), (e) => e.font_semibold()).child(row.subject || " "))
       .children(row.refs.slice(0, 2).map((r) => div().flex_none().max_w(110).truncate().px(5).h(16).flex().items_center().rounded(8).text_size(10)
@@ -324,7 +362,7 @@ export default class SourceControl extends View {
 
   render(cx) {
     if (key() !== this.context) this.refresh(cx);
-    const t = theme(), repo = this.repos.find((r) => r.path === this.selected), shown = (id) => !this.collapsed[id];
+    const t = theme(), repo = this.repos.find((r) => r.path === this.selected), shown = (id) => !this.collapsed[id], items = this.graphItems();
     const enabled = Boolean(this.message.trim() && repo && !this.busy && !this.loading);
     const empty = (text) => div().h(ROW).flex_none().px(22).flex().items_center().text_size(12).text_color(t.dim).child(text);
     return v_flex().id("scm").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13).track_focus(this.handle)
@@ -350,16 +388,12 @@ export default class SourceControl extends View {
         .child(v_flex().id("scm-files").flex_none().max_h(8 * ROW).overflow_y_scrollbar()
           .children(this.files.map((f) => this.fileRow(f, t)))
           .when(!this.files.length, (e) => e.child(empty(this.loading ? "Loading changes…" : "No uncommitted changes"))))
-        .when(this.limited, (e) => e.child(empty("Showing the first 1,000 changed files")))
-        .when(Boolean(this.open), (e) => e.child(div().h(240).flex_none().relative().border_t(1).border_color(t.border).font_family(settings().font_family ?? "JetBrains Mono").text_size(11)
-          .child(div().id("scm-diff-x").size_full().overflow_x_scrollbar()
-            .child(div().w_full().min_w(this.diffWidth).h_full().child(v_virtual_list("scm-diff", this.diff.length, 20, (i) => String(i),
-              (range) => this.diff.slice(range.start, range.end).map((row) => this.diffRow(row, t))).size_full())))
-          .child(Scrollbar.vertical("scm-diff").viewport_from_layout().absolute().inset_0()))))
+        .when(this.limited, (e) => e.child(empty("Showing the first 1,000 changed files"))))
       .child(this.section("graph", "Graph", t, repo?.upstream && repo.ahead !== null ? [div().max_w(160).truncate().text_size(11).text_color(t.dim).child(`${repo.branch} · ${repo.upstream}`)] : []))
       .when(shown("graph"), (el) => el.child(div().flex_1().min_h(0).relative()
-        .child(v_virtual_list("scm-graph", this.commits.length, ROW, (i) => this.commits[i].hash,
-          (range) => this.commits.slice(range.start, range.end).map((row) => this.graphRow(row, t))).size_full())
+        .child(v_virtual_list("scm-graph", items.length, ROW, (i) => items[i].key,
+          (range) => items.slice(range.start, range.end).map((item) => item.file || item.note ? this.graphFileRow(item, t) : this.graphRow(item.row, t))).size_full()
+          .on_item_click((id, cx) => this.graphClick(id, cx)))
         .child(Scrollbar.vertical("scm-graph").viewport_from_layout().absolute().inset_0())
         .when(!this.commits.length, (e) => e.child(div().absolute().top(0).w_full().child(empty(repo ? (this.hasHead ? (this.loading ? "Loading commits…" : "No commits") : "No commits yet") : "No repository"))))));
   }
