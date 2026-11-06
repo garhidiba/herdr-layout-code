@@ -57,16 +57,45 @@ pub enum FindOption {
     Regex,
 }
 
+/// The platform whose default keys apply (VS Code ships default keybindings per OS).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Os {
+    Mac,
+    Windows,
+    Linux,
+}
+
+impl Os {
+    pub fn current() -> Os {
+        if cfg!(target_os = "macos") {
+            Os::Mac
+        } else if cfg!(windows) {
+            Os::Windows
+        } else {
+            Os::Linux
+        }
+    }
+}
+
 pub struct Command {
     pub id: &'static str,
     #[allow(dead_code)] // phase 3: the command palette and the context menu show titles and key labels
     pub title: &'static str,
+    /// The default chords (today the same on every OS, as in commands.cjs).
     pub chords: &'static [&'static str],
+    /// An OS's own defaults instead of `chords` (none yet: per-OS keys follow once the JS defaults split).
+    pub os_chords: &'static [(Os, &'static [&'static str])],
     pub act: Act,
 }
 
+impl Command {
+    pub fn defaults(&self, os: Os) -> &'static [&'static str] {
+        self.os_chords.iter().find(|(o, _)| *o == os).map_or(self.chords, |(_, c)| c)
+    }
+}
+
 const fn c(id: &'static str, title: &'static str, chords: &'static [&'static str], act: Act) -> Command {
-    Command { id, title, chords, act }
+    Command { id, title, chords, os_chords: &[], act }
 }
 
 pub const COMMANDS: &[Command] = &[
@@ -235,10 +264,14 @@ pub struct Keymap {
 }
 
 impl Keymap {
-    /// The defaults, then the user's entries in order.
+    /// This OS's defaults, then the user's entries in order.
     pub fn resolve(user: &[Value]) -> Keymap {
+        Keymap::resolve_for(COMMANDS, Os::current(), user)
+    }
+
+    pub fn resolve_for(commands: &'static [Command], os: Os, user: &[Value]) -> Keymap {
         let mut bindings: Vec<Binding> =
-            COMMANDS.iter().flat_map(|c| c.chords.iter().map(|ch| Binding { key: normalize(ch), command: c.id.into(), user: false })).collect();
+            commands.iter().flat_map(|c| c.defaults(os).iter().map(|ch| Binding { key: normalize(ch), command: c.id.into(), user: false })).collect();
         for e in user {
             let Some(command) = e.get("command").and_then(Value::as_str) else { continue };
             if command.trim_start_matches('-').is_empty() {
@@ -341,6 +374,15 @@ mod tests {
         assert_eq!(km.label("editor.action.deleteLines"), "⇧⌘D");
         let gone = Keymap::resolve(&[json!({ "command": "-undo" })]);
         assert!(gone.command("cmd+z").is_none() && gone.label("undo").is_empty());
+    }
+
+    #[test]
+    fn an_os_can_have_its_own_default_keys() {
+        static CMDS: &[Command] = &[Command { id: "undo", title: "Undo", chords: &["cmd+z"], os_chords: &[(Os::Windows, &["ctrl+z"])], act: Act::Undo }];
+        assert!(Keymap::resolve_for(CMDS, Os::Mac, &[]).command("cmd+z").is_some());
+        let win = Keymap::resolve_for(CMDS, Os::Windows, &[]);
+        assert!(win.command("ctrl+z").is_some() && win.command("cmd+z").is_none());
+        assert!(COMMANDS.iter().all(|c| c.defaults(Os::Linux) == c.chords), "the defaults match commands.cjs on every OS for now");
     }
 
     #[test]
