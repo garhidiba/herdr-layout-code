@@ -2,7 +2,7 @@
 """End-to-end: runs vsedit.cjs in a 100x30 pseudo-terminal, types, saves, quits, and checks colors against tokenize.cjs;
 scrollbars (editor and hex viewer), the context menu, Kitty ⌘ keys, user keybindings, tsserver definition/references/rename, gofmt, the save dialog, auto save and hot exit;
 find widget toggles, status bar items, symbol breadcrumbs, Go to Symbol and diagnostics; Expand Line Selection, Go to Bracket,
-Toggle Block Comment, Save As, Join Lines and Save All.
+Toggle Block Comment, Save As, Join Lines and Save All; Go to File with several files, Go Back / Forward and the settings JSON.
 usage: python3 -I mods/vscode-viewer/editor/test/e2e.py [scenario ...]
 VSEDIT_BIN=<path to the Rust vsedit> runs the same scenarios against the Rust editor through the launcher (vsedit.sh);
 the language-feature scenarios (phase 3, still JS-only) are skipped then, and each result says which editor ran."""
@@ -465,6 +465,52 @@ def run_small_batch(tmp):
     print("line selection, brackets, block comment, save as, join lines, save all: ok")
 
 
+def run_files_and_navigation(tmp):
+    """Linux keys. Ctrl+P (Go to File) opens another file of the folder in the same editor, ":2" goes to a line;
+    Ctrl+Alt+- / Ctrl+Shift+- go back / forward between the files; Ctrl+K S saves both; Ctrl+, (outside Herdr) opens
+    the settings JSON and Ctrl+K Ctrl+S the keybindings JSON; Ctrl+W asks about the unsaved file that isn't showing, then saves it."""
+    root = os.path.join(tmp, "nav")
+    os.makedirs(os.path.join(root, "b"), exist_ok=True)
+    a, c = os.path.join(root, "a.txt"), os.path.join(root, "b", "c.txt")
+    open(a, "w").write("alpha\n")
+    open(c, "w").write("gamma\ndelta\n")
+    t = Term(a)
+    assert t.read("Ln 1, Col 1"), "no first frame"
+    t.send("\x10"); t.send("c.txt")                 # Ctrl+P: Go to File
+    assert t.read("b/c.txt", timeout=2), "Go to File did not list b/c.txt"
+    t.out = b""; t.send("\r")
+    assert t.read("gamma", timeout=3), "Go to File did not open c.txt"
+    t.send("X")
+    t.out = b""; t.send("\x1b[45;7u")               # Ctrl+Alt+-: Go Back
+    assert t.read("alpha", timeout=3), "Go Back did not return to a.txt"
+    t.send("Y")
+    t.out = b""; t.send("\x1b[45;6u")               # Ctrl+Shift+-: Go Forward
+    assert t.read("Xgamma", timeout=3), "Go Forward did not return to c.txt"
+    t.send("\x10"); t.send(":2"); t.send("\r")      # Go to File ":2"
+    assert t.read("Ln 2, Col 1", timeout=2), "Go to File :2 did not go to line 2"
+    t.send("\x0b"); t.send("s")                     # Ctrl+K S: Save All
+    assert t.read("Saved", timeout=2), "Save All did not save"
+    assert open(a).read() == "Yalpha\n" and open(c).read() == "Xgamma\ndelta\n", (open(a).read(), open(c).read())
+    t.out = b""; t.send("\x1b[44;5u")               # Ctrl+,: the settings JSON outside Herdr
+    assert t.read("files.autoSave", timeout=3), "Ctrl+, did not open the settings JSON"
+    t.send("\x1b[45;7u")                            # back to c.txt, edit it, then the settings again
+    t.send("W")
+    t.out = b""; t.send("\x1b[44;5u")
+    assert t.read("files.autoSave", timeout=3), "Ctrl+, did not open the settings JSON again"
+    kb = ISOLATED["VSEDIT_KEYBINDINGS"]
+    os.makedirs(os.path.dirname(kb), exist_ok=True)
+    open(kb, "w").write("// my keys\n[]\n")
+    t.send("\x0b"); t.send("\x13")                 # Ctrl+K Ctrl+S: the keybindings JSON outside Herdr
+    assert t.read("// my keys", timeout=3), "Ctrl+K Ctrl+S did not open the keybindings JSON"
+    os.remove(kb)
+    t.send(QUIT)
+    assert t.read("save the changes you made to c.txt", timeout=2), "quit did not ask about c.txt"
+    t.send("s")
+    assert t.wait_exit() == 0
+    assert open(c).read() == "Xgamma\nWdelta\n", repr(open(c).read())
+    print("go to file, back / forward, save all, settings JSON, quit with another unsaved file: ok")
+
+
 def plain(t):
     """The screen text without colors."""
     return re.sub(r"\x1b\[[\d;]*m", "", screen_of(t))
@@ -855,7 +901,8 @@ def main():
     ISOLATED.update(VSEDIT_ENGINE_LOG=engines)
     scenarios = [run_tsx, run_go, run_crlf, run_hex, run_error_page, run_drag_scroll, run_minified, run_scrollbars, run_decorations,
                  run_autoclose, run_git_gutter, run_folding, run_menu_and_cmd_save, run_save_dialog, run_auto_save, run_hot_exit,
-                 run_keybindings, run_mac_keys, run_format, run_typescript, run_find_and_status, run_symbols_and_problems, run_small_batch]
+                 run_keybindings, run_mac_keys, run_format, run_typescript, run_find_and_status, run_symbols_and_problems, run_small_batch,
+                 run_files_and_navigation]
     only = set(sys.argv[1:])
     results = []
     try:
@@ -878,6 +925,8 @@ def main():
                 os.close(t.fd)
             TERMS.clear()
             used = sorted(set(open(engines).read().split("\n")) - {""}) if RUST_BIN else ["js"]
+            if RUST_BIN and status == "pass" and used != ["rust"]:
+                status = "FAIL: not run by the Rust editor alone"
             results.append((name, status, ", ".join(used)))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
