@@ -2,6 +2,7 @@ import { View, div, svg, image } from "gpui-kit";
 import { h_flex, v_flex, HoverCard } from "gpui-base";
 import { spaces, agents, theme, run, window, keys, exec, readTextFile, appHome, nextCommand, openOverlay, notify } from "herdr";
 // Herdr starts with PATH=/usr/bin:/bin, so Homebrew/user tools (node, code, codex, trash) are looked up here too.
+const CLAUDE_API = 'tok=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null | /usr/bin/python3 -c "import sys,json;print(json.load(sys.stdin)[\\"claudeAiOauth\\"][\\"accessToken\\"])" 2>/dev/null); [ -n "$tok" ] && curl -s -m 10 -H "Authorization: Bearer $tok" -H "anthropic-beta: oauth-2025-04-20" https://api.anthropic.com/api/oauth/usage';
 const userExec = (cmd, args, opts) => exec("sh", ["-c", 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; exec "$0" "$@"', cmd, ...args], opts);
 
 // Newest Codex rollout log that has a rate_limits event (local file, no network or token).
@@ -46,9 +47,10 @@ const OUTCOMES = {
 export default class WorkspaceStatus extends View {
   init(_props, cx) {
     this.codex = null; this.claude = null;
-    this.poll(cx); this.pollClaude(cx); this.pollLimits(cx);
+    this.poll(cx); this.pollClaude(cx); this.pollLimits(cx); this.pollClaudeApi(cx);
     cx.timer.every(60000, cx => this.poll(cx));
     cx.timer.every(10000, cx => this.pollClaude(cx));
+    cx.timer.every(300000, cx => this.pollClaudeApi(cx));
     cx.timer.every(300000, cx => this.pollLimits(cx));
     // The confirm dialog runs vscode-status.consume-reset.
     cx.spawn(async cx => { for (;;) { if (await nextCommand() === "consume-reset") this.consumeReset(cx); } });
@@ -70,7 +72,25 @@ export default class WorkspaceStatus extends View {
         if (rl) wins = [win(rl.five_hour, 300), win(rl.seven_day, 10080)].filter(Boolean);
       } catch {}
       this.claude = wins?.length ? wins : [{ name: "", used: null }];
+      // The usage API is what claude.ai shows; the statusLine file lags behind it, so a fresh API read wins.
+      if (this.api && Date.now() - this.api.at < 600000) { this.claude = this.api.wins; this.claudeAt = this.api.at; }
       cx.notify();
+    });
+  }
+
+  // Claude's usage API (token read from the Keychain inside sh, never kept). Every 5 min; 15 min pause when refused.
+  pollClaudeApi(cx) {
+    if (Date.now() < (this.apiPause ?? 0)) return;
+    cx.spawn(async cx => {
+      try {
+        const r = await exec("sh", ["-c", CLAUDE_API]);
+        const u = r.code === 0 && r.stdout.trim() ? JSON.parse(r.stdout) : null;
+        const win = (w, minutes) => w ? windowLabel({ used_percent: w.utilization ?? 0, window_minutes: minutes, resets_at: Date.parse(w.resets_at) / 1000 }) : null;
+        const wins = u && !u.error ? [win(u.five_hour, 300), win(u.seven_day, 10080)].filter(Boolean) : [];
+        if (!wins.length) { this.apiPause = Date.now() + 900000; return; }
+        this.api = { at: Date.now(), wins }; this.claude = wins; this.claudeAt = this.api.at;
+        cx.notify();
+      } catch { this.apiPause = Date.now() + 900000; }
     });
   }
 
