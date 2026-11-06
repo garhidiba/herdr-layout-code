@@ -373,16 +373,27 @@ contract. One module per JS file: `buffer`, `keys`, `width`, `paint`, `file`, `s
 - **Semantic layer (phase 3 hook):** `highlight::SemanticLayer`, spans (line, start, end → fg, font style) painted
   over the TextMate colors; spans move with edits below them and are dropped on edited lines. Empty in phase 2.
 - **Keys:** ids, titles and default keys per OS come from the shared table `mods/vscode-viewer/editor/keymap.json`
-  (`{ id, title, keys: { mac, win, linux } }`, read at start next to `--vscode`; an id the binary has no action for
-  sends the file to the JS editor). The OS is `VSEDIT_OS`, else the platform, as in commands.cjs. Two-step chords as
+  (`{ id, title, keys: { mac, win, linux } }`, read at start next to `--vscode`). An id the binary implements runs; an
+  id in `commands.rs`'s `NOT_YET_IDS` (the phase-3 features below, plus the JS editor's later batches it knows by VS Code
+  id: Quick Fix, hover, smart select, format selection, cursor undo/redo, workspace symbols, multiple cursors,
+  suggestions, word wrap) shows `Not yet in the Rust editor`; any other id means the table is newer than the binary,
+  and the file goes to the JS editor rather than lose a command. So a new JS language feature needs its id in
+  `NOT_YET_IDS`, and a new JS editing command needs its Rust port, before a release. The OS is `VSEDIT_OS`, else the platform, as in commands.cjs. Two-step chords as
   keybindings.cjs: the first key shows `(⌘K) was pressed. Waiting for second key of chord...`, the second runs the
   command or says `The key combination (…, …) is not a command.`, and a typed character counts as the second key.
   Movement and deletion (cursorHome, cursorLineStart, deleteAllLeft, macOS ⌃A/⌃E/⌃K/⌃U, …) are commands of the
   table; only Enter, Tab and Escape are the editor's own. The user's `vscode-keybindings.json` applies on top.
+- **Several open files** as vsedit.cjs's `docs`: `DocState` holds one file's fields (buffer, tokenizer, selection,
+  view, folds, git gutter, …) and showing another file swaps them with the editor's. Each open file keeps its own
+  tokenizer thread, so going back to a file shows its colors at once. Go to File (`git ls-files -co --exclude-standard`
+  in the git root, else 20,000 files 8 folders deep; `:<line>`), Go Back / Forward (the last 50 jumps to another file),
+  Open Settings / Keyboard Shortcuts (JSON) (outside Herdr, or by their JSON commands), Save As (the text becomes the
+  new file's document), Save All and auto save (other files written as they are; one changed on disk is left), quit
+  (asks about each unsaved file, showing it) and hot exit (every unsaved file) work across them.
 - Phase 3 (JS only for now): language features (tsserver/LSP: definition, references, rename, hover, format,
-  diagnostics, document symbols and symbol breadcrumbs), the context menu, the command palette — their keys show
-  `Not yet in the Rust editor`. Also still JS-only: Go to File (quick open) with its multi-file switching,
-  Open Settings/Keyboard Shortcuts (JSON), Go Back/Forward.
+  diagnostics, document symbols and symbol breadcrumbs), the context menu, the command palette (also `>` in Go to File)
+  — their keys show `Not yet in the Rust editor`.
+- POSIX only (macOS, Linux: `libc` termios, signals, `exec`); Windows keeps the JS editor.
 
 ### Launch and engine switch
 
@@ -391,18 +402,24 @@ Every opener (`openArgs` in the Explorer, the Settings dialog's JSON files) asks
 straight from `sh -c` without the login shell (`exec` dropped), `tab.new` when that fails. The launcher execs
 `<herdr home>/vscode-core/vsedit --vscode … --fallback …/vsedit.cjs` when `"editor.engine": "rust"` and
 `vsedit --api` prints `1`; otherwise `node vsedit.cjs`. The binary execs `node vsedit.cjs` itself (before touching
-the terminal) when it can't start. **`"core.engine": "rust"` does not route to the Rust editor yet** (`RUST_READY=0`
-in the launcher): Go to File and the multi-file switching are missing. `install.sh` (the dialog's Build Rust core)
-builds `vsedit` too when `core.engine` or `editor.engine` is `rust` (or `--engine rust`); a failed editor build
-(no C compiler) leaves the editor on JS and still installs the core. The dialog does not show the editor's status.
+the terminal) when it can't start. Without `editor.engine` the editor follows `core.engine` (`RUST_READY=1` in the
+launcher, flipped once every phase-2 e2e scenario passed in Rust): one switch for the user, JavaScript by default, and
+the Settings dialog's **Editor: Engine** (`editor.engine`) to run one engine for the editor alone; `settings.js`'s
+`editorEngine()` is the launcher's rule. `install.sh` (the dialog's Build Rust core) builds `vsedit` too when
+`core.engine` or `editor.engine` is `rust` (or `--engine rust`); a failed editor build (no C compiler) leaves the editor
+on JS and still installs the core. The dialog shows `Rust editor: built (v1.0.0)` / `… is out of date` (a launch API
+other than 1) / `not built` from `vsedit --version`, and offers the build while a chosen Rust engine isn't current.
 
 ### Tests
 
-- `cargo test -p vsedit` (62 tests: buffer/undo, key parsing, the shared key table, per-OS defaults and chords, find,
-  folding, autoclose, decorations, git diff, scrollbars, settings, hex viewer, …).
+- `cargo test -p vsedit` (76 tests: buffer/undo, key parsing, the shared key table and the not-yet ids, per-OS defaults
+  and chords, find, folding, autoclose, decorations and brackets, git diff, scrollbars, settings, hex viewer, and the
+  editor's commands on real grammars: Expand Line Selection, Join Lines, Delete All Left/Right, Toggle Block Comment,
+  Go/Select to Bracket, Find With Selection, Save As, Save All, Go Back/Forward, Go to File).
 - `VSEDIT_BIN=<target>/release/vsedit python3 -I mods/vscode-viewer/editor/test/e2e.py`: the JS editor's e2e
-  scenarios through the launcher with the Rust engine forced; the four phase-3 scenarios are skipped, and the
-  table says which editor ran. All 17 phase-2 scenarios pass in Rust (and all 21 still pass in JS).
+  scenarios through the launcher with the Rust engine forced; the four phase-3 scenarios are skipped, the table says
+  which editor ran, and a scenario the Rust editor didn't run alone (a fallback to JS) fails. All 20 phase-2 scenarios
+  pass in Rust (and all 24 in JS), `small_batch` and `files_and_navigation` included.
 
 ### Measured (this Mac, USB disk; `mods/vscode-viewer/editor/test/latency.py --runs 3`, medians)
 

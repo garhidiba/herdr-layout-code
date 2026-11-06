@@ -10,7 +10,7 @@ A VS Code–style layout for [Herdr](https://herdr.dev):
 - **Explorer menu:** VS Code's right-click menu (new, open with, reveal, cut/copy/paste, copy path, rename, delete to Trash).
 - **Pane menu:** Open in VS Code / Finder.
 - **Status bar:** Claude and Codex usage meters; Codex limit resets can be redeemed from the card; a gear for Settings.
-- **Settings:** a VS Code-style dialog (gear, `cmd-,`, or the editor's Preferences: Open Settings) for auto save, trim/final newline, format on save, tab size and the core engine (JavaScript or the optional Rust core), with a **Keyboard Shortcuts** page (or the editor's Preferences: Open Keyboard Shortcuts) to change, remove and reset the editor's keys.
+- **Settings:** a VS Code-style dialog (gear, `cmd-,`, or the editor's Preferences: Open Settings) for auto save, trim/final newline, format on save, tab size and the core and editor engines (JavaScript, or the optional Rust builds), with a **Keyboard Shortcuts** page (or the editor's Preferences: Open Keyboard Shortcuts) to change, remove and reset the editor's keys.
 
 See [RECIPE.md](RECIPE.md) for exactly what it does and how it is built.
 
@@ -36,7 +36,7 @@ The optional **Rust core** (`vscode-core`) does the same reads in one parallel p
 
 `install.sh` alone only builds and installs the binary; `--engine js` switches back without building. If Rust is chosen but the binary is missing, out of date or broken, the Explorer and Source Control use JavaScript and say so once (the toast opens Settings); they try the binary again when `vscode-settings.json` changes or a minute later.
 
-**Rust editor (preview, opt-in).** The terminal editor also has a Rust build (`vsedit`, in the same workspace): the same screen and keys, its tokenizer on a worker thread so typing never waits for coloring, no Node start-up. Language features (TypeScript/LSP, symbols, problems), the context menu, the command palette and Go to File still need the JavaScript editor; their keys say "Not yet in the Rust editor". To try it, add `"editor.engine": "rust"` to `vscode-settings.json` and build the Rust core (Settings' **Build Rust core**, or `install.sh`): with the Rust engine chosen the build also makes `<herdr home>/vscode-core/vsedit`, which compiles Oniguruma and so needs a C compiler (`xcode-select --install`). Files open through `mods/vscode-viewer/editor/vsedit.sh`, which runs the JavaScript editor whenever the Rust one is not chosen, not built, of another launch version, or can't start. `"core.engine": "rust"` alone does not switch the editor yet.
+**Rust editor (optional).** The terminal editor also has a Rust build (`vsedit`, in the same workspace): the same screen and keys, Go to File with several open files, Go Back / Forward, its tokenizer on a worker thread so typing never waits for coloring, no Node start-up. Language features (TypeScript/LSP, symbols, problems), the context menu and the command palette still need the JavaScript editor; their keys say "Not yet in the Rust editor". The editor's engine follows the core's (Settings' **Editor: Engine** picks one for the editor alone; `"editor.engine"` in `vscode-settings.json`), and **Build Rust core** (or `install.sh`) also makes `<herdr home>/vscode-core/vsedit` when a Rust engine is chosen; it compiles Oniguruma and so needs a C compiler (`xcode-select --install`). Files open through `mods/vscode-viewer/editor/vsedit.sh`, which runs the JavaScript editor whenever the Rust one is not chosen, not built, of another launch version, or can't start. POSIX only (macOS, Linux): Windows keeps the JavaScript editor.
 
 Optional Claude meter: set Claude Code's `statusLine.command` to `sh ~/.config/herdr-app/mods/vscode-status/claude-usage-tap.sh`. If you already had a status line command, save it as `~/.config/herdr-app/claude-statusline-orig.sh`; the tap passes the input on to it.
 
@@ -44,7 +44,7 @@ Optional Claude meter: set Claude Code's `statusLine.command` to `sh ~/.config/h
 
 - `sh`, `git`, `find` (Explorer listing and git status; Source Control repos, status, log, a commit's files, and `git add -A` + `git commit` when you commit; the diff tab's `git cat-file blob`)
 - `node` (diff tab colors: `mods/vscode-diff/tokens.cjs` with the engine in `mods/vscode-viewer/vscode/`)
-- `sh mods/vscode-viewer/editor/vsedit.sh` (opens the terminal editor: `<herdr home>/vscode-core/vsedit` with `"editor.engine": "rust"` when built, else `node vsedit.cjs`)
+- `sh mods/vscode-viewer/editor/vsedit.sh` (opens the terminal editor: `<herdr home>/vscode-core/vsedit` when the editor's engine is Rust and it is built, else `node vsedit.cjs`)
 - `node` (the terminal editor; must be on PATH), `pbcopy`/`pbpaste` (its clipboard), `herdr-app do terminal.right_click` (so right-clicks reach it), `git ls-files` (quick open)
 - Language servers, started on first use and stopped when the editor closes: `tsserver` (TypeScript/JavaScript; the project's `node_modules/typescript` first, else the one on PATH), `rust-analyzer`, `clangd`, `sourcekit-lsp`, and VS Code's JSON/CSS/HTML servers bundled in Devin.app (`node …/json-language-features/server/dist/node/jsonServerMain.js --stdio`, likewise css and html)
 - Without a server: `git grep` / `grep -r` (Go to Definition and references by word), `gofmt`, `rustfmt`, `prettier` (Format Document)

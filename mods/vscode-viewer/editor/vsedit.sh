@@ -2,12 +2,13 @@
 # Opens a file in the terminal editor: the Rust editor (<herdr home>/vscode-core/vsedit, built by the Settings dialog's
 # "Build Rust core" with the Rust engine chosen) when vscode-settings.json chooses it, else vsedit.cjs. The JS editor
 # also runs whenever the binary is missing or answers another launch API; the binary itself execs vsedit.cjs
-# (--fallback) before touching the terminal when it can't take the file (no grammars, or a binary file / the error
-# page while those are JS-only).
+# (--fallback) before touching the terminal when it can't take the file (no grammars, or a keymap.json command it has
+# never heard of: a newer table than the binary).
 # usage: sh vsedit.sh <file> [--close-on-exit]
-# Which editor: "editor.engine" ("js" | "rust") in vscode-settings.json; without it "core.engine" once RUST_READY is 1.
-# VSEDIT_ENGINE overrides both (tests); VSEDIT_ENGINE_LOG=<file> gets a line per launch: rust, js, or js (fallback).
-RUST_READY=0 # 1 once the Rust editor has every phase-2 feature: then "core.engine": "rust" chooses it too
+# Which editor: "editor.engine" ("js" | "rust") in vscode-settings.json; without it "core.engine" (while RUST_READY is
+# 1; the Settings dialog's editorEngine() reads it the same way). VSEDIT_ENGINE overrides both (tests);
+# VSEDIT_ENGINE_LOG=<file> gets a line per launch: rust, js, or js (fallback).
+RUST_READY=1 # the Rust editor has every phase-2 feature, so "core.engine": "rust" chooses it too (0: only "editor.engine")
 API=1        # the launch contract: `vsedit --api` must print this
 
 here=$(cd "$(dirname "$0")" && pwd)
