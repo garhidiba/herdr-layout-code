@@ -4,4 +4,4 @@
 gpui-kit.d.ts
 jsconfig.json
 .backups/
-native/target/
+mods/vscode-settings/native/target/

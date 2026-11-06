@@ -3,7 +3,7 @@
 // time, never edited) and vscode-core on real folders, compares the JSON, times both, and checks that
 // vscode-core wrote nothing to any repo (.git/index mtimes, no index.lock).
 //
-//   node native/vscode-core/tests/parity.mjs [--bin native/target/release/vscode-core] [--root /Volumes/exusb/project]
+//   node mods/vscode-settings/native/vscode-core/tests/parity.mjs [--bin mods/vscode-settings/native/target/release/vscode-core] [--root /Volumes/exusb/project]
 //
 // Read-only on the folders it looks at. Exit code 1 on any mismatch or repo write.
 import { spawnSync } from "node:child_process";
@@ -11,9 +11,9 @@ import { readFileSync, statSync, existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const here = dirname(fileURLToPath(import.meta.url)), repoRoot = resolve(here, "../../..");
+const here = dirname(fileURLToPath(import.meta.url)), repoRoot = resolve(here, "../../../../..");
 const arg = (name, fallback) => { const i = process.argv.indexOf(name); return i > 0 ? process.argv[i + 1] : fallback; };
-const BIN = resolve(arg("--bin", join(repoRoot, "native/target/release/vscode-core")));
+const BIN = resolve(arg("--bin", join(repoRoot, "mods/vscode-settings/native/target/release/vscode-core")));
 const ROOT = arg("--root", "/Volumes/exusb/project");
 // Repos for status/log/commit-files (merges, upstream far ahead, dirty, nested repos), folders for tree.
 const REPOS = ["anamensis", "aws-terraform", "synol-server/chartdb", "dailoop", "pixiv-rust", "herdr-layout-vscode"].map((r) => `${ROOT}/${r}`);

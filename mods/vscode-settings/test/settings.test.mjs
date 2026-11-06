@@ -1,7 +1,7 @@
 // node --test mods/vscode-settings/test/settings.test.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
-import { DEFAULTS, parse, normalize, coreEngine, withSetting, withDefaults, serialize, updateFile, stepDelay, coreStatus } from "../settings.js";
+import { DEFAULTS, parse, normalize, coreEngine, withSetting, withDefaults, serialize, updateFile, stepDelay, coreStatus, coreCurrent } from "../settings.js";
 
 // An in-memory file with writeTextFile's contract: writes only when `expected` still matches.
 function memoryFile(text, { raceOnce = null } = {}) {
@@ -79,6 +79,14 @@ test("delay steps by tenths below a second and whole seconds above, within range
 
 test("the Rust core status reads its version", () => {
   assert.equal(coreStatus(null), "Rust core: not built");
-  assert.equal(coreStatus("vscode-core 0.1.0\n"), "Rust core: built (v0.1.0)");
+  assert.equal(coreStatus('{"version":"1.0.0","backend":"git","git":"2.54.0"}\n'), "Rust core: built (v1.0.0)");
+  assert.equal(coreStatus('{"version":"0.1.0"}'), "Rust core: v0.1.0 is out of date (rebuild it)");
   assert.equal(coreStatus("ok"), "Rust core: built");
+});
+
+test("only a binary of the mods' major version counts as built", () => {
+  assert.equal(coreCurrent('{"version":"1.2.0"}'), true);
+  assert.equal(coreCurrent('{"version":"0.1.0"}'), false);
+  assert.equal(coreCurrent("ok"), false);
+  assert.equal(coreCurrent(null), false);
 });

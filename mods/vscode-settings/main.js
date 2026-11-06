@@ -6,7 +6,7 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { theme, props, run, exec, appHome, readTextFile, writeTextFile, closeOverlay } from "herdr";
-import { FILE, normalize, parse, withSetting, withDefaults, updateFile, stepDelay, coreStatus, DEFAULTS } from "./settings.js";
+import { FILE, normalize, parse, withSetting, withDefaults, updateFile, stepDelay, coreStatus, coreCurrent, DEFAULTS } from "./settings.js";
 
 const settingsPath = () => `${appHome()}/${FILE}`;
 const corePath = () => `${appHome()}/vscode-core/vscode-core`;
@@ -81,8 +81,8 @@ export default class Settings extends View {
   checkCore(cx) {
     cx.spawn(async (cx) => {
       const r = await exec(corePath(), ["--version"]).catch(() => null);
-      this.built = r?.code === 0;
-      this.core = coreStatus(this.built ? r.stdout : null);
+      this.built = r?.code === 0 && coreCurrent(r.stdout);
+      this.core = coreStatus(r?.code === 0 ? r.stdout : null);
       if (this.built) this.building = false;
       cx.notify();
     });

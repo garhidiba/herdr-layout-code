@@ -79,9 +79,16 @@ export function stepDelay(value, dir) {
   return coerce("files.autoSaveDelay", Math.round((n + dir * step) * 10) / 10);
 }
 
-// `vscode-core --version` output -> "built (v0.1.0)"-style status; null output means not built.
+// The vscode-core major version the explorer and source control accept (CORE_API in their core.js).
+export const CORE_API = 1;
+const coreVersion = (stdout) => stdout?.match(/\d+\.\d+[\w.+-]*/)?.[0] ?? null;
+// True when `vscode-core --version` output is a version the mods use.
+export const coreCurrent = (stdout) => Number.parseInt(coreVersion(stdout)) === CORE_API;
+
+// `vscode-core --version` output -> "built (v1.0.0)"-style status; null output means not built.
 export function coreStatus(stdout) {
   if (stdout == null) return "Rust core: not built";
-  const m = stdout.match(/\d+\.\d+[\w.+-]*/);
-  return `Rust core: built${m ? ` (v${m[0]})` : ""}`;
+  const v = coreVersion(stdout);
+  if (v && !coreCurrent(stdout)) return `Rust core: v${v} is out of date (rebuild it)`;
+  return `Rust core: built${v ? ` (v${v})` : ""}`;
 }
