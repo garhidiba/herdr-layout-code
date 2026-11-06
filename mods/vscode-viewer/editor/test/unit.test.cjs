@@ -534,3 +534,56 @@ test("Find: Alt+Enter in Replace replaces every match as one undo step", async (
   ed.undo();
   assert.deepEqual(ed.lines, ["a b a", "ba"]);
 });
+
+const FIND = require("../find.cjs");
+const at = (r) => r.matches.map(m => [m.line, m.col, m.len]);
+
+test("Find: case-insensitive by default; Match Case, Whole Word and Regex narrow or widen the matches", () => {
+  const lines = ["Foo foo food", "x.y xzy"];
+  assert.deepEqual(at(FIND.findMatches(lines, "foo")), [[0, 0, 3], [0, 4, 3], [0, 8, 3]]);
+  assert.deepEqual(at(FIND.findMatches(lines, "foo", { caseSensitive: true })), [[0, 4, 3], [0, 8, 3]]);
+  assert.deepEqual(at(FIND.findMatches(lines, "foo", { wholeWord: true })), [[0, 0, 3], [0, 4, 3]]);
+  assert.deepEqual(at(FIND.findMatches(lines, "x.y")), [[1, 0, 3]]);                 // literal: the dot is a dot
+  assert.deepEqual(at(FIND.findMatches(lines, "x.y", { regex: true })), [[1, 0, 3], [1, 4, 3]]);
+  assert.deepEqual(at(FIND.findMatches(["한글 한글자"], "한글", { wholeWord: true })), [[0, 0, 2]]);
+});
+
+test("Find: an invalid regex has no matches and an error; empty matches are skipped", () => {
+  const r = FIND.findMatches(["a(b"], "(", { regex: true });
+  assert.deepEqual(r.matches, []);
+  assert.ok(r.error);
+  assert.deepEqual(at(FIND.findMatches(["ab"], "x*", { regex: true })), []);
+});
+
+test("Replace with a regex substitutes groups in place; without regex the text is literal", () => {
+  const line = "let a = 1; let bb = 2;", opts = { regex: true };
+  const [m1, m2] = FIND.findMatches([line], "let (\\w+)", opts).matches;
+  assert.equal(FIND.replacementOf(line, m1, "let (\\w+)", opts, "const $1"), "const a");
+  assert.equal(FIND.replacementOf(line, m2, "let (\\w+)", opts, "$&\\n"), "let bb\n");
+  assert.equal(FIND.replacementOf(line, m1, "let", {}, "$1"), "$1");
+});
+
+test("Find widget: ⌥⌘C/⌥⌘W/⌥⌘R toggle through the keymap, the count reads N of M, and clicks press the buttons", async () => {
+  const ed = await plainEditor(["Foo foo food"]);
+  ed.rows = 10; ed.cols = 80;
+  ed.openFind(false);
+  ed.handle({ type: "text", text: "foo" });
+  assert.equal(ed.matches().length, 3);
+  press(ed, "c", { cmd: true, alt: true });
+  assert.ok(ed.find.caseSensitive);
+  assert.equal(ed.matches().length, 2);
+  press(ed, "w", { cmd: true, alt: true });
+  assert.equal(ed.matches().length, 1);
+  assert.deepEqual(ed.range(), [{ line: 0, col: 4 }, { line: 0, col: 7 }]); // the search restarts and selects it
+  const screen = ed.render(0).out.replace(/\x1b\[[\d;]*m/g, "");
+  assert.match(screen, /1 of 1/);
+  const dot = ed.findHits[4]; // ▸, field, Aa, ab, .*
+  ed.handle({ type: "mouse", button: 0, x: dot.x, y: dot.y, release: false, motion: false });
+  assert.ok(ed.find.regex);
+  ed.handle({ type: "text", text: "x" });
+  assert.match(ed.render(0).out.replace(/\x1b\[[\d;]*m/g, ""), /No results/);
+  const toggle = ed.findHits[0];
+  ed.handle({ type: "mouse", button: 0, x: toggle.x, y: toggle.y, release: false, motion: false });
+  assert.ok(ed.prompt.replace);
+  assert.equal(ed.find.field, "replace");
+});

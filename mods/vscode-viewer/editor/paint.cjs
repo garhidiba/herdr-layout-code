@@ -25,6 +25,9 @@ function paletteOf(colors = {}) {
     widget: opaque(colors["editorWidget.background"]) ?? "#21252b", input: opaque(colors["input.background"]) ?? "#1b1d23",
     cursor: opaque(colors["editorCursor.foreground"]) ?? "#528bff",
     accent: opaque(colors["focusBorder"]) ?? "#528bff", button: opaque(colors["button.background"]) ?? "#4d78cc",
+    // find widget toggles (Match Case...) when on: VS Code's inputOption.activeBackground is focusBorder at 40%
+    toggleOn: blend(colors["inputOption.activeBackground"] ?? (opaque(colors["focusBorder"]) ?? "#528bff") + "66", opaque(colors["editorWidget.background"]) ?? "#21252b"),
+    toggleFg: opaque(colors["inputOption.activeForeground"]) ?? "#ffffff",
     border: opaque(colors["editorWidget.border"]) ?? "#3a3f4b", highlight: opaque(colors["list.highlightForeground"]) ?? "#d7dae0",
     peek: opaque(colors["peekViewEditor.background"]) ?? "#1b1d23", peekLine: opaque(colors["list.activeSelectionBackground"]) ?? "#2c313a",
     // scrollbars (One Dark's values as fallbacks) and the overview-ruler marks on the vertical one

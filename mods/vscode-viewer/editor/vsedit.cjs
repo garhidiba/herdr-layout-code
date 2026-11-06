@@ -31,6 +31,7 @@ const E = require("./errorpage.cjs");
 const SB = require("./scrollbar.cjs");
 const D = require("./decorations.cjs");
 const A = require("./autoclose.cjs");
+const FIND = require("./find.cjs");
 
 // VS Code's "Col": characters before the cursor, tabs counted to the next tab stop.
 function visibleColumn(line, index, tab) {
@@ -62,6 +63,8 @@ const DOC_FIELDS = ["file", "doc", "buf", "hl", "indent", "scope", "language", "
 const WORD_DELAY = 250; // ms the cursor rests on a word before its occurrences highlight, like VS Code
 const NOT_FOUND = { definition: "definition", typeDefinition: "type definition", implementation: "implementation", references: "references" };
 const PEEK_TITLE = { definition: "Definition", typeDefinition: "Type Definition", implementation: "Implementations", references: "References" };
+// Commands the find widget runs itself while it has the keys (the rest of its keys are its own).
+const WIDGET_COMMANDS = new Set(["toggleFindCaseSensitive", "toggleFindWholeWord", "toggleFindRegex", "editor.action.replaceOne", "editor.action.replaceAll"]);
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 const stampText = (ms) => { const d = new Date(ms), p = (n) => String(n).padStart(2, "0"); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; };
 
@@ -74,7 +77,8 @@ class Editor {
     this.colorMap = this.colorsOf(colorMap);
     this.docs = new Map(); this.loading = new Map(); this.fileLines = new Map();
     Object.assign(this, this.makeState(file, doc, grammar, scope));
-    this.prompt = null; this.message = null; this.find = { query: "", replace: "", field: "query", matches: [], version: -1 };
+    this.prompt = null; this.message = null;
+    this.find = { query: "", replace: "", field: "query", matches: [], version: -1, caseSensitive: false, wholeWord: false, regex: false };
     this.popup = null; this.panel = null; this.peek = null; // overlays (popup: menu, picker, input or dialog)
     this.back = []; this.forward = [];                       // navigation history: { file, pos, top }
     this.clip = { text: "", whole: false };
@@ -338,17 +342,18 @@ class Editor {
 
   // ----- find / replace -----
   matches() {
-    const f = this.find;
-    if (f.version === this.buf.version && f.searched === f.query) return f.matches;
-    f.matches = []; f.version = this.buf.version; f.searched = f.query;
-    if (!f.query) return f.matches;
-    const q = f.query.toLowerCase();
-    for (let l = 0; l < this.lines.length && f.matches.length < 20000; l++) {
-      const t = this.lines[l].toLowerCase();
-      for (let i = t.indexOf(q); i !== -1; i = t.indexOf(q, i + q.length)) f.matches.push({ line: l, col: i, len: q.length });
-    }
+    const f = this.find, key = `${+f.caseSensitive}${+f.wholeWord}${+f.regex}${f.query}`;
+    if (f.version === this.buf.version && f.searched === key) return f.matches;
+    ({ matches: f.matches, error: f.error } = FIND.findMatches(this.lines, f.query, f));
+    f.version = this.buf.version; f.searched = key;
     return f.matches;
   }
+  // Match Case / Match Whole Word / Use Regular Expression; with the widget open the search restarts where it opened.
+  toggleFind(option) {
+    this.find[option] = !this.find[option];
+    if (this.prompt?.kind === "find" && this.find.query) this.findNext(1, ordered(this.prompt.origin.anchor, this.prompt.origin.head)[0]);
+  }
+  replacementFor(m) { return FIND.replacementOf(this.lines[m.line], m, this.find.query, this.find, this.find.replace); }
   currentMatch() {
     const [s, e] = this.range();
     return this.matches().findIndex(m => m.line === s.line && m.col === s.col && e.line === s.line && e.col === m.col + m.len);
@@ -363,16 +368,17 @@ class Editor {
     this.buf.seal(); this.reveal();
   }
   replaceOne() {
-    if (this.currentMatch() === -1) return this.findNext(1);
-    const s = this.range()[0];
-    this.insert(this.find.replace);
-    this.findNext(1, endOf(s, this.find.replace));
+    const i = this.currentMatch();
+    if (i === -1) return this.findNext(1);
+    const s = this.range()[0], text = this.replacementFor(this.find.matches[i]);
+    this.insert(text);
+    this.findNext(1, endOf(s, text));
   }
   replaceAllMatches() {
     const ms = this.matches();
     if (!ms.length) return;
     const before = this.sel;
-    this.buf.edit([...ms].reverse().map(m => ({ start: { line: m.line, col: m.col }, end: { line: m.line, col: m.col + m.len }, text: this.find.replace })), { before });
+    this.buf.edit([...ms].reverse().map(m => ({ start: { line: m.line, col: m.col }, end: { line: m.line, col: m.col + m.len }, text: this.replacementFor(m) })), { before });
     this.moveTo(this.buf.clamp(this.head));
     this.say(`Replaced ${ms.length} occurrence${ms.length === 1 ? "" : "s"}`);
   }
@@ -565,6 +571,8 @@ class Editor {
     if (ev.type !== "key") return;
     const { name, shift, ctrl, alt, cmd } = ev, chord = C.chordOf(ev);
     if (name === "escape") { this.prompt = null; return; }
+    const id = this.keymap.byChord.get(chord); // the widget's own commands, through the user's keys
+    if (WIDGET_COMMANDS.has(id)) return this.runCommand(id);
     if (name === "backspace") return set([...f[f.field]].slice(0, -1).join(""));
     if (name === "tab" && p.replace) { f.field = f.field === "query" ? "replace" : "query"; return; }
     if (chord === "ctrl+h" || chord === "cmd+alt+f") { p.replace = true; f.field = "replace"; return; }
@@ -909,7 +917,7 @@ class Editor {
   barMouse(ev) {
     if (this.dragging) return false;
     if ((ev.button === 64 || ev.button === 65) && this.hbar.contains(ev)) { this.left = Math.max(0, this.left + (ev.button === 64 ? -6 : 6)); return true; }
-    const covered = (this.peek && ev.y >= this.peekRow && ev.y < this.peekRow + this.peek.height) || (this.prompt && ev.y < (this.prompt.replace ? 4 : 3) && ev.x > this.cols - 48);
+    const covered = (this.peek && ev.y >= this.peekRow && ev.y < this.peekRow + this.peek.height) || (this.prompt && ev.y < (this.prompt.replace ? 4 : 3) && ev.x >= (this.findBox?.x ?? this.cols - 47));
     for (const [bar, key] of [[this.vbar, "top"], [this.hbar, "left"]]) {
       if (covered && bar.drag === null) continue;
       const pos = bar.mouse(ev);
@@ -921,6 +929,7 @@ class Editor {
   }
   mouse(ev) {
     if (this.popup) return void this.popup.mouse(ev, this);
+    if (this.findMouse(ev)) return;
     if (this.barMouse(ev)) return;
     if (this.panel && this.panel.mouse(ev, this)) return;
     const wheel = ev.button === 64 || ev.button === 65;
@@ -1168,20 +1177,54 @@ class Editor {
   renderPrompt(P) {
     const p = this.prompt, c = this.colors;
     if (!p) return null;
-    // find widget, top right like VS Code
-    const w = Math.min(this.cols, 48), x = this.cols - w + 1, f = this.find;
-    const rowsOf = [["Find", "query"], ...(p.replace ? [["Replace", "replace"]] : [])];
-    let cursor = null;
-    rowsOf.forEach(([label, field], r) => {
-      const lead = ` ${label.padEnd(8)}`, value = f[field], avail = w - W.textWidth(lead, 8) - 1;
-      const shown = W.textWidth(value, 8) > avail ? "…" + [...value].slice(-(avail - 1)).join("") : value;
-      P.move(2 + r, x);
-      P.text(lead, c.barFg, c.widget);
-      P.text(fit(shown, avail), c.fg, c.input);
-      P.text(" ", c.fg, c.widget);
-      if (field === f.field) cursor = [2 + r, x + W.textWidth(lead, 8) + Math.min(avail - 1, W.textWidth(shown, 8))];
-    });
+    // find widget, top right like VS Code: ▸/▾ (replace) [Find] Aa ab .* N of M ↑ ↓ ×, then [Replace] Replace All
+    const w = Math.min(this.cols, 60), x = this.cols - w + 1, f = this.find, compact = w < 40;
+    const fw = w - 3 - (compact ? 0 : 26), hits = this.findHits = [];
+    this.findBox = { x, y: 2, w, h: p.replace ? 2 : 1 };
+    let row = 2, col = x, cursor = null;
+    const at = (r) => { row = r; col = x; P.move(r, x); };
+    // a cell run painted at the current place; run (optional) makes it clickable
+    const cells = (text, fg, bg, run = null) => {
+      const n = W.textWidth(text, 8);
+      if (run) hits.push({ x: col, y: row, w: n, run });
+      P.text(text, fg, bg); col += n;
+    };
+    const gap = (n = 1) => cells(" ".repeat(n), c.fg, c.widget);
+    const btn = (text, run, on = false, fg = c.barFg) => cells(text, on ? c.toggleFg : fg, on ? c.toggleOn : c.widget, run);
+    const field = (name, placeholder) => {
+      const value = f[name], shown = W.textWidth(value, 8) > fw - 1 ? "…" + [...value].slice(-(fw - 2)).join("") : value;
+      if (name === f.field) cursor = [row, col + 1 + Math.min(fw - 2, W.textWidth(shown, 8))];
+      cells(fit(" " + (shown || placeholder), fw), shown ? c.fg : c.lineNumber, c.input, () => { f.field = name; });
+    };
+    at(2);
+    btn(p.replace ? " ▾" : " ▸", () => { p.replace = !p.replace; f.field = p.replace ? "replace" : "query"; });
+    field("query", "Find");
+    if (!compact) {
+      const n = this.matches().length, k = this.currentMatch();
+      const count = f.query ? (n ? `${k === -1 ? "?" : k + 1} of ${n}${n >= 20000 ? "+" : ""}` : "No results") : "";
+      gap(); btn("Aa", () => this.toggleFind("caseSensitive"), f.caseSensitive);
+      gap(); btn("ab", () => this.toggleFind("wholeWord"), f.wholeWord);
+      gap(); btn(".*", () => this.toggleFind("regex"), f.regex);
+      gap(); cells(fit(count, 10), f.query && !n ? c.error : c.fg, c.widget);
+      btn(" ↑", () => this.findNext(-1)); btn(" ↓", () => this.findNext(1)); btn(" ×", () => { this.prompt = null; });
+    }
+    gap();
+    if (p.replace) {
+      at(3); gap(2);
+      field("replace", "Replace");
+      if (!compact) { gap(); btn(" Replace ", () => this.replaceOne(), false, c.fg); gap(); btn(" All ", () => this.replaceAllMatches(), false, c.fg); gap(w - 2 - fw - 16); }
+      else gap();
+    }
     return cursor;
+  }
+  // Clicks on the find widget's fields and buttons; true when the event was over the widget.
+  findMouse(ev) {
+    const b = this.findBox;
+    if (!this.prompt || !b || this.dragging || this.vbar.drag !== null || this.hbar.drag !== null) return false;
+    if (ev.x < b.x || ev.x >= b.x + b.w || ev.y < b.y || ev.y >= b.y + b.h) return false;
+    const hit = this.findHits.find(h => ev.y === h.y && ev.x >= h.x && ev.x < h.x + h.w);
+    if (hit && ev.button === 0 && !ev.release && !ev.motion) hit.run();
+    return true;
   }
 
   exit() { this.done = true; this.onExit?.(); }
