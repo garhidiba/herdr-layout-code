@@ -78,9 +78,9 @@ const fgSGR = (c) => { const [r, g, b] = hex(c); return `\x1b[38;2;${r};${g};${b
 const bgSGR = (c) => { const [r, g, b] = hex(c); return `\x1b[48;2;${r};${g};${b}m`; };
 const styleSGR = (s) => "\x1b[22;23;24;29m" + (s & 1 ? "\x1b[3m" : "") + (s & 2 ? "\x1b[1m" : "") + (s & 4 ? "\x1b[4m" : "") + (s & 8 ? "\x1b[9m" : "");
 
-// A curly underline in a color (diagnostics): plain underline first for terminals without SGR 4:3, then curly, then the
-// color (SGR 58); 59 puts the underline color back.
-const curlySGR = (c) => { const [r, g, b] = hex(c); return `\x1b[4m\x1b[4:3m\x1b[58:2::${r}:${g}:${b}m`; };
+// A problem's underline in a color (diagnostics): a plain underline (a curly SGR 4:3 one showed nothing in Herdr's terminal) colored
+// with SGR 58; 59 puts the underline color back.
+const curlySGR = (c) => { const [r, g, b] = hex(c); return `\x1b[4m\x1b[58:2::${r}:${g}:${b}m`; };
 
 // Paints cells, emitting SGR only when an attribute changes. curly: a squiggle color for these cells, or null.
 class Painter {

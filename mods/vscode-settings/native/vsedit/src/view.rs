@@ -289,7 +289,8 @@ impl Editor {
         let n = self.view_count();
         let widest = self.widest(self.top, base);
         let gw = self.gutter();
-        let mut v = n > base || self.top > 0;
+        // A file with problems always shows the bar: its overview ruler carries their marks, as VS Code's always does.
+        let mut v = n > base || self.top > 0 || !self.problems().is_empty();
         let h = widest as i64 > self.cols as i64 - gw as i64 - v as i64 || self.left > 0;
         if h {
             v = v || n > base - 1;
@@ -323,7 +324,8 @@ impl Editor {
             return marks;
         }
         let hunks = self.git.hunks.clone();
-        let cell = |ed: &mut Editor, line: usize| scrollbar::mark_cell(ed.row_of(line), n, len);
+        // A file that fits puts each line's mark beside its row.
+        let cell = |ed: &mut Editor, line: usize| scrollbar::mark_cell(ed.row_of(line), n.max(len), len);
         for h in &hunks {
             let color = match h.kind {
                 gitgutter::Kind::Added => self.c.ruler_added.clone(),
@@ -346,18 +348,18 @@ impl Editor {
                 marks[k] = Some(h.ruler.clone());
             }
         }
-        let mut ps: Vec<&crate::editor::Problem> = problems.iter().collect();
-        ps.sort_by_key(|d| std::cmp::Reverse(d.severity)); // errors win
-        for d in ps {
-            let k = cell(self, d.start.line);
-            marks[k] = Some(self.c.ruler_diag[d.severity as usize].clone());
-        }
         if !self.empty() {
             let k = cell(self, self.sel.anchor.line);
             marks[k] = Some(self.c.ruler_selection.clone());
         }
         let k = cell(self, self.head().line);
         marks[k] = Some(self.c.ruler_cursor.clone());
+        let mut ps: Vec<&crate::editor::Problem> = problems.iter().collect();
+        ps.sort_by_key(|d| std::cmp::Reverse(d.severity)); // errors win, over everything else
+        for d in ps {
+            let k = cell(self, d.start.line);
+            marks[k] = Some(self.c.ruler_diag[d.severity as usize].clone());
+        }
         marks
     }
 

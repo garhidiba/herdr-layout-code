@@ -7,6 +7,7 @@ use crate::paint::{Painter, Palette};
 
 const E: i64 = 8;
 const MARK: &str = "━";
+const FULL: &str = "█";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Thumb {
@@ -161,6 +162,8 @@ impl Bar {
                 p.move_to(self.row + if self.vertical { k as i32 } else { 0 }, self.col + if self.vertical { 0 } else { k as i32 });
             }
             match marks.and_then(|m| m.get(k)).and_then(Option::as_deref) {
+                // problems fill their cell, so an error stands out as a red block
+                Some(mark) if c.ruler_diag[1..].iter().any(|d| d == mark) => p.text(FULL, mark, role(bg)),
                 Some(mark) => p.text(MARK, mark, role(bg)),
                 None => p.text(&ch.to_string(), role(fg), role(bg)),
             }
@@ -207,6 +210,17 @@ mod tests {
         assert_eq!(c[0], ('▄', true, false));
         assert_eq!(c[1], ('▄', false, true));
         assert_eq!(mark_cell(499, 500, 28), 27);
+    }
+
+    #[test]
+    fn problem_marks_fill_their_cell_and_other_marks_are_a_line() {
+        let c = Palette::of(&serde_json::Value::Null);
+        let mut b = Bar::new(true);
+        b.layout(true, 2, 100, 3, 3, 4, 0);
+        let mut p = Painter::default();
+        b.paint(&mut p, &c, Some(&[Some(c.ruler_diag[1].clone()), Some(c.ruler_cursor.clone()), Some(c.ruler_diag[2].clone())]));
+        let cells: Vec<&str> = p.out.split("\x1b[").filter_map(|s| s.split('m').nth(1)).filter(|s| !s.is_empty()).collect();
+        assert_eq!(cells, ["█", "━", "█"]);
     }
 
     #[test]

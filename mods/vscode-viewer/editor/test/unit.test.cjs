@@ -845,6 +845,7 @@ test("breadcrumbs.enabled defaults to true and only takes a boolean", () => {
 
 const { diagnosticsOf } = require("../lang/lsp.cjs");
 const { tsDiagnostics } = require("../lang/tsserver.cjs");
+const P = require("../paint.cjs");
 
 test("diagnostics: LSP publishDiagnostics and tsserver's diag events become the same shape", () => {
   const r = { start: { line: 1, character: 2 }, end: { line: 1, character: 5 } };
@@ -866,16 +867,29 @@ const withProblems = async (lines, list) => {
 };
 const problem = (l1, c1, l2, c2, severity, message) => ({ start: { line: l1, col: c1 }, end: { line: l2, col: c2 }, severity, message, source: "ts(1)" });
 
-test("diagnostics draw curly underlines in the severity's color, a gutter mark and overview ruler marks", async () => {
+test("diagnostics draw underlines in the severity's color, a gutter mark and overview ruler marks", async () => {
   const ed = await withProblems(["let a = b;", "ok", "warn here"], [problem(0, 8, 0, 9, 1, "Cannot find name 'b'."), problem(2, 0, 2, 4, 2, "careful"), problem(1, 0, 1, 2, 4, "a hint")]);
   const out = ed.render(0).out;
-  assert.match(out, /\x1b\[4m\x1b\[4:3m\x1b\[58:2::241:76:76m(?:\x1b\[[\d;]*m)*b/, "no red squiggle under b");
-  assert.match(out, /\x1b\[4m\x1b\[4:3m\x1b\[58:2::204:167:0m(?:\x1b\[[\d;]*m)*warn/, "no yellow squiggle under warn");
+  assert.match(out, /\x1b\[4m\x1b\[58:2::241:76:76m(?:\x1b\[[\d;]*m)*b/, "no red underline under b");
+  assert.match(out, /\x1b\[4m\x1b\[58:2::204:167:0m(?:\x1b\[[\d;]*m)*warn/, "no yellow underline under warn");
+  assert.doesNotMatch(out, /\x1b\[4:3m/, "no curly underline: it showed nothing in Herdr's terminal");
   assert.ok(/\x1b\[59m/.test(out), "the underline color is not reset after a squiggle");
   assert.match(out, /\x1b\[2;1H(?:\x1b\[[\d;]*m)*●/, "no mark in the gutter of line 1");
   assert.doesNotMatch(out, /\x1b\[3;1H(?:\x1b\[[\d;]*m)*●/, "hints get no mark");
-  const marks = ed.rulerMarks([], null, ed.problems());
-  assert.equal(marks.filter(Boolean).length >= 2, true);
+});
+
+test("a short file with problems shows the overview ruler: full red / yellow cells beside their lines, errors over the cursor", async () => {
+  const ed = await withProblems(["let a = b;", "ok", "warn here"], [problem(0, 8, 0, 9, 1, "Cannot find name 'b'."), problem(2, 0, 2, 4, 2, "careful")]);
+  const out = ed.render(0).out, c = ed.colors;
+  assert.ok(ed.vbar.shown, "no ruler for a file that fits");
+  assert.equal(ed.marks[0], c.rulerDiag[1], "the error (on the cursor line) is not the cursor's mark");
+  assert.equal(ed.marks[2], c.rulerDiag[2], "the warning is not beside line 3");
+  const cell = (row, color) => new RegExp(`\\x1b\\[${row};${ed.cols}H(?:\\x1b\\[[\\d;]*m)*${P.fgSGR(color).replace(/\[/g, "\\[")}(?:\\x1b\\[[\\d;]*m)*█`);
+  assert.match(out, cell(2, c.rulerDiag[1]), "no full red cell on the ruler");
+  assert.match(out, cell(4, c.rulerDiag[2]), "no full yellow cell on the ruler");
+  ed.session.diagnostics = () => [];
+  ed.render(0);
+  assert.ok(!ed.vbar.shown, "the ruler stays after the problems went");
 });
 
 test("the problem at the cursor shows in the status bar, else the counts; F8 / ⇧F8 walk the problems, wrapping", async () => {

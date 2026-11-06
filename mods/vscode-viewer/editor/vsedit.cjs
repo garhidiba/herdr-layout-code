@@ -1528,7 +1528,7 @@ class Editor {
   // vertical one scrolls to the last line at the top (VS Code's scroll beyond last line), the horizontal one 5 columns past the widest line.
   layoutBars() {
     const base = Math.max(1, this.rows - 2 - (this.panel ? this.panel.height(this) : 0)), n = this.viewCount, widest = this.widest(this.top, base);
-    let v = n > base || this.top > 0;
+    let v = n > base || this.top > 0 || this.problems().length > 0; // problems: the overview ruler always shows, as VS Code's
     const h = widest > this.cols - this.gutter - (v ? 1 : 0) || this.left > 0;
     if (h) v ||= n > base - 1;
     const height = Math.max(1, base - (h ? 1 : 0)), width = Math.max(1, this.cols - this.gutter - (v ? 1 : 0));
@@ -1539,16 +1539,16 @@ class Editor {
   // other end, the cursor line.
   rulerMarks(ms, hits, problems = []) {
     const n = this.viewCount, len = this.vbar.length, marks = new Array(len).fill(null), c = this.colors;
-    const cell = (line) => SB.markCell(this.toView(line), n, len);
+    const cell = (line) => SB.markCell(this.toView(line), Math.max(n, len), len); // a file that fits: beside each row
     for (const h of this.git.hunks) { // git changes first: everything else draws over them
       const color = c[`ruler${h.kind[0].toUpperCase()}${h.kind.slice(1)}`];
       for (let k = cell(G.lineOf(h)); k <= cell(Math.max(G.lineOf(h), h.end - 1)); k++) marks[k] = color;
     }
     for (const m of ms) marks[cell(m.line)] = c.rulerFind;
     for (const h of hits?.list ?? []) marks[cell(h.line)] = hits.ruler;
-    for (const d of [...problems].sort((a, b) => b.severity - a.severity)) marks[cell(d.start.line)] = c.rulerDiag[d.severity]; // errors win
     if (!this.empty) marks[cell(this.sel.anchor.line)] = c.rulerSelection;
     marks[cell(this.head.line)] = c.rulerCursor;
+    for (const d of [...problems].sort((a, b) => b.severity - a.severity)) marks[cell(d.start.line)] = c.rulerDiag[d.severity]; // errors win, over everything else
     return marks;
   }
   // A buttonless motion: the changed bar alone, "" when nothing changed, null for a whole frame (or not a hover).

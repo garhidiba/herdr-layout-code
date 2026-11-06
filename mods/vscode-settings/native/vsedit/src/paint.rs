@@ -177,7 +177,9 @@ fn sgr_color(out: &mut String, kind: u8, c: &str) {
     let _ = write!(out, "\x1b[{kind};2;{r};{g};{b}m");
 }
 
-/// Paints cells, emitting SGR only when an attribute changes. `curly`: a squiggle color for these cells.
+/// Paints cells, emitting SGR only when an attribute changes. `curly`: a problem's underline color for these cells, a
+/// plain underline (`SGR 4`) colored with `58:2::r:g:b`: the most widely drawn form (a curly `4:3` one
+/// showed nothing in Herdr's terminal).
 pub struct Painter {
     pub out: String,
     fg: Option<Color>,
@@ -203,7 +205,7 @@ impl Painter {
             }
             if let Some(c) = curly {
                 let [r, g, b] = hex(c);
-                let _ = write!(self.out, "\x1b[4m\x1b[4:3m\x1b[58:2::{r}:{g}:{b}m");
+                let _ = write!(self.out, "\x1b[4m\x1b[58:2::{r}:{g}:{b}m");
             } else if self.curly.is_some() {
                 self.out.push_str("\x1b[59m");
             }

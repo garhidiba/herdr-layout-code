@@ -7,6 +7,7 @@ const E = 8; // sub-cell steps: block elements come in eighths
 const LOWER = (n) => String.fromCharCode(0x2580 + n); // ▁..▇: n eighths filled from the bottom
 const LEFT = (n) => String.fromCharCode(0x2590 - n);  // ▏..▉: n eighths filled from the left
 const MARK = "━";
+const FULL = "█";
 
 // The thumb of a bar `length` cells long showing `visible` of `total` units scrolled to `pos`: { start, size } in
 // eighths, size proportional (at least one cell); null when everything fits.
@@ -87,7 +88,7 @@ class Bar {
     const role = (r) => (r === "thumb" ? thumb : c.bg);
     cellsOf(this.length, this.th, this.vertical).forEach((cell, k) => {
       if (this.vertical || k === 0) P.move(this.row + (this.vertical ? k : 0), this.col + (this.vertical ? 0 : k));
-      if (marks?.[k]) P.text(MARK, marks[k], role(cell.bg));
+      if (marks?.[k]) P.text(c.rulerDiag?.includes(marks[k]) ? FULL : MARK, marks[k], role(cell.bg)); // problems fill their cell
       else P.text(cell.ch, role(cell.fg), role(cell.bg));
     });
   }

@@ -797,8 +797,10 @@ SHOP = 'export class Shop {\n  buy(n: number) {\n    return n;\n  }\n}\nconst s:
 
 
 def run_symbols_and_problems(tmp):
-    """Through tsserver: the breadcrumbs follow the cursor into Shop › buy, F8 goes to the type error (a curly
-    underline, its message in the status bar), Ctrl+Shift+O lists the symbols from the TypeScript server and jumps."""
+    """Through tsserver: right after opening (no edit) the type error has a red underline (SGR 4 + 58), a red ● in the
+    gutter and a full red cell beside its row on the overview ruler, which shows although the file fits; the
+    breadcrumbs follow the cursor into Shop › buy, F8 goes to the error (its message in the status bar), Ctrl+Shift+O
+    lists the symbols from the TypeScript server and jumps."""
     proj = os.path.join(tmp, "shopproj")
     os.makedirs(proj)
     subprocess.run(["git", "init", "-q"], cwd=proj, check=True)
@@ -807,9 +809,15 @@ def run_symbols_and_problems(tmp):
     open(file, "w").write(SHOP)
     t = Term(file)
     assert t.read("Ln 1, Col 1")
+    assert t.read("\x1b[4m\x1b[58:2::241:76:76m", timeout=20), "no red underline after opening"
+    t.read(timeout=0.5)
+    screen = screen_of(t)
+    assert "\x1b[4:3m" not in screen, "a curly underline, which showed nothing in Herdr's terminal"
+    ruler_red = "#%02x%02x%02x" % tuple(round(a * 0.702 + b * 0.298) for a, b in ((255, 40), (18, 44), (18, 52)))
+    assert re.search(r"\x1b\[7;100H(?:\x1b\[[\d;]*m)*" + re.escape(sgr(ruler_red)) + r"(?:\x1b\[[\d;]*m)*█", screen), "no full red ruler cell beside line 6"
+    assert re.search(r"\x1b\[7;1H(?:\x1b\[[\d;]*m)*" + re.escape(sgr("#f14c4c")) + "●", screen), "no red ● in the gutter of line 6"
     t.send("\x07"); t.send("3:5\r")
     assert t.read("shop.ts › Shop › buy", timeout=20), "no symbol breadcrumbs:\n" + plain(t)[-300:]
-    assert t.read("\x1b[4:3m", timeout=20), "no squiggle"
     t.out = b""
     t.send("\x1b[19~", wait=0.3)                          # F8
     assert t.read("Ln 6, Col 7", timeout=5) and t.read("not assignable", timeout=2), "F8 did not reach the error:\n" + plain(t)[-300:]
