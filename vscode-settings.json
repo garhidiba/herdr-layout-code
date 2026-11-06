@@ -16,5 +16,7 @@
   "editor.formatOnSave": false,
   // Applied on every save (manual or auto).
   "files.trimTrailingWhitespace": false,
-  "files.insertFinalNewline": false
+  "files.insertFinalNewline": false,
+  // The top line: folders › file › the symbols around the cursor (false: the file name only).
+  "breadcrumbs.enabled": true
 }

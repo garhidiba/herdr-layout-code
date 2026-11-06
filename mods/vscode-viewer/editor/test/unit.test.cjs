@@ -633,3 +633,61 @@ test("Change Language Mode lists the grammars and re-tokenizes with the chosen o
   ed.hl.ensure(0);
   assert.ok(ed.hl.tokens[0].length > 2, "not tokenized with the grammar");
 });
+
+const SYM = require("../symbols.cjs");
+
+test("regex outline: functions and classes with their nesting and ranges, for brace and indent languages", () => {
+  const py = ["class Shop:", "    def buy(self):", "        pass", "", "    def sell(self):", "        pass", "def main():", "    Shop()"];
+  assert.deepEqual(SYM.outline(py).map(s => [s.name, s.kind, s.depth, s.container, s.range.end.line]),
+    [["Shop", "class", 0, "", 5], ["buy", "function", 1, "Shop", 2], ["sell", "function", 1, "Shop", 5], ["main", "function", 0, "", 7]]);
+  const go = ["package main", "", "func (s *Server) Start(port int) {", "\tlisten(port)", "}", "type Server struct {", "}", "export const add = (a, b) => a + b;"];
+  assert.deepEqual(SYM.outline(go).map(s => [s.name, s.kind, s.at.col, s.range.end.line]),
+    [["Start", "function", 17, 4], ["Server", "type", 5, 6], ["add", "function", 13, 7]]);
+});
+
+test("LSP document symbols (hierarchical or flat) and tsserver's navtree become one list in document order", () => {
+  const r = (l1, c1, l2, c2) => ({ start: { line: l1, character: c1 }, end: { line: l2, character: c2 } });
+  const tree = SYM.fromLsp([{ name: "A", kind: 5, range: r(0, 0, 9, 1), selectionRange: r(0, 6, 0, 7), children: [{ name: "m", kind: 6, detail: "()", range: r(1, 2, 3, 3), selectionRange: r(1, 2, 1, 3) }] }]);
+  assert.deepEqual(tree.map(s => [s.name, s.kind, s.depth, s.container, s.at.line, s.at.col, s.detail]), [["A", "class", 0, "", 0, 6, ""], ["m", "method", 1, "A", 1, 2, "()"]]);
+  const flat = SYM.fromLsp([{ name: "f", kind: 12, containerName: "mod", location: { uri: "file:///x", range: r(4, 0, 6, 1) } }]);
+  assert.deepEqual(flat.map(s => [s.name, s.kind, s.container, s.range.end.line]), [["f", "function", "mod", 6]]);
+  const span = (l1, o1, l2, o2) => ({ start: { line: l1, offset: o1 }, end: { line: l2, offset: o2 } });
+  const nav = SYM.fromNavtree({ text: '"a"', kind: "module", spans: [span(1, 1, 9, 1)], childItems: [
+    { text: "React", kind: "alias", spans: [span(1, 8, 1, 13)] },
+    { text: "App", kind: "function", spans: [span(3, 1, 5, 2)], nameSpan: span(3, 10, 3, 13), childItems: [{ text: "<function>", kind: "function", spans: [span(4, 1, 4, 9)] }] }] });
+  assert.deepEqual(nav.map(s => [s.name, s.kind, s.at.line, s.at.col, s.range.end.line]), [["App", "function", 2, 9, 4]]);
+});
+
+test("the breadcrumbs follow the cursor into the symbols around it; off, they show only the file name", async () => {
+  const ed = await plainEditor(["class Shop:", "    def buy(self):", "        pass", "x = 1"], "/tmp/vsedit-crumbs/shop.py");
+  ed.crumbs = ["src", "shop.py"];
+  ed.moveTo({ line: 2, col: 4 });
+  assert.equal(ed.crumbText(), " src › shop.py"); // the outline is loading
+  await ed.loadOutline();
+  assert.equal(ed.crumbText(), " src › shop.py › Shop › buy");
+  ed.moveTo({ line: 3, col: 0 });
+  assert.equal(ed.crumbText(), " src › shop.py");
+  ed.settings = { ...ed.settings, "breadcrumbs.enabled": false };
+  assert.equal(ed.crumbText(), " shop.py");
+});
+
+test("Go to Symbol in Editor (⇧⌘O) lists the outline, names its source and jumps; a breadcrumb click opens it", async () => {
+  const ed = await plainEditor(["def one():", "    pass", "def two():", "    pass"], "/tmp/vsedit-crumbs/two.py");
+  ed.rows = 10; ed.cols = 100;
+  await ed.runCommand("workbench.action.gotoSymbol");
+  assert.equal(ed.popup.text, "@");
+  assert.equal(ed.popup.note, "regex outline (no language server)");
+  assert.deepEqual(ed.popup.items.map(i => [i.label, i.detail]), [["one", "function"], ["two", "function"]]);
+  ed.handle({ type: "text", text: "tw" }); press(ed, "enter");
+  await new Promise(r => setTimeout(r, 10));
+  assert.deepEqual(ed.head, { line: 2, col: 4 });
+  ed.handle({ type: "mouse", button: 0, x: 3, y: 1, release: false, motion: false });
+  await new Promise(r => setTimeout(r, 10));
+  assert.equal(ed.popup?.text, "@");
+});
+
+test("breadcrumbs.enabled defaults to true and only takes a boolean", () => {
+  assert.equal(S.normalize({})["breadcrumbs.enabled"], true);
+  assert.equal(S.normalize({ "breadcrumbs.enabled": false })["breadcrumbs.enabled"], false);
+  assert.equal(S.normalize({ "breadcrumbs.enabled": "no" })["breadcrumbs.enabled"], true);
+});

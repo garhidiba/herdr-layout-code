@@ -24,12 +24,12 @@ const SCOPES = {
   "text.html.basic": "html", "text.html.derivative": "html",
 };
 const SERVERS = {
-  rust: { command: bin("rust-analyzer", [path.join(os.homedir(), ".cargo/bin")]), languageId: () => "rust" },
-  clangd: { command: bin("clangd", ["/usr/bin"]), languageId: byExt({ c: "c", h: "c", m: "objective-c", mm: "objective-cpp", cu: "cuda-cpp" }, "cpp") },
-  swift: { command: bin("sourcekit-lsp", ["/usr/bin"]), languageId: () => "swift" },
-  json: { command: vscodeServer("json", "jsonServerMain.js"), languageId: byExt({ jsonc: "jsonc" }, "json"), init: { provideFormatter: true } },
-  css: { command: vscodeServer("css", "cssServerMain.js"), languageId: byExt({ scss: "scss", less: "less" }, "css"), init: { provideFormatter: true } },
-  html: { command: vscodeServer("html", "htmlServerMain.js"), languageId: () => "html", init: { provideFormatter: true, embeddedLanguages: { css: true, javascript: true } } },
+  rust: { label: "rust-analyzer", command: bin("rust-analyzer", [path.join(os.homedir(), ".cargo/bin")]), languageId: () => "rust" },
+  clangd: { label: "clangd", command: bin("clangd", ["/usr/bin"]), languageId: byExt({ c: "c", h: "c", m: "objective-c", mm: "objective-cpp", cu: "cuda-cpp" }, "cpp") },
+  swift: { label: "sourcekit-lsp", command: bin("sourcekit-lsp", ["/usr/bin"]), languageId: () => "swift" },
+  json: { label: "JSON language server", command: vscodeServer("json", "jsonServerMain.js"), languageId: byExt({ jsonc: "jsonc" }, "json"), init: { provideFormatter: true } },
+  css: { label: "CSS language server", command: vscodeServer("css", "cssServerMain.js"), languageId: byExt({ scss: "scss", less: "less" }, "css"), init: { provideFormatter: true } },
+  html: { label: "HTML language server", command: vscodeServer("html", "htmlServerMain.js"), languageId: () => "html", init: { provideFormatter: true, embeddedLanguages: { css: true, javascript: true } } },
 };
 
 const pool = new Map(); // "kind:root" -> server | Error
@@ -46,7 +46,7 @@ function startServer(kind, file, root) {
       else {
         const spec = SERVERS[kind], cmd = spec.command();
         if (!cmd || !fs.existsSync(cmd[1][0] ?? cmd[0])) throw new Error(`${kind} language server not found`);
-        s = new Lsp({ cmd: cmd[0], args: cmd[1], languageId: spec.languageId, init: spec.init }, root);
+        s = new Lsp({ cmd: cmd[0], args: cmd[1], languageId: spec.languageId, init: spec.init, label: spec.label }, root);
         s.applyEdit = (ws) => applyEdit(ws);
       }
     } catch (e) { s = e; }
@@ -88,6 +88,15 @@ class Session {
     const s = this.kind && pool.get(`${this.kind}:${this.root}`);
     if (!s || s instanceof Error || s.dead) return;
     try { s.sync(file, text ?? fs.readFileSync(file, "utf8").replace(/\r\n?/g, "\n").replace(/\n$/, ""))?.catch?.(() => {}); } catch {}
+  }
+  // Go to Symbol / breadcrumbs: { source (the provider's label), items } from the server when it has them, else (or when
+  // it fails) the regex outline.
+  async symbols(ctx) {
+    const p = this.provider("symbols");
+    if (p && p !== this.fallback) {
+      try { await p.sync(ctx.file, ctx.lines.join("\n")); return { source: p.label, items: await p.symbols(ctx) }; } catch {}
+    }
+    return { source: this.fallback.label, items: await this.fallback.symbols(ctx) };
   }
   saved(file) { const s = this.kind && pool.get(`${this.kind}:${this.root}`); if (s && !(s instanceof Error)) s.saved(file); }
 }

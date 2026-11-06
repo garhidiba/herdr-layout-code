@@ -4,6 +4,7 @@ const fs = require("fs");
 const path = require("path");
 const { Child } = require("./rpc.cjs");
 const { which } = require("./proc.cjs");
+const { fromNavtree } = require("../symbols.cjs");
 
 // The project's typescript first (walking up to the root), then the one behind `tsserver` on PATH.
 function findTsserver(file, root) {
@@ -33,7 +34,8 @@ function wsEdit(fileEdits) {
 const EMPTY = /no content|could not find|cannot|not found/i;
 
 class TsServer {
-  static CAPS = ["definition", "typeDefinition", "implementation", "references", "rename", "format", "refactor", "source", "callHierarchy"];
+  static CAPS = ["definition", "typeDefinition", "implementation", "references", "rename", "format", "refactor", "source", "callHierarchy", "symbols"];
+  label = "TypeScript server";
 
   constructor(file, root) {
     const server = findTsserver(file, root);
@@ -105,6 +107,7 @@ class TsServer {
     }
     return out;
   }
+  async symbols(ctx) { return fromNavtree(await this.request("navtree", { file: ctx.file })); }
   // dir "incoming" | "outgoing": [{ name, detail, file, line, col }]
   async calls(ctx, dir) {
     let items = await this.list("prepareCallHierarchy", at(ctx));

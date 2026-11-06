@@ -3,6 +3,7 @@
 const fs = require("fs");
 const path = require("path");
 const { which, runAsync } = require("./proc.cjs");
+const { outline } = require("../symbols.cjs");
 
 const KEYWORDS = "func|def|class|fn|const|let|var|type|interface|struct|enum|trait|impl|fun|val|object|typealias|protocol|extension|module|function|static|macro_rules!";
 const MAX = 500;
@@ -55,14 +56,16 @@ function formatterFor(file, scope, root) {
 }
 
 class Fallback {
+  label = "regex outline";
   constructor(file, scope, root) { this.root = root; this.scope = scope; this.formatter = formatterFor(file, scope, root); }
-  can(op) { return op === "definition" || op === "references" || op === "rename" || (op === "format" && !!this.formatter); }
+  can(op) { return op === "definition" || op === "references" || op === "rename" || op === "symbols" || (op === "format" && !!this.formatter); }
   sync() {} saved() {}
   async definition(ctx) {
     if (!ctx.word) return [];
     const all = parseGrep(await search(this.root, definitionPattern(ctx.word), true), this.root, ctx.word);
     return all.sort((a, b) => (b.file === ctx.file) - (a.file === ctx.file));
   }
+  async symbols(ctx) { return outline(ctx.lines); }
   async references(ctx) { return ctx.word ? parseGrep(await search(this.root, ctx.word, false), this.root, ctx.word) : []; }
   async format(ctx) {
     if (!this.formatter) throw new Error(`There is no formatter for '${ctx.language}' files installed.`);

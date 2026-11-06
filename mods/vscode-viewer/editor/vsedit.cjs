@@ -32,6 +32,7 @@ const SB = require("./scrollbar.cjs");
 const D = require("./decorations.cjs");
 const A = require("./autoclose.cjs");
 const FIND = require("./find.cjs");
+const SYM = require("./symbols.cjs");
 
 // VS Code's "Col": characters before the cursor, tabs counted to the next tab stop.
 function visibleColumn(line, index, tab) {
@@ -59,7 +60,7 @@ function wordLeft(line, col) {
 const shiftClosers = (at, line, col, delta) => at.map(q => (q.line === line && q.col >= col ? { line, col: q.col + delta } : q));
 
 // ---------- the editor ----------
-const DOC_FIELDS = ["file", "doc", "buf", "hl", "indent", "scope", "language", "comment", "crumbs", "root", "session", "sel", "goal", "top", "left", "seenVersion"];
+const DOC_FIELDS = ["file", "doc", "buf", "hl", "indent", "scope", "language", "comment", "crumbs", "root", "session", "sel", "goal", "top", "left", "seenVersion", "outline"];
 const WORD_DELAY = 250; // ms the cursor rests on a word before its occurrences highlight, like VS Code
 const NOT_FOUND = { definition: "definition", typeDefinition: "type definition", implementation: "implementation", references: "references" };
 const PEEK_TITLE = { definition: "Definition", typeDefinition: "Type Definition", implementation: "Implementations", references: "References" };
@@ -95,7 +96,7 @@ class Editor {
     const fallback = { useTabs: !this.settings["editor.insertSpaces"], size: this.settings["editor.tabSize"] };
     return { file, doc, buf, hl, indent: F.detectIndent(buf.lines, fallback), scope, language: L.languageName(grammar ? scope : null),
       comment: L.commentOf(scope), crumbs: breadcrumbs(file), root: gitRoot(file), session: null, sel: caret({ line: 0, col: 0 }),
-      goal: null, top: 0, left: 0, seenVersion: 0 };
+      goal: null, top: 0, left: 0, seenVersion: 0, outline: null };
   }
   colorsOf(colorMap) { return colorMap.map(c => (c ? c.slice(0, 7).toLowerCase() : this.colors.fg)); }
   // The grammar arrives after the first, uncolored frame (main paints before loading it).
@@ -574,9 +575,50 @@ class Editor {
       return C.filter(C.COMMANDS, text.slice(1).trim(), c => c.title).map(({ item, hits }) => ({ label: item.title, hits, key: this.keymap.label(item.id),
         detail: item.run === "toggleAutoSave" || item.run === "askAutoSaveDelay" ? S.autoSaveLabel(this.settings) : "", run: () => this.runCommand(item.id) }));
     }
+    if (text.startsWith("@")) return this.symbolItems(text.slice(1).trim());
     if (text.startsWith(":")) return [{ label: text.length > 1 ? `Go to line ${text.slice(1)}` : "Type a line number to go to", run: () => this.gotoText(text.slice(1)) }];
     return C.filter(this.projectFiles(), text.trim(), f => f).slice(0, 300)
       .map(({ item, hits }) => ({ label: item, hits, run: () => this.track(this.open(path.join(this.root, item))) }));
+  }
+  // ----- document symbols (Go to Symbol in Editor, breadcrumbs) -----
+  // ⇧⌘O: the symbols fresh from the language server (else the regex outline) in a quick pick that names the source.
+  goToSymbol() {
+    return this.track(this.loadOutline().then(o => {
+      if (!o) return;
+      this.popup = new O.Picker("@", (t) => this.pickItems(t), "", o.source === "regex outline" ? "regex outline (no language server)" : `from ${o.source}`);
+    }));
+  }
+  symbolItems(query) {
+    const o = this.outline;
+    if (!o || o.version !== this.buf.version) this.queueOutline();
+    if (!o?.items.length) return [{ label: o ? "No symbols found" : "Loading symbols…", run: () => {} }];
+    return C.filter(o.items, query, s => s.name).map(({ item, hits }) => ({ label: item.name, hits, detail: item.kind + (item.container ? ` · ${item.container}` : ""),
+      key: `${item.at.line + 1}`, run: () => this.jumpTo({ file: this.file, line: item.at.line, col: item.at.col }) }));
+  }
+  // Asks for the current file's symbols; stores and resolves { version, source, items } (null when the file changed meanwhile).
+  async loadOutline() {
+    const buf = this.buf, file = this.file, version = buf.version;
+    const { source, items } = await this.lang.symbols(this.langCtx());
+    const st = file === this.file ? this : this.docs.get(file);
+    if (!st || st.buf !== buf || buf.version !== version) return null;
+    st.outline = { version, source, items };
+    return st.outline;
+  }
+  // The outline again 300 ms after the text last changed (breadcrumbs follow the cursor through it).
+  queueOutline() {
+    if (this.outlineTimer) return;
+    this.outlineTimer = setTimeout(() => {
+      this.outlineTimer = null;
+      this.loadOutline().then(o => { if (o) this.redraw(); else if (!this.done) this.queueOutline(); }, () => {});
+    }, 300);
+    this.outlineTimer.unref?.();
+  }
+  // Breadcrumbs: the file's folders and name, then the symbols around the cursor; only the name when they are off.
+  crumbText() {
+    if (!this.settings["breadcrumbs.enabled"]) return " " + this.crumbs.at(-1);
+    if (this.outline?.version !== this.buf.version) this.queueOutline();
+    const names = [...this.crumbs, ...SYM.symbolPath(this.outline?.items ?? [], this.head).map(s => s.name)];
+    return " " + names.join(" › ");
   }
   // Files of the git root (git ls-files), else up to 20,000 files found under the file's folder.
   projectFiles() {
@@ -989,6 +1031,10 @@ class Editor {
       if (ev.button === 0 && !ev.motion) this.statusHits?.find(h => ev.x >= h.x && ev.x < h.x + h.w)?.run();
       return;
     }
+    if (ev.y === 1) { // the breadcrumbs: a click opens Go to Symbol
+      if (ev.button === 0 && !ev.motion && this.settings["breadcrumbs.enabled"]) this.goToSymbol();
+      return;
+    }
     if (ev.y < 2 || ev.y > this.height + 1) return;
     const p = this.cellToPos(ev.x, ev.y);
     if (ev.button === 2 && !ev.motion) { // right click: the context menu, at a click outside the selection the caret moves there first
@@ -1031,9 +1077,9 @@ class Editor {
 
     // breadcrumbs
     P.move(1, 1);
-    const crumbs = this.crumbs.map((s, i) => (i === this.crumbs.length - 1 ? s : s + " › ")).join("");
-    P.text(fit(" " + crumbs + (this.buf.dirty ? " ●" : ""), this.cols), c.barFg, c.bg);
-    if (this.buf.dirty) { const w = W.textWidth(" " + crumbs + " ", 8); if (w < this.cols) { P.move(1, w + 1); P.text("●", c.warn, c.bg); } }
+    const crumbs = this.crumbText();
+    P.text(fit(crumbs + (this.buf.dirty ? " ●" : ""), this.cols), c.barFg, c.bg);
+    if (this.buf.dirty) { const w = W.textWidth(crumbs + " ", 8); if (w < this.cols) { P.move(1, w + 1); P.text("●", c.warn, c.bg); } }
 
     for (let r = 0; r < height; r++) {
       const l = this.top + r;

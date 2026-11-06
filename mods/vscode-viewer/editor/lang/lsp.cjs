@@ -1,6 +1,7 @@
 // A Language Server Protocol client over stdio (Content-Length framing), full-text sync.
 const { pathToFileURL, fileURLToPath } = require("url");
 const { Child, frame } = require("./rpc.cjs");
+const { fromLsp } = require("../symbols.cjs");
 
 const uri = (file) => pathToFileURL(file).href;
 const fileOf = (u) => { try { return fileURLToPath(u); } catch { return null; } };
@@ -31,10 +32,10 @@ function workspaceEdit(we) {
 
 const OPS = { definition: "definitionProvider", typeDefinition: "typeDefinitionProvider", implementation: "implementationProvider",
   references: "referencesProvider", rename: "renameProvider", format: "documentFormattingProvider", refactor: "codeActionProvider",
-  source: "codeActionProvider", callHierarchy: "callHierarchyProvider" };
+  source: "codeActionProvider", callHierarchy: "callHierarchyProvider", symbols: "documentSymbolProvider" };
 const METHOD_OP = { "textDocument/definition": "definition", "textDocument/typeDefinition": "typeDefinition", "textDocument/implementation": "implementation",
   "textDocument/references": "references", "textDocument/rename": "rename", "textDocument/formatting": "format", "textDocument/codeAction": "refactor",
-  "textDocument/prepareCallHierarchy": "callHierarchy" };
+  "textDocument/prepareCallHierarchy": "callHierarchy", "textDocument/documentSymbol": "symbols" };
 
 const CLIENT_CAPS = {
   general: { positionEncodings: ["utf-16"] },
@@ -42,6 +43,7 @@ const CLIENT_CAPS = {
   textDocument: {
     synchronization: { didSave: true }, definition: { linkSupport: true }, typeDefinition: { linkSupport: true },
     implementation: { linkSupport: true }, references: {}, rename: { prepareSupport: false }, formatting: {}, callHierarchy: {},
+    documentSymbol: { hierarchicalDocumentSymbolSupport: true },
     codeAction: { codeActionLiteralSupport: { codeActionKind: { valueSet: ["", "quickfix", "refactor", "refactor.extract", "refactor.inline", "refactor.rewrite", "source", "source.organizeImports", "source.fixAll"] } },
       resolveSupport: { properties: ["edit"] }, dataSupport: true },
     publishDiagnostics: {},
@@ -49,9 +51,9 @@ const CLIENT_CAPS = {
 };
 
 class Lsp {
-  // spec: { cmd, args, languageId(file), init? (initializationOptions) }
+  // spec: { cmd, args, languageId(file), init? (initializationOptions), label? (its name for messages) }
   constructor(spec, root) {
-    this.spec = spec; this.root = root; this.id = 0; this.docs = new Map(); // file -> { version, text }
+    this.spec = spec; this.label = spec.label ?? spec.cmd.split("/").pop(); this.root = root; this.id = 0; this.docs = new Map(); // file -> { version, text }
     this.caps = null; this.applyEdit = () => false;
     this.child = new Child(spec.cmd, spec.args, root, (m) => this.onMessage(m));
     this.ready = this.request("initialize", {
@@ -129,6 +131,7 @@ class Lsp {
   }
   refactors(ctx) { return this.actions(ctx, "refactor"); }
   sourceActions(ctx) { return this.actions(ctx, "source"); }
+  async symbols(ctx) { return fromLsp(await this.call("textDocument/documentSymbol", { textDocument: { uri: uri(ctx.file) } })); }
   async calls(ctx, dir) {
     const items = await this.call("textDocument/prepareCallHierarchy", this.tdp(ctx)) ?? [];
     const out = [];

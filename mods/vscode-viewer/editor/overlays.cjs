@@ -87,9 +87,10 @@ class Menu {
 }
 
 // ---------- quick pick ----------
-// source(text) -> [{ label, detail, key, hits, run }]; the list is recomputed on each change.
+// source(text) -> [{ label, detail, key, hits, run }]; the list is recomputed on each change. note: dim text at the
+// input's right end (where the results come from).
 class Picker {
-  constructor(text, source, placeholder) { this.text = text; this.source = source; this.placeholder = placeholder; this.index = 0; this.top = 0; this.refresh(); }
+  constructor(text, source, placeholder, note = "") { this.text = text; this.source = source; this.placeholder = placeholder; this.note = note; this.index = 0; this.top = 0; this.refresh(); }
   refresh() { this.items = this.source(this.text); this.index = 0; this.top = 0; }
   box(ed) { const w = Math.min(ed.cols - 2, 80), size = Math.max(1, Math.min(12, this.items.length || 1, ed.rows - 6)); return { x: Math.floor((ed.cols - w) / 2) + 1, y: 2, w, size }; }
   render(P, ed) {
@@ -97,8 +98,10 @@ class Picker {
     frame(P, ed, x, y, w, size + 3);
     P.move(y + 1, x + 1);
     const shown = this.text || "";
+    const note = this.note && W.textWidth(this.note, 8) + 4 < inner / 2 ? this.note + " " : "";
     P.text(" ", c.fg, c.input);
-    P.text(fit(shown || this.placeholder, inner - 2), shown ? c.fg : c.lineNumber, c.input);
+    P.text(fit(shown || this.placeholder, inner - 2 - W.textWidth(note, 8)), shown ? c.fg : c.lineNumber, c.input);
+    P.text(note, c.lineNumber, c.input);
     P.text(" ", c.fg, c.input);
     this.cursor = [y + 1, x + 2 + Math.min(inner - 3, W.textWidth(shown, 8))];
     this.top = scrollTo(this.top, this.index, size);
