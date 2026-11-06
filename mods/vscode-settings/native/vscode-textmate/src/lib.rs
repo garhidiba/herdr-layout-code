@@ -10,7 +10,7 @@ mod registry;
 mod rule;
 mod theme;
 
-pub use file::tokenize_file;
+pub use file::{scope_of, split_lines, tokenize_file, viewer, Viewer};
 pub use grammar::{Grammar, StateStack, TokenizeLineResult2};
 pub use raw::{parse_jsonc, parse_raw_grammar};
 pub use registry::{Loader, Registry};

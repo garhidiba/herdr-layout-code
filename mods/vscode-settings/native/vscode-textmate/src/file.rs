@@ -16,7 +16,7 @@ fn read(path: &Path) -> Result<String, String> {
 }
 
 /// tokenize.cjs's `scopeOf`: exact file names, name prefixes, then ever shorter extensions.
-fn scope_of(index: &Value, name: &str) -> Option<String> {
+pub fn scope_of(index: &Value, name: &str) -> Option<String> {
     let n = name.to_lowercase();
     let get = |table: &str, key: &str| index[table].get(key).and_then(Value::as_str).map(str::to_string);
     if let Some(s) = get("files", &n) {
@@ -32,7 +32,7 @@ fn scope_of(index: &Value, name: &str) -> Option<String> {
 }
 
 /// `text.split(/\r\n|\r|\n/)`.
-fn split_lines(text: &str) -> Vec<&str> {
+pub fn split_lines(text: &str) -> Vec<&str> {
     let mut out = vec![];
     let (b, mut start, mut i) = (text.as_bytes(), 0, 0);
     while i < b.len() {
@@ -97,16 +97,37 @@ fn utf16_to_byte(line: &str) -> Option<Vec<usize>> {
     Some(map)
 }
 
+/// The viewer's setup (tokenize.cjs, highlight.cjs): its index.json, its theme's `colors`, and a registry with
+/// that theme loading grammars from `vscode_dir`.
+pub struct Viewer {
+    pub index: Value,
+    pub colors: Value,
+    pub registry: Registry,
+}
+
+pub fn viewer(vscode_dir: &Path) -> Result<Viewer, String> {
+    let index: Value = serde_json::from_str(&read(&vscode_dir.join("index.json"))?).map_err(|e| e.to_string())?;
+    let theme = parse_jsonc(&read(&vscode_dir.join("theme.json"))?)?;
+    let colors = theme.get("colors").cloned().unwrap_or(Value::Null);
+    let mut settings = vec![json!({ "settings": { "foreground": colors.get("editor.foreground"), "background": colors.get("editor.background") } })];
+    settings.extend(theme.get("tokenColors").and_then(Value::as_array).cloned().unwrap_or_default());
+    let raw_theme = json!({ "name": theme.get("name"), "settings": settings });
+    let (dir, scopes) = (vscode_dir.to_path_buf(), index["scopes"].clone());
+    let registry = Registry::new(
+        &raw_theme,
+        Box::new(move |s: &str| match scopes.get(s).and_then(Value::as_str) {
+            Some(f) => parse_raw_grammar(&read(&dir.join(f))?, f).map(Some),
+            None => Ok(None),
+        }),
+    );
+    Ok(Viewer { index, colors, registry })
+}
+
 /// tokenize.cjs's output for `file`, with grammars and theme from `vscode_dir`; `with_stack` adds the rule stack
 /// after the last shown line (for the parity tests).
 pub fn tokenize_file(vscode_dir: &Path, file: &Path, max_lines: Option<&str>, with_stack: bool) -> Result<Value, String> {
     let text = read(file)?;
-    let index: Value = serde_json::from_str(&read(&vscode_dir.join("index.json"))?).map_err(|e| e.to_string())?;
-    let theme = parse_jsonc(&read(&vscode_dir.join("theme.json"))?)?;
-    let colors_of_theme = theme.get("colors").cloned().unwrap_or(Value::Null);
-    let mut settings = vec![json!({ "settings": { "foreground": colors_of_theme.get("editor.foreground"), "background": colors_of_theme.get("editor.background") } })];
-    settings.extend(theme.get("tokenColors").and_then(Value::as_array).cloned().unwrap_or_default());
-    let raw_theme = json!({ "name": theme.get("name"), "settings": settings });
+    let Viewer { index, colors: colors_of_theme, mut registry } = viewer(vscode_dir)?;
 
     let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let scope = scope_of(&index, &name);
@@ -127,15 +148,6 @@ pub fn tokenize_file(vscode_dir: &Path, file: &Path, max_lines: Option<&str>, wi
 
     let (mut grammar, mut color_map) = (None, vec![]);
     if let Some(scope) = &scope {
-        let dir = vscode_dir.to_path_buf();
-        let scopes = index["scopes"].clone();
-        let mut registry = Registry::new(
-            &raw_theme,
-            Box::new(move |s: &str| match scopes.get(s).and_then(Value::as_str) {
-                Some(f) => parse_raw_grammar(&read(&dir.join(f))?, f).map(Some),
-                None => Ok(None),
-            }),
-        );
         grammar = registry.load_grammar(scope)?;
         color_map = registry.color_map().to_vec();
     }
