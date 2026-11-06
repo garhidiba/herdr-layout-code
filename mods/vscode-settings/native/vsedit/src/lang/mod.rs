@@ -115,6 +115,13 @@ pub fn kind_of_scope(scope: &str) -> Option<&'static str> {
         "source.json" | "source.json.comments" => "json",
         "source.css" | "source.css.scss" | "source.css.less" => "css",
         "text.html.basic" | "text.html.derivative" => "html",
+        "source.yaml" => "yaml",
+        "source.toml" => "toml",
+        "source.python" => "python",
+        "source.shell" => "shell",
+        "source.go" => "go",
+        "source.dockerfile" => "dockerfile",
+        "text.html.markdown" => "markdown",
         _ => return None,
     })
 }
@@ -135,18 +142,24 @@ pub struct Spec {
 }
 
 fn spec_of(kind: &str) -> Option<Spec> {
+    let home = crate::settings::home_dir();
     let bin = |name: &str, dir: PathBuf| {
         let own = dir.join(name);
         if own.is_file() { Some(own) } else { crate::term::which(name) }
     };
+    let on_path = |name: &str, args: &[&str]| crate::term::which(name).map(|b| (b, args.iter().map(|a| a.to_string()).collect::<Vec<_>>()));
+    // VS Code's own JSON/CSS/HTML servers: Devin.app's copies, else vscode-langservers-extracted's.
     let vscode = |name: &str, main: &str| -> Option<(PathBuf, Vec<String>)> {
         let server = PathBuf::from(DEVIN).join(format!("{name}-language-features/server/dist/node/{main}"));
-        server.is_file().then(|| (crate::term::which("node").unwrap_or_else(|| "node".into()), vec![server.to_string_lossy().into_owned(), "--stdio".into()]))
+        if server.is_file() {
+            return Some((crate::term::which("node").unwrap_or_else(|| "node".into()), vec![server.to_string_lossy().into_owned(), "--stdio".into()]));
+        }
+        on_path(&format!("vscode-{name}-language-server"), &["--stdio"])
     };
     let spec = |label, (cmd, args): (PathBuf, Vec<String>), language_id, init| Some(Spec { label, cmd, args, language_id, init });
     let fmt = serde_json::json!({ "provideFormatter": true });
     match kind {
-        "rust" => spec("rust-analyzer", (bin("rust-analyzer", crate::settings::home_dir().join(".cargo/bin"))?, vec![]), |_| "rust".into(), Value::Null),
+        "rust" => spec("rust-analyzer", (bin("rust-analyzer", home.join(".cargo/bin"))?, vec![]), |_| "rust".into(), Value::Null),
         "clangd" => spec(
             "clangd",
             (bin("clangd", "/usr/bin".into())?, vec![]),
@@ -164,8 +177,68 @@ fn spec_of(kind: &str) -> Option<Spec> {
         "json" => spec("JSON language server", vscode("json", "jsonServerMain.js")?, |f| if ext(f) == "jsonc" { "jsonc".into() } else { "json".into() }, fmt),
         "css" => spec("CSS language server", vscode("css", "cssServerMain.js")?, |f| match ext(f).as_str() { "scss" => "scss".into(), "less" => "less".into(), _ => "css".into() }, fmt),
         "html" => spec("HTML language server", vscode("html", "htmlServerMain.js")?, |_| "html".into(), serde_json::json!({ "provideFormatter": true, "embeddedLanguages": { "css": true, "javascript": true } })),
+        "yaml" => spec("YAML language server", on_path("yaml-language-server", &["--stdio"])?, |_| "yaml".into(), Value::Null),
+        "toml" => spec("Taplo", on_path("taplo", &["lsp", "stdio"])?, |_| "toml".into(), Value::Null),
+        "python" => spec("Python language server", on_path("basedpyright-langserver", &["--stdio"]).or_else(|| on_path("pyright-langserver", &["--stdio"]))?, |_| "python".into(), Value::Null),
+        "shell" => spec("Bash language server", on_path("bash-language-server", &["start"])?, |_| "shellscript".into(), Value::Null),
+        "go" => spec("gopls", (bin("gopls", home.join("go/bin"))?, vec![]), |_| "go".into(), Value::Null),
+        "dockerfile" => spec("Dockerfile language server", on_path("docker-langserver", &["--stdio"])?, |_| "dockerfile".into(), Value::Null),
+        "markdown" => spec("Marksman", on_path("marksman", &["server"])?, |_| "markdown".into(), Value::Null),
         _ => None,
     }
+}
+
+const LANGSERVERS: &[(&str, &str)] = &[("npm", "npm i -g vscode-langservers-extracted")];
+
+/// A server kind's name and its installers: (tool, command) pairs, the first whose tool is on PATH is offered when the
+/// server is missing (lang/index.cjs's `install`).
+fn installers(kind: &str) -> Option<(&'static str, &'static [(&'static str, &'static str)])> {
+    Some(match kind {
+        "rust" => ("rust-analyzer", &[("rustup", "rustup component add rust-analyzer"), ("brew", "brew install rust-analyzer")]),
+        "json" => ("JSON language server", LANGSERVERS),
+        "css" => ("CSS language server", LANGSERVERS),
+        "html" => ("HTML language server", LANGSERVERS),
+        "yaml" => ("YAML language server", &[("npm", "npm i -g yaml-language-server"), ("brew", "brew install yaml-language-server")]),
+        "toml" => ("Taplo", &[("brew", "brew install taplo"), ("cargo", "cargo install taplo-cli --locked --features lsp")]),
+        "python" => ("Python language server", &[("pipx", "pipx install basedpyright"), ("npm", "npm i -g basedpyright"), ("brew", "brew install basedpyright")]),
+        "shell" => ("Bash language server", &[("npm", "npm i -g bash-language-server"), ("brew", "brew install bash-language-server")]),
+        "go" => ("gopls", &[("go", "go install golang.org/x/tools/gopls@latest"), ("brew", "brew install gopls")]),
+        "dockerfile" => ("Dockerfile language server", &[("npm", "npm i -g dockerfile-language-server-nodejs")]),
+        "markdown" => ("Marksman", &[("brew", "brew install marksman")]),
+        _ => return None,
+    })
+}
+
+/// How to install a missing server here.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InstallHint {
+    pub kind: &'static str,
+    pub label: &'static str,
+    pub command: &'static str,
+}
+
+/// The missing server of `kind` and how to install it, when one of its installers' tools is on this machine (`has`; the
+/// editor's PATH, so a remote editor names its own machine's tools); None when the server is there or nothing here can
+/// install it.
+pub fn install_hint(kind: &'static str, has: &dyn Fn(&str) -> bool) -> Option<InstallHint> {
+    let (label, list) = installers(kind)?;
+    if spec_of(kind).is_some() {
+        return None;
+    }
+    let (_, command) = list.iter().find(|(tool, _)| has(tool))?;
+    Some(InstallHint { kind, label, command })
+}
+
+/// Forgets that `kind`'s server was missing, so the next use looks for it again (after an install).
+pub fn retry(kind: &str) {
+    if let Ok(mut pool) = pool().lock() {
+        pool.retain(|k, s| !(matches!(s, Slot::Failed) && k.starts_with(&format!("{kind}:"))));
+    }
+}
+
+/// True when `kind`'s server can be started (its program is found).
+pub fn found(kind: &str) -> bool {
+    spec_of(kind).is_some()
 }
 
 /// A running server.
@@ -494,6 +567,10 @@ impl Session {
             Server::Lsp(l) => l.semantic_tokens(ctx),
         }
     }
+    /// How to install this file's missing server, if it has one.
+    pub fn install_hint(&self) -> Option<InstallHint> {
+        install_hint(self.kind?, &|tool| crate::term::which(tool).is_some())
+    }
     /// What the running server last reported for this file.
     pub fn diagnostics(&self) -> Option<Arc<Vec<Diag>>> {
         self.live()?.diagnostics(&self.file)
@@ -513,5 +590,71 @@ impl Session {
         if let Some(Server::Lsp(s)) = self.live() {
             s.saved(file);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A folder of fake servers named like the real ones (test/fake-lsp.cjs behind each name), put first on PATH.
+    fn fake_servers(names: &[&str]) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("vsedit-fake-lsp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../vscode-viewer/editor/test/fake-lsp.cjs");
+        let node = crate::term::which("node").expect("node");
+        for n in names {
+            let f = dir.join(n);
+            std::fs::write(&f, format!("#!/bin/sh\nexec \"{}\" \"{}\" \"{n}\" \"$@\"\n", node.display(), fake.display())).unwrap();
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = std::env::var("PATH").unwrap_or_default();
+        if !path.starts_with(&dir.to_string_lossy().into_owned()) {
+            std::env::set_var("PATH", format!("{}:{path}", dir.display()));
+        }
+        dir
+    }
+
+    #[test]
+    fn new_languages_start_their_servers_with_the_usual_commands_and_get_their_problems() {
+        let cases = [
+            ("a.yaml", "source.yaml", "yaml-language-server --stdio"),
+            ("a.toml", "source.toml", "taplo lsp stdio"),
+            ("a.py", "source.python", "basedpyright-langserver --stdio"),
+            ("a.sh", "source.shell", "bash-language-server start"),
+            ("a.go", "source.go", "gopls"),
+            ("Dockerfile", "source.dockerfile", "docker-langserver --stdio"),
+            ("a.md", "text.html.markdown", "marksman server"),
+        ];
+        let names: Vec<&str> = cases.iter().map(|c| c.2.split(' ').next().unwrap()).collect();
+        let dir = fake_servers(&names);
+        for (name, scope, command) in cases {
+            let file = dir.join(name);
+            std::fs::write(&file, "x\n").unwrap();
+            let s = Session::new(&file, Some(scope));
+            assert_eq!(s.install_hint(), None, "{name}: an install offered for a server that is there");
+            s.server().expect(name).sync(&file, "x").unwrap();
+            let end = Instant::now() + Duration::from_secs(5);
+            while s.diagnostics().is_none_or(|d| d.is_empty()) && Instant::now() < end {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert_eq!(s.diagnostics().map(|d| d[0].message.clone()), Some(format!("fake {command}")), "{name}");
+        }
+        shutdown();
+    }
+
+    #[test]
+    fn a_missing_servers_install_hint_takes_the_first_installer_whose_tool_is_here() {
+        if ["yaml", "markdown", "dockerfile"].iter().any(|k| found(k)) {
+            return; // a real server is installed
+        }
+        let brew_only = |tool: &str| tool == "brew";
+        let hint = |kind, label, command| Some(InstallHint { kind, label, command });
+        assert_eq!(install_hint("yaml", &brew_only), hint("yaml", "YAML language server", "brew install yaml-language-server"));
+        assert_eq!(install_hint("yaml", &|_| true), hint("yaml", "YAML language server", "npm i -g yaml-language-server"), "npm comes first");
+        assert_eq!(install_hint("markdown", &brew_only), hint("markdown", "Marksman", "brew install marksman"));
+        assert_eq!(install_hint("dockerfile", &brew_only), None, "npm alone installs it");
+        assert_eq!(install_hint("clangd", &|_| true), None, "no installer for a system server");
     }
 }

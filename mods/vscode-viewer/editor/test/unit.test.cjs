@@ -1433,3 +1433,53 @@ test("a language server child never keeps the process alive, so a script that to
   for (let i = 0; i < 50 && alive(); i++) require("child_process").spawnSync("sleep", ["0.1"]);
   assert.equal(alive(), false, "the server outlived the script");
 });
+
+// ----- language server table: the new servers and the install hints, against fake servers (fake-lsp.cjs) -----
+const LANG = require("../lang/index.cjs");
+// A folder of fake servers named like the real ones (fake-lsp.cjs behind each name), put first on PATH for the test.
+function fakeServers(t, names) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vsedit-fake-lsp-"));
+  for (const n of names) {
+    const f = path.join(dir, n);
+    fs.writeFileSync(f, `#!/bin/sh\nexec "${process.execPath}" "${path.join(__dirname, "fake-lsp.cjs")}" "${n}" "$@"\n`);
+    fs.chmodSync(f, 0o755);
+  }
+  const old = process.env.PATH;
+  process.env.PATH = `${dir}:${old}`;
+  t.after(() => { process.env.PATH = old; LANG.shutdown(); fs.rmSync(dir, { recursive: true, force: true }); });
+  return dir;
+}
+
+test("YAML, TOML, Python, Shell, Go, Dockerfile and Markdown files start their servers with the usual commands and get their problems", async (t) => {
+  const cases = [
+    ["a.yaml", "source.yaml", "yaml-language-server --stdio"], ["a.toml", "source.toml", "taplo lsp stdio"],
+    ["a.py", "source.python", "basedpyright-langserver --stdio"], ["a.sh", "source.shell", "bash-language-server start"],
+    ["a.go", "source.go", "gopls"], ["Dockerfile", "source.dockerfile", "docker-langserver --stdio"], ["a.md", "text.html.markdown", "marksman server"],
+  ];
+  const dir = fakeServers(t, cases.map(c => c[2].split(" ")[0]));
+  for (const [name, scope, command] of cases) {
+    const file = path.join(dir, name);
+    fs.writeFileSync(file, "x\n");
+    const s = new LANG.Session(file, scope);
+    assert.equal(s.installHint(), null, `${name}: an install offered for a server that is there`);
+    await s.symbols({ file, lines: ["x"], language: name });
+    await until(() => s.diagnostics().length > 0);
+    assert.equal(s.diagnostics()[0].message, `fake ${command}`, name);
+  }
+});
+
+test("Python falls back to pyright-langserver when basedpyright isn't there", async (t) => {
+  const dir = fakeServers(t, ["pyright-langserver"]);
+  if (LANG.found("python") && !LANG.SERVERS.python.command()[0].startsWith(dir)) return t.skip("a real basedpyright is installed");
+  assert.deepEqual(LANG.SERVERS.python.command(), [path.join(dir, "pyright-langserver"), ["--stdio"]]);
+});
+
+test("a missing server's install hint takes the first installer whose tool this machine has, and none without one", (t) => {
+  if (["yaml", "markdown", "dockerfile"].some(LANG.found)) return t.skip("a real server is installed");
+  const brewOnly = (tool) => tool === "brew";
+  assert.deepEqual(LANG.installHint("yaml", brewOnly), { kind: "yaml", label: "YAML language server", command: "brew install yaml-language-server" });
+  assert.deepEqual(LANG.installHint("yaml", () => true), { kind: "yaml", label: "YAML language server", command: "npm i -g yaml-language-server" }, "npm comes first");
+  assert.deepEqual(LANG.installHint("markdown", brewOnly), { kind: "markdown", label: "Marksman", command: "brew install marksman" });
+  assert.equal(LANG.installHint("dockerfile", brewOnly), null, "npm alone installs it");
+  assert.equal(LANG.installHint("clangd", () => true), null, "no installer for a system server");
+});
