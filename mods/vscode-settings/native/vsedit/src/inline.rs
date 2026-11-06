@@ -60,7 +60,7 @@ impl Default for InlineSettings {
             debounce: 250,
             max_tokens: 64,
             prefix_chars: 4000,
-            suffix_chars: 1000,
+            suffix_chars: 300,
             stop_after: 5,
             daily_limit: None,
             keep_alive: "30m".into(),
@@ -638,6 +638,7 @@ mod tests {
     fn defaults_are_ollama_qwen_on_localhost_without_a_daily_limit() {
         let cfg = config(&normalize(&json!({})), |_| true);
         assert_eq!((cfg.provider.as_str(), cfg.model.as_str(), cfg.endpoint.as_str(), cfg.enabled, cfg.limit, cfg.max_tokens, cfg.debounce, cfg.manual), ("ollama", "qwen2.5-coder:7b", "http://127.0.0.1:11434", true, 0, 64, 250, false));
+        assert_eq!((cfg.prefix_chars, cfg.suffix_chars), (4000, 300));
         assert!(!config(&normalize(&json!({})), |_| false).enabled);
         assert!(config(&normalize(&json!({ "editor.inlineSuggest.enabled": true })), |_| false).enabled);
         assert!(!config(&normalize(&json!({ "editor.inlineSuggest.provider": "off" })), |_| true).enabled);

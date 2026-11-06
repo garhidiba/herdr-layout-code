@@ -519,7 +519,9 @@ Prompt evaluation runs at ~250 tokens/s here and generation at ~20 tokens/s, so 
 can't take from its cache: everything after the first changed token. Qwen's FIM order is `<|fim_prefix|>…<|fim_suffix|>…`,
 so the text after the cursor is evaluated again on every request. A prefix cut at a fixed character count would drop one
 character from its start per typed character, shift every token and cost 5–6 s per pause; cutting at a line start
-keeps it cached. The first request at a new place (opening a
+keeps it cached. That is why `suffixChars` defaults to 300, not 1,000: typing on costs 0.5–0.8 s instead of 1.2–2.1 s
+here (the table's last column), and the 300 characters still hold the rest of the line and the next few lines, what a
+one-line suggestion needs. The first request at a new place (opening a
 file, jumping) pays the whole prompt. Lowering `editor.inlineSuggest.suffixChars` is the main lever on this machine.
 The editor adds nothing measurable per keystroke (a timer reset); a reply of 64 tokens adds ~3 s of generation, which
 the one-line stop (`"\n"`) usually avoids.

@@ -35,10 +35,11 @@
   "editor.inlineSuggest.debounce": 250,
   // false: one line at a time ("\n" stops the reply; the next line after a finished statement).
   "editor.inlineSuggest.multiline": false,
-  // Limits per request: reply tokens, and the characters sent before / after the cursor.
+  // Limits per request: reply tokens, and the characters sent before / after the cursor (the text after the cursor is
+  // evaluated again on every request, so it sets the latency: ~0.5–0.8 s with 300 against 1.2–2.1 s with 1,000 here).
   "editor.inlineSuggest.maxTokens": 64,
   "editor.inlineSuggest.prefixChars": 4000,
-  "editor.inlineSuggest.suffixChars": 1000,
+  "editor.inlineSuggest.suffixChars": 300,
   // Empty or repeated replies (or errors) in a row that pause the provider for the session (FIM tokens pause at once).
   "editor.inlineSuggest.stopAfter": 5,
   // Requests a day before suggestions stop until tomorrow; null = 2000 for paid providers, unlimited for local ones.

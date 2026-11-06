@@ -78,8 +78,8 @@ test("a provider pauses after N bad replies in a row, at once on FIM tokens; a g
 
 test("defaults: Ollama with qwen2.5-coder:7b on 127.0.0.1, on when Ollama can run, local means no daily limit", () => {
   const cfg = I.config(S.normalize({}), () => true);
-  assert.deepEqual([cfg.provider, cfg.model, cfg.endpoint, cfg.enabled, cfg.limit, cfg.maxTokens, cfg.debounce, cfg.trigger, cfg.keepAlive],
-    ["ollama", "qwen2.5-coder:7b", "http://127.0.0.1:11434", true, 0, 64, 250, "auto", "30m"]);
+  assert.deepEqual([cfg.provider, cfg.model, cfg.endpoint, cfg.enabled, cfg.limit, cfg.maxTokens, cfg.debounce, cfg.trigger, cfg.keepAlive, cfg.prefixChars, cfg.suffixChars],
+    ["ollama", "qwen2.5-coder:7b", "http://127.0.0.1:11434", true, 0, 64, 250, "auto", "30m", 4000, 300]);
   assert.equal(I.config(S.normalize({}), () => false).enabled, false);
   assert.equal(I.config(S.normalize({ "editor.inlineSuggest.enabled": true }), () => false).enabled, true);
   assert.equal(I.config(S.normalize({ "editor.inlineSuggest.provider": "off" })).enabled, false);

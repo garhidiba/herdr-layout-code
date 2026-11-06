@@ -29,7 +29,7 @@ const DEFAULTS = {
   [P + "debounce"]: 250,           // ms typing must pause before a request
   [P + "maxTokens"]: 64,
   [P + "prefixChars"]: 4000,       // text sent before the cursor
-  [P + "suffixChars"]: 1000,       // and after it
+  [P + "suffixChars"]: 300,        // and after it (re-read on every request: Qwen's FIM puts it after the prefix)
   [P + "stopAfter"]: 5,            // empty / repeated replies or errors in a row that pause the provider for this session
   [P + "dailyRequestLimit"]: null, // null: 2000 for paid providers, unlimited for local ones; 0: unlimited
   [P + "keepAlive"]: "30m",        // Ollama: how long the model stays loaded after a request
