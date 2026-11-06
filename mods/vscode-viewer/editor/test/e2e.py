@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """End-to-end: runs vsedit.cjs in a 100x30 pseudo-terminal, types, saves, quits, and checks colors against tokenize.cjs;
-scrollbars (editor and hex viewer), the context menu, Kitty ⌘ keys, user keybindings, tsserver definition/references/rename, gofmt, the save dialog, auto save and hot exit.
+scrollbars (editor and hex viewer), the context menu, Kitty ⌘ keys, user keybindings, tsserver definition/references/rename, gofmt, the save dialog, auto save and hot exit;
+find widget toggles, status bar items, symbol breadcrumbs, Go to Symbol and diagnostics.
 usage: python3 -I mods/vscode-viewer/editor/test/e2e.py"""
 import fcntl, json, os, pty, re, select, shutil, signal, struct, subprocess, sys, tempfile, termios, time
 
@@ -623,6 +624,77 @@ def run_autoclose(tmp):
     print("auto-closing pairs: ok")
 
 
+def status_col(t, text):
+    """1-based column of `text` in the last painted status bar (row 30)."""
+    row = plain(t).split("\x1b[30;1H")[-1]
+    assert text in row, "not in the status bar: " + repr(row[:120])
+    return row.index(text) + 1
+
+
+def run_find_and_status(tmp):
+    """The find widget: Kitty ⌥⌘C / ⌥⌘W narrow the matches (N of M in the widget), ⌥⌘↩ replaces all. Status bar clicks:
+    Ln/Col opens Go to Line, LF picks CRLF and the save writes it."""
+    file = os.path.join(tmp, "words.txt")
+    open(file, "w").write("Foo foo food\nbar foo\n")
+    t = Term(file)
+    assert t.read("Ln 1, Col 1")
+    t.send("\x06"); t.send("foo", wait=0.3)               # Ctrl+F foo
+    assert "1 of 4" in plain(t) and "Aa ab .*" in plain(t), "no count in the widget:\n" + plain(t)[-300:]
+    t.send("\x1b[99;11u", wait=0.3)                       # ⌥⌘C Match Case
+    assert t.read("1 of 3", timeout=2), "Match Case did not narrow:\n" + plain(t)[-300:]
+    t.send("\x1b[119;11u", wait=0.3)                      # ⌥⌘W Match Whole Word
+    assert t.read("1 of 2", timeout=2), "Whole Word did not narrow"
+    t.send("\x08", wait=0.2)                              # Ctrl+H: the Replace row
+    t.send("baz"); t.send("\x1b[13;11u", wait=0.3)        # ⌥⌘↩ Replace All
+    assert t.read("No results", timeout=2) and "baz food" in plain(t), "no Replace All:\n" + plain(t)[-300:]
+    t.send("\x1b[27u"); t.send("\x13")
+    assert t.read("Saved", timeout=2)
+    assert open(file).read() == "Foo baz food\nbar baz\n"
+    x = status_col(t, "Ln ")
+    t.send(f"\x1b[<0;{x + 1};30M\x1b[<0;{x + 1};30m", wait=0.3)
+    assert t.read("Go to line", timeout=2), "Ln/Col did not open Go to Line"
+    t.send("\x1b[27u", wait=0.2)
+    x = status_col(t, "   LF   ") + 3
+    t.send(f"\x1b[<0;{x};30M\x1b[<0;{x};30m", wait=0.3)
+    assert t.read("Select End of Line Sequence", timeout=2), "LF did not open the picker"
+    t.send("\x1b[B"); t.send("\r", wait=0.3); t.send("\x13")
+    assert t.read("CRLF", timeout=2) and t.read("Saved", timeout=2)
+    assert open(file, "rb").read() == b"Foo baz food\r\nbar baz\r\n", open(file, "rb").read()
+    t.send("\x11")
+    assert t.wait_exit() == 0
+    print("find toggles + status bar items: ok")
+
+
+SHOP = 'export class Shop {\n  buy(n: number) {\n    return n;\n  }\n}\nconst s: string = 1;\n'
+
+
+def run_symbols_and_problems(tmp):
+    """Through tsserver: the breadcrumbs follow the cursor into Shop › buy, F8 goes to the type error (a curly
+    underline, its message in the status bar), ⇧⌘O lists the symbols from the TypeScript server and jumps."""
+    proj = os.path.join(tmp, "shopproj")
+    os.makedirs(proj)
+    subprocess.run(["git", "init", "-q"], cwd=proj, check=True)
+    open(os.path.join(proj, "tsconfig.json"), "w").write('{"compilerOptions":{"strict":true}}')
+    file = os.path.join(proj, "shop.ts")
+    open(file, "w").write(SHOP)
+    t = Term(file)
+    assert t.read("Ln 1, Col 1")
+    t.send("\x07"); t.send("3:5\r")
+    assert t.read("shop.ts › Shop › buy", timeout=20), "no symbol breadcrumbs:\n" + plain(t)[-300:]
+    assert t.read("\x1b[4:3m", timeout=20), "no squiggle"
+    t.out = b""
+    t.send("\x1b[19~", wait=0.3)                          # F8
+    assert t.read("Ln 6, Col 7", timeout=5) and t.read("not assignable", timeout=2), "F8 did not reach the error:\n" + plain(t)[-300:]
+    t.send("\x1b[111;10u", wait=0.5)                      # ⇧⌘O
+    assert t.read("from TypeScript server", timeout=10), "no symbol picker:\n" + plain(t)[-300:]
+    assert "Shop" in plain(t) and "method" in plain(t)
+    t.send("buy"); t.send("\r", wait=0.3)
+    assert t.read("Ln 2, Col 3", timeout=2), "the picker did not jump to buy"
+    t.send("\x11")
+    assert t.wait_exit() == 0
+    print("symbols + diagnostics (tsserver): ok")
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="vsedit-e2e-")
     ISOLATED.update(VSEDIT_SETTINGS=os.path.join(tmp, "settings", "vscode-settings.json"), VSEDIT_BACKUPS=os.path.join(tmp, "backups"),
@@ -630,7 +702,7 @@ def main():
     try:
         run_tsx(tmp); run_go(tmp); run_crlf(tmp); run_hex(tmp); run_error_page(tmp); run_drag_scroll(tmp); run_minified(tmp); run_scrollbars(tmp); run_decorations(tmp); run_autoclose(tmp)
         run_menu_and_cmd_save(tmp); run_save_dialog(tmp); run_auto_save(tmp); run_hot_exit(tmp); run_keybindings(tmp)
-        run_format(tmp); run_typescript(tmp)
+        run_format(tmp); run_typescript(tmp); run_find_and_status(tmp); run_symbols_and_problems(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("e2e: all passed")
