@@ -113,10 +113,11 @@ export default class Files extends View {
   refresh(cx) {
     const { cwd, on } = location(), next = key();
     if (next !== this.context?.key) {
-      if (this.context) this.saved.set(this.context.key, { folders: this.folders });
+      // Keep each project's last tree and git state, so coming back shows it at once and only refreshes behind it.
+      if (this.context) this.saved.set(this.context.key, { folders: this.folders, entries: this.entries, marks: this.marks, dirty: this.dirty });
       const saved = this.saved.get(next);
-      this.context = { key: next, cwd, on }; this.root = cwd; this.on = on; this.entries = new Map(); this.folders = new Set(saved?.folders);
-      this.pending = new Set(); this.marks = {}; this.dirty = new Map(); this.watched = null; this.error = null; this.limited = false;
+      this.context = { key: next, cwd, on }; this.root = cwd; this.on = on; this.entries = new Map(saved?.entries); this.folders = new Set(saved?.folders);
+      this.pending = new Set(); this.marks = saved?.marks ?? {}; this.dirty = new Map(saved?.dirty); this.watched = null; this.error = null; this.limited = false;
       this.loading = false;
     }
     if (!cwd || this.loading) return;
