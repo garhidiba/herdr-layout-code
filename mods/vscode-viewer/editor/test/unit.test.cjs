@@ -898,3 +898,102 @@ test("an empty problem range underlines the character at it, or the last one at 
   assert.deepEqual(span(3, "abc"), { from: 2, to: 3 });
   assert.equal(span(0, ""), null);
 });
+// ---------- small batch: line selection, join, block comment, brackets, selection search, Save As / Save All ----------
+const sel = (ed) => [ed.sel.anchor.line, ed.sel.anchor.col, ed.sel.head.line, ed.sel.head.col];
+const jsEditor = async (lines, scope = "source.js", file = "/tmp/x.js") => {
+  const ed = new Editor(file, { lines, eol: "\n", finalNewline: true }, await H.loadGrammar(scope), H.loadTheme(), scope);
+  ed.hl.ensure(lines.length - 1);
+  return ed;
+};
+
+test("Expand Line Selection selects the line, each press adds the next one, the last line to its end", async () => {
+  const ed = await plainEditor(["ab", "cd", "ef"]);
+  ed.moveTo({ line: 0, col: 1 });
+  ed.runCommand("expandLineSelection");
+  assert.deepEqual(sel(ed), [0, 0, 1, 0]);
+  ed.runCommand("expandLineSelection");
+  assert.deepEqual(sel(ed), [0, 0, 2, 0]);
+  ed.runCommand("expandLineSelection");
+  assert.deepEqual(sel(ed), [0, 0, 2, 2]);
+  ed.runCommand("expandLineSelection");
+  assert.deepEqual(sel(ed), [0, 0, 2, 2]);
+});
+
+test("Join Lines joins the next line with one space, drops its indent and blank lines, and keeps a selection's end", async () => {
+  const ed = await plainEditor(["foo", "    bar", "x  ", "y"]);
+  ed.runCommand("editor.action.joinLines");
+  assert.deepEqual(ed.lines, ["foo bar", "x  ", "y"]);
+  assert.deepEqual(sel(ed), [0, 3, 0, 3]); // at the join, before the space
+  ed.moveTo({ line: 1, col: 0 });
+  ed.joinLines();
+  assert.deepEqual(ed.lines, ["foo bar", "x y"]); // trailing whitespace becomes the one space
+  assert.deepEqual(sel(ed), [1, 2, 1, 2]);
+  ed.joinLines(); // the last line: the cursor goes to its end, nothing changes
+  assert.deepEqual(ed.lines, ["foo bar", "x y"]);
+  assert.deepEqual(sel(ed), [1, 3, 1, 3]);
+  const multi = await plainEditor(["a", "", "  bc", "d"]);
+  multi.sel = { anchor: { line: 0, col: 0 }, head: { line: 2, col: 3 } };
+  multi.joinLines();
+  assert.deepEqual(multi.lines, ["a bc", "d"]);
+  assert.deepEqual(sel(multi), [0, 0, 0, 3]); // one character before the end, as before
+  multi.undo();
+  assert.deepEqual(multi.lines, ["a", "", "  bc", "d"]);
+});
+
+test("Delete All Right / Left delete the line break at the line's end / start", async () => {
+  const ed = await plainEditor(["ab", "cd"]);
+  ed.moveTo({ line: 0, col: 1 });
+  ed.runCommand("deleteAllRight");
+  assert.deepEqual(ed.lines, ["a", "cd"]);
+  ed.runCommand("deleteAllRight");
+  assert.deepEqual(ed.lines, ["acd"]);
+  ed.moveTo({ line: 0, col: 0 });
+  ed.runCommand("deleteAllLeft"); // the first line: nothing before it
+  assert.deepEqual(ed.lines, ["acd"]);
+  const two = await plainEditor(["ab", "cd"]);
+  two.moveTo({ line: 1, col: 0 });
+  two.runCommand("deleteAllLeft");
+  assert.deepEqual(two.lines, ["abcd"]);
+  assert.deepEqual(sel(two), [0, 2, 0, 2]);
+});
+
+test("Toggle Block Comment wraps the selection in the language's block comment and takes it off again", async () => {
+  const ed = await jsEditor(["let x = 1;"]);
+  ed.sel = { anchor: { line: 0, col: 4 }, head: { line: 0, col: 5 } };
+  ed.runCommand("editor.action.blockComment");
+  assert.deepEqual(ed.lines, ["let /* x */ = 1;"]);
+  assert.deepEqual(sel(ed), [0, 7, 0, 8]); // the text stays selected
+  ed.blockComment();
+  assert.deepEqual(ed.lines, ["let x = 1;"]);
+  assert.deepEqual(sel(ed), [0, 4, 0, 5]);
+  ed.moveTo({ line: 0, col: 10 }); // empty selection: an empty comment, the cursor inside
+  ed.blockComment();
+  assert.deepEqual(ed.lines, ["let x = 1;/*  */"]);
+  assert.deepEqual(sel(ed), [0, 13, 0, 13]);
+  ed.blockComment();
+  assert.deepEqual(ed.lines, ["let x = 1;"]);
+  const multi = await jsEditor(["a", "b"]);
+  multi.sel = { anchor: { line: 0, col: 0 }, head: { line: 1, col: 1 } };
+  multi.blockComment();
+  assert.deepEqual(multi.lines, ["/* a", "b */"]);
+  multi.blockComment();
+  assert.deepEqual(multi.lines, ["a", "b"]);
+  const py = await jsEditor(["x"], "source.python", "/tmp/x.py");
+  py.selectAll(); py.blockComment();
+  assert.deepEqual(py.lines, ['""" x """']);
+  const plain = await plainEditor(["x"]);
+  plain.selectAll(); plain.blockComment();
+  assert.deepEqual(plain.lines, ["x"]);
+  assert.match(plain.message.text, /No block comment syntax known for Plain Text/);
+});
+
+test("block comment pairs follow VS Code's language configurations", () => {
+  assert.deepEqual(L.blockCommentOf("source.ts"), ["/*", "*/"]);
+  assert.deepEqual(L.blockCommentOf("source.css"), ["/*", "*/"]);
+  assert.deepEqual(L.blockCommentOf("text.html.basic"), ["<!--", "-->"]);
+  assert.deepEqual(L.blockCommentOf("source.lua"), ["--[[", "]]"]);
+  assert.equal(L.blockCommentOf("source.shell"), null);
+  assert.equal(L.blockCommentOf("text.pug"), null);
+  assert.equal(L.blockCommentOf(null), null);
+});
+

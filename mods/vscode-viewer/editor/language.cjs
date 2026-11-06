@@ -64,4 +64,25 @@ function commentOf(scope) {
   return null;
 }
 
-module.exports = { scopeOf, languageName, commentOf };
+// Block comment pairs of the languages that have both line and block comments (VS Code's language-configuration.json
+// blockComment); the BLOCK languages use their own pair.
+const BLOCK_PAIRS = [
+  [["/*", "*/"], ["source.js", "source.js.jsx", "source.ts", "source.tsx", "source.go", "source.c", "source.cpp", "source.cuda-cpp", "source.cs",
+    "source.java", "source.rust", "source.swift", "source.dart", "source.kotlin", "source.css.scss", "source.css.less", "source.php",
+    "source.groovy", "source.json", "source.json.comments", "source.objc", "source.objcpp", "source.hlsl", "source.shaderlab", "source.sql"]],
+  [["(*", "*)"], ["source.fsharp"]],
+  [['"""', '"""'], ["source.python"]],
+  [["=begin", "=end"], ["source.ruby"]],
+  [["--[[", "]]"], ["source.lua"]],
+  [["###", "###"], ["source.coffee"]],
+  [["<#", "#>"], ["source.powershell"]],
+  [["#=", "=#"], ["source.julia"]],
+];
+
+// [open, close] for Toggle Block Comment, or null when the language has none.
+function blockCommentOf(scope) {
+  if (BLOCK[scope]) return BLOCK[scope][1] ? BLOCK[scope] : null;
+  return BLOCK_PAIRS.find(([, scopes]) => scopes.includes(scope))?.[0] ?? null;
+}
+
+module.exports = { scopeOf, languageName, commentOf, blockCommentOf };

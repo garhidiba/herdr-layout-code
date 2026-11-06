@@ -252,12 +252,12 @@ class Editor {
     this.deleteRange({ line, col: to }, this.head);
     this.setClosers(shiftClosers(closers, line, col, to - col));
   }
-  // ⌘⌫ / ⌘⌦: the selection, else to the line's start / end.
+  // ⌘⌫ / ⌘⌦ (⌃K): the selection, else to the line's start / end; at the start / end, the line break (VS Code's).
   deleteAll(dir) {
     if (!this.empty) return this.deleteRange(...this.range());
-    const { line } = this.head;
-    if (dir < 0) this.deleteRange({ line, col: 0 }, this.head);
-    else this.deleteRange(this.head, { line, col: this.lines[line].length });
+    const { line, col } = this.head, len = this.lines[line].length;
+    if (dir < 0) this.deleteRange(col === 0 && line > 0 ? { line: line - 1, col: this.lines[line - 1].length } : { line, col: 0 }, this.head);
+    else this.deleteRange(this.head, col === len && line < this.lines.length - 1 ? { line: line + 1, col: 0 } : { line, col: len });
   }
   deleteForward(word) {
     if (!this.empty) return this.deleteRange(...this.range());
@@ -345,6 +345,40 @@ class Editor {
       }
     }
     this.lineEdits(edits);
+  }
+  // Toggle Block Comment (VS Code's BlockCommentCommand): with the selection between the language's block comment tokens
+  // (on its first and last line) they go, with one space inside each; else they wrap the selection with a space inside,
+  // the text staying selected; an empty selection gets `/*  */` with the cursor in the middle.
+  blockComment() {
+    const pair = L.blockCommentOf(this.scope);
+    if (!pair) return this.say(`No block comment syntax known for ${this.language}`, this.colors.warn);
+    let [open, close] = pair;
+    const [s, e] = this.range(), first = this.lines[s.line], last = this.lines[e.line], before = this.sel;
+    let a = first.lastIndexOf(open, s.col + open.length);
+    let b = last.indexOf(close, Math.max(0, e.col - close.length, s.line === e.line && a !== -1 ? a + open.length : 0)); // `/**/`: not the shared `*`
+    if (a !== -1 && b !== -1 && (s.line === e.line ? first.substring(a + open.length, b) : first.substring(a + open.length) + "\n" + last.substring(0, b)).includes(close)) a = b = -1;
+    let edits, after;
+    if (a !== -1 && b !== -1) {
+      if (first[a + open.length] === " ") open += " ";
+      if (b > 0 && last[b - 1] === " ") { close = " " + close; b--; }
+      const shift = s.line === e.line ? open.length : 0;
+      edits = [{ start: { line: e.line, col: b }, end: { line: e.line, col: b + close.length }, text: "" },
+        { start: { line: s.line, col: a }, end: { line: s.line, col: a + open.length }, text: "" }];
+      after = { anchor: { line: s.line, col: a }, head: { line: e.line, col: b - shift } };
+      if (s.line === e.line && a + open.length >= b) { // nothing inside (`/*  */`): the whole comment goes
+        edits = [{ start: { line: s.line, col: a }, end: { line: s.line, col: Math.max(a + open.length, b + close.length) }, text: "" }];
+        after = caret({ line: s.line, col: a });
+      }
+    } else if (this.empty) {
+      edits = [{ start: s, text: `${open}  ${close}` }];
+      after = caret({ line: s.line, col: s.col + open.length + 1 });
+    } else {
+      const shift = s.line === e.line ? open.length + 1 : 0;
+      edits = [{ start: e, text: " " + close }, { start: s, text: open + " " }];
+      after = { anchor: { line: s.line, col: s.col + open.length + 1 }, head: { line: e.line, col: e.col + shift } };
+    }
+    this.buf.edit(edits, { before, after });
+    this.sel = after; this.buf.seal(); this.reveal();
   }
 
   // ----- clipboard -----
@@ -749,6 +783,13 @@ class Editor {
     return Promise.resolve(promise).catch(e => this.say(e?.message ?? String(e), this.colors.warn, 5000)).finally(() => this.redraw());
   }
   selectAll() { this.sel = { anchor: { line: 0, col: 0 }, head: { line: this.lines.length - 1, col: this.lines[this.lines.length - 1].length } }; this.buf.seal(); }
+  // Expand Line Selection (⌘L): from the selection's first line start to the start of the line after its last line
+  // (the end of the file on the last line), so pressing it again adds the next line.
+  expandLineSelection() {
+    const [s, e] = this.range(), last = this.lines.length - 1;
+    this.sel = { anchor: { line: s.line, col: 0 }, head: e.line < last ? { line: e.line + 1, col: 0 } : { line: last, col: this.lines[last].length } };
+    this.buf.seal(); this.reveal();
+  }
   // The word under/before p: { text, start, end } or null.
   wordAt(p = this.head) {
     const t = this.lines[p.line];
@@ -796,6 +837,26 @@ class Editor {
     const at = below ? { line: l, col: this.lines[l].length } : { line: l, col: 0 }, pos = { line: below ? l + 1 : l, col: indent.length };
     this.buf.edit([{ start: at, text: below ? "\n" + indent : indent + "\n" }], { before, after: caret(pos) });
     this.moveTo(pos);
+  }
+  // Join Lines (VS Code's JoinLinesAction): the selected lines, else the cursor line and the next, become one; each
+  // joined line loses its indent and gets one space before it (none after an empty line, trailing whitespace becomes
+  // that space; blank lines vanish). The cursor goes to the last join, a multi-line selection keeps its distance from the end.
+  joinLines() {
+    const [s, e] = this.range(), last = this.lines.length - 1, single = s.line === e.line;
+    const end = single ? Math.min(s.line + 1, last) : e.line, endText = this.lines[end];
+    let text = this.lines[s.line], back = 0;
+    for (let l = s.line + 1; l <= end; l++) {
+      const t = this.lines[l], i = t.search(/[^ \t]/);
+      if (i === -1) { back = 0; continue; }
+      let space = text !== "";
+      if (space && /[ \t]$/.test(text)) { space = false; text = text.replace(/[\s﻿\xA0]+$/, " "); }
+      text += (space ? " " : "") + t.slice(i);
+      back = t.length - i + (space ? 1 : 0);
+    }
+    const before = this.sel, after = this.empty ? caret({ line: s.line, col: text.length - back })
+      : single ? { anchor: s, head: e } : { anchor: s, head: { line: s.line, col: text.length - (endText.length - e.col) } };
+    if (end > s.line) this.buf.edit([{ start: { line: s.line, col: 0 }, end: { line: end, col: endText.length }, text }], { before, after });
+    this.sel = after; this.buf.seal(); this.reveal();
   }
 
   // ----- language features -----
