@@ -420,11 +420,41 @@ def run_error_page(tmp):
     print("error page + close on exit: ok")
 
 
+def run_drag_scroll(tmp):
+    """Dragging past the right edge keeps scrolling and growing the selection until release; wheel 66/67 and
+    Shift+wheel scroll sideways."""
+    file = os.path.join(tmp, "long.txt")
+    open(file, "w").write("0123456789" * 40 + "\n")
+    t = Term(file)
+    assert t.read("Ln 1, Col 1")
+    t.send("\x1b[<0;7;2M")                        # press on column 1 of the text
+    t.send("\x1b[<32;100;2M", wait=0.6)            # drag to the last column and hold
+    m = re.findall(r"Ln 1, Col (\d+) \((\d+) selected\)", plain(t))
+    assert m and int(m[-1][1]) > 110, "drag did not auto-scroll: " + repr(m[-1:])
+    t.send("\x1b[<0;100;2m", wait=0.3)             # release stops it
+    stopped = re.findall(r"\((\d+) selected\)", plain(t))[-1]
+    t.read("never", timeout=0.4)
+    assert re.findall(r"\((\d+) selected\)", plain(t))[-1] == stopped, "kept scrolling after release"
+    t.send("\x1b[H")                              # Home: the view follows the cursor back
+    t.out = b""
+    t.send("\x1b[<67;20;2M")                       # wheel right
+    t.read(timeout=0.4); assert "1  6789012345" in plain(t), "wheel right did not scroll"
+    t.out = b""
+    t.send("\x1b[<66;20;2M")                       # wheel left
+    t.read(timeout=0.4); assert "1  0123456789" in plain(t), "wheel left did not scroll"
+    t.out = b""
+    t.send("\x1b[<69;20;2M")                       # Shift+wheel down = right
+    t.read(timeout=0.4); assert "1  6789012345" in plain(t), "Shift+wheel did not scroll sideways"
+    t.send("\x11")
+    assert t.wait_exit() == 0
+    print("drag auto-scroll + horizontal wheel: ok")
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="vsedit-e2e-")
     ISOLATED.update(VSEDIT_SETTINGS=os.path.join(tmp, "settings", "vscode-settings.json"), VSEDIT_BACKUPS=os.path.join(tmp, "backups"))
     try:
-        run_tsx(tmp); run_go(tmp); run_crlf(tmp); run_hex(tmp); run_error_page(tmp)
+        run_tsx(tmp); run_go(tmp); run_crlf(tmp); run_hex(tmp); run_error_page(tmp); run_drag_scroll(tmp)
         run_menu_and_cmd_save(tmp); run_save_dialog(tmp); run_auto_save(tmp); run_hot_exit(tmp)
         run_format(tmp); run_typescript(tmp)
     finally:

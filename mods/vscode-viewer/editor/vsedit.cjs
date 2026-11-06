@@ -792,15 +792,45 @@ class Editor {
     const line = Math.max(0, Math.min(this.lines.length - 1, this.top + y - 2));
     return { line, col: W.indexAtCol(this.lines[line], Math.max(0, this.left + x - 1 - this.gutter), this.tab) };
   }
+  // How far past the text area a drag pointer is, in cells (the gutter and the last column count as past the side).
+  dragOverflow(x, y) {
+    return { dx: x <= this.gutter ? x - this.gutter - 1 : x >= this.cols ? x - this.cols + 1 : 0,
+      dy: y < 2 ? y - 2 : y > this.height + 1 ? y - this.height - 1 : 0 };
+  }
+  // Extends the dragged selection to the pointer; past an edge, first scrolls toward it (faster the farther out).
+  // Returns true while the pointer is outside, so the auto-scroll timer keeps going.
+  dragStep() {
+    const { x, y } = this.drag, { dx, dy } = this.dragOverflow(x, y);
+    if (dy) this.top = Math.max(0, Math.min(this.lines.length - 1, this.top + dy));
+    if (dx) {
+      let widest = 0;
+      for (let l = this.top; l < Math.min(this.lines.length, this.top + this.height); l++) widest = Math.max(widest, W.textWidth(this.lines[l], this.tab));
+      this.left = Math.max(0, Math.min(this.left + dx * 2, Math.max(this.left, widest - this.textWidth + 5)));
+    }
+    const p = this.cellToPos(Math.max(this.gutter + 1, Math.min(x, this.cols)), Math.max(2, Math.min(y, this.height + 1)));
+    this.sel = { anchor: this.sel.anchor, head: p };
+    return !!(dx || dy);
+  }
+  stopDragScroll() { clearInterval(this.dragTimer); this.dragTimer = null; }
   mouse(ev) {
     if (this.popup) return void this.popup.mouse(ev, this);
     if (this.panel && this.panel.mouse(ev, this)) return;
-    if (ev.button === 64 || ev.button === 65) { // wheel
+    const wheel = ev.button === 64 || ev.button === 65;
+    if (wheel && !ev.shift) {
       this.top = Math.max(0, Math.min(Math.max(0, this.lines.length - 1), this.top + (ev.button === 64 ? -3 : 3)));
       return;
     }
-    if (ev.button === 66 || ev.button === 67) { this.left = Math.max(0, this.left + (ev.button === 66 ? -6 : 6)); return; }
-    if (ev.release) { this.dragging = false; return; }
+    if (wheel || ev.button === 66 || ev.button === 67) { // horizontal wheel, or Shift+wheel
+      this.left = Math.max(0, this.left + (ev.button === 66 || ev.button === 64 ? -6 : 6));
+      return;
+    }
+    if (ev.release) { this.dragging = false; this.stopDragScroll(); return; }
+    if (ev.motion && this.dragging && ev.button === 0) {
+      this.drag = { x: ev.x, y: ev.y };
+      if (!this.dragStep()) this.stopDragScroll();
+      else this.dragTimer ??= setInterval(() => { if (!this.dragging || !this.dragStep()) this.stopDragScroll(); this.redraw?.(); }, 40);
+      return;
+    }
     if (ev.y < 2 || ev.y > this.height + 1) return;
     const p = this.cellToPos(ev.x, ev.y);
     if (ev.button === 2 && !ev.motion) { // right click: the context menu, at a click outside the selection the caret moves there first
@@ -811,7 +841,7 @@ class Editor {
     if (ev.button !== 0) return;
     if (this.panel) this.panel.focused = false;
     if (this.peek && !ev.motion) { if (ev.y >= this.peekRow && ev.y < this.peekRow + this.peek.height) return; this.peek = null; }
-    if (ev.motion) { if (this.dragging) { this.sel = { anchor: this.sel.anchor, head: p }; this.reveal(); } return; }
+    if (ev.motion) return;
     const now = Date.now(), c = this.lastClick;
     const double = now - c.time < 400 && c.line === p.line && c.col === p.col;
     this.lastClick = { time: now, line: p.line, col: p.col };
