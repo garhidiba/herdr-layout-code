@@ -1113,3 +1113,50 @@ test("the new commands have VS Code's keys on each OS", () => {
   assert.equal(keyOf("\x1b[92;10u"), "shift+cmd+\\"); // Kitty ⇧⌘\
   assert.equal(keyOf("\x1b[13;9~"), "cmd+f3");
 });
+
+// ---------- medium batch: line comments ----------
+test("line comments: toggle comments all non-blank lines unless all are commented; blank-only lines get comments too", async () => {
+  const ed = await jsEditor(["a", "// b", "", "c"]);
+  ed.selectAll();
+  ed.runCommand("editor.action.commentLine");
+  assert.deepEqual(ed.lines, ["// a", "// // b", "", "// c"]);
+  ed.runCommand("editor.action.commentLine");
+  assert.deepEqual(ed.lines, ["a", "// b", "", "c"]);
+  const blank = await jsEditor(["", "  "]);
+  blank.selectAll();
+  blank.runCommand("editor.action.commentLine");
+  assert.deepEqual(blank.lines, ["// ", "//   "]);
+  blank.runCommand("editor.action.removeCommentLine");
+  assert.deepEqual(blank.lines, ["", "  "]);
+});
+
+test("Add / Remove Line Comment comment every line again / uncomment only the commented ones, the cursor following its text", async () => {
+  const ed = await jsEditor(["  a", "  // b", "c"]);
+  ed.sel = { anchor: { line: 0, col: 2 }, head: { line: 2, col: 1 } };
+  ed.runCommand("editor.action.addCommentLine");
+  assert.deepEqual(ed.lines, ["//   a", "//   // b", "// c"]); // at the smallest indent, already commented lines again
+  assert.deepEqual(sel(ed), [0, 5, 2, 4]);
+  ed.runCommand("editor.action.removeCommentLine");
+  assert.deepEqual(ed.lines, ["  a", "  // b", "c"]);
+  ed.runCommand("editor.action.removeCommentLine");
+  assert.deepEqual(ed.lines, ["  a", "  b", "c"]);
+});
+
+test("line comment commands in a language with only block comments put one block comment around the lines", async () => {
+  const css = await jsEditor(["a { color: red; }", "b {}"], "source.css", "/tmp/x.css");
+  css.sel = { anchor: { line: 0, col: 0 }, head: { line: 1, col: 4 } };
+  css.runCommand("editor.action.commentLine");
+  assert.deepEqual(css.lines, ["/* a { color: red; }", "b {} */"]);
+  css.runCommand("editor.action.commentLine");
+  assert.deepEqual(css.lines, ["a { color: red; }", "b {}"]);
+  css.moveTo({ line: 0, col: 2 }); // nothing selected: the cursor line's text, the cursor staying on it
+  css.runCommand("editor.action.addCommentLine");
+  assert.deepEqual(css.lines, ["/* a { color: red; } */", "b {}"]);
+  assert.deepEqual(sel(css), [0, 5, 0, 5]);
+  css.runCommand("editor.action.removeCommentLine");
+  assert.deepEqual(css.lines, ["a { color: red; }", "b {}"]);
+  assert.deepEqual(sel(css), [0, 2, 0, 2]);
+  const html = await jsEditor(["  <p>x</p>"], "text.html.basic", "/tmp/x.html");
+  html.runCommand("editor.action.commentLine");
+  assert.deepEqual(html.lines, ["  <!-- <p>x</p> -->"]);
+});

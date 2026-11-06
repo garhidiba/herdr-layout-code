@@ -315,15 +315,19 @@ class Editor {
     if (shift || s.line !== e.line) return this.indentLines(shift);
     this.insert(this.unit(W.displayCol(this.lines[s.line], s.col, this.tab)));
   }
-  // mode: undefined toggles; "add" comments the lines, "remove" uncomments the commented ones (⌘K ⌘C / ⌘K ⌘U).
+  // Toggle / Add / Remove Line Comment (VS Code's LineCommentCommand). mode: undefined toggles (all non-blank lines
+  // commented: uncomment, else comment them); "add" comments every non-blank line (⌘K ⌘C), "remove" uncomments the
+  // commented ones (⌘K ⌘U). Lines that are all blank get comments too; comments go at the smallest indent. A language
+  // without line comments (CSS, HTML, Markdown) gets one block comment around the lines instead, whatever the mode.
   toggleComment(mode) {
     if (!this.comment) return this.say(`No comment syntax known for ${this.language}`, this.colors.warn);
-    const [a, b] = this.selectedLines();
-    const [open, close] = this.comment.block ?? [this.comment.line, null];
+    if (this.comment.block) return this.blockCommentLines();
+    const [a, b] = this.selectedLines(), open = this.comment.line;
     const lead = (t) => t.match(/^[\t ]*/)[0].length;
-    const isCommented = (l) => this.lines[l].slice(lead(this.lines[l])).startsWith(open) && (!close || this.lines[l].trimEnd().endsWith(close));
+    const isCommented = (l) => this.lines[l].slice(lead(this.lines[l])).startsWith(open);
     let rows = [];
     for (let l = a; l <= b; l++) if (this.lines[l].trim()) rows.push(l);
+    if (!rows.length && mode !== "remove") for (let l = a; l <= b; l++) rows.push(l);
     if (mode === "remove") rows = rows.filter(isCommented);
     if (!rows.length) return;
     const commented = mode ? mode === "remove" : rows.every(isCommented);
@@ -331,20 +335,32 @@ class Editor {
     if (commented) {
       for (const l of rows) {
         const t = this.lines[l], at = lead(t), sp = t[at + open.length] === " " ? 1 : 0;
-        if (close) {
-          const end = t.trimEnd().length - close.length, sp2 = t[end - 1] === " " ? 1 : 0;
-          edits.push({ line: l, col: end - sp2, remove: close.length + sp2, text: "" });
-        }
         edits.push({ line: l, col: at, remove: open.length + sp, text: "" });
       }
     } else {
       const at = Math.min(...rows.map(l => lead(this.lines[l])));
-      for (const l of rows) {
-        if (close) edits.push({ line: l, col: this.lines[l].trimEnd().length, remove: 0, text: " " + close });
-        edits.push({ line: l, col: at, remove: 0, text: open + " " });
-      }
+      for (const l of rows) edits.push({ line: l, col: at, remove: 0, text: open + " " });
     }
     this.lineEdits(edits);
+  }
+  // A line comment command where the language has only block comments: the block comment around the selection goes
+  // when there is one, else one goes around the selected lines (the cursor line's text when nothing is selected); the
+  // selection stays on the same text.
+  blockCommentLines() {
+    const pair = this.comment.block, [s, e] = this.range(), before = this.sel;
+    let { edits, removed } = this.blockCommentEdits(s, e, pair);
+    if (!removed) {
+      const t = this.lines[s.line], from = this.empty ? { line: s.line, col: t.search(/\S|$/) } : { line: s.line, col: 0 };
+      ({ edits } = this.blockCommentEdits(from, this.empty ? { line: s.line, col: t.length } : { line: e.line, col: this.lines[e.line].length }, pair));
+    }
+    const through = (p) => edits.reduce((q, ed) => { // edits are on single lines, last first
+      const end = ed.end ?? ed.start;
+      if (q.line !== ed.start.line || q.col <= ed.start.col) return q;
+      return { line: q.line, col: q.col >= end.col ? q.col + ed.text.length - (end.col - ed.start.col) : ed.start.col };
+    }, p);
+    const after = { anchor: through(before.anchor), head: through(before.head) };
+    this.buf.edit(edits, { before, after });
+    this.sel = after; this.buf.seal(); this.reveal();
   }
   // Toggle Block Comment (VS Code's BlockCommentCommand): with the selection between the language's block comment tokens
   // (on its first and last line) they go, with one space inside each; else they wrap the selection with a space inside,
@@ -352,8 +368,14 @@ class Editor {
   blockComment() {
     const pair = L.blockCommentOf(this.scope);
     if (!pair) return this.say(`No block comment syntax known for ${this.language}`, this.colors.warn);
-    let [open, close] = pair;
-    const [s, e] = this.range(), first = this.lines[s.line], last = this.lines[e.line], before = this.sel;
+    const [s, e] = this.range(), before = this.sel, { edits, after } = this.blockCommentEdits(s, e, pair);
+    this.buf.edit(edits, { before, after });
+    this.sel = after; this.buf.seal(); this.reveal();
+  }
+  // The edits (single-line, last first) toggling the block comment `[open, close]` on [s, e], the selection after them,
+  // and whether they remove one.
+  blockCommentEdits(s, e, [open, close]) {
+    const first = this.lines[s.line], last = this.lines[e.line], empty = cmp(s, e) === 0;
     let a = first.lastIndexOf(open, s.col + open.length);
     let b = last.indexOf(close, Math.max(0, e.col - close.length, s.line === e.line && a !== -1 ? a + open.length : 0)); // `/**/`: not the shared `*`
     if (a !== -1 && b !== -1 && (s.line === e.line ? first.substring(a + open.length, b) : first.substring(a + open.length) + "\n" + last.substring(0, b)).includes(close)) a = b = -1;
@@ -369,7 +391,7 @@ class Editor {
         edits = [{ start: { line: s.line, col: a }, end: { line: s.line, col: Math.max(a + open.length, b + close.length) }, text: "" }];
         after = caret({ line: s.line, col: a });
       }
-    } else if (this.empty) {
+    } else if (empty) {
       edits = [{ start: s, text: `${open}  ${close}` }];
       after = caret({ line: s.line, col: s.col + open.length + 1 });
     } else {
@@ -377,8 +399,7 @@ class Editor {
       edits = [{ start: e, text: " " + close }, { start: s, text: open + " " }];
       after = { anchor: { line: s.line, col: s.col + open.length + 1 }, head: { line: e.line, col: e.col + shift } };
     }
-    this.buf.edit(edits, { before, after });
-    this.sel = after; this.buf.seal(); this.reveal();
+    return { edits, after, removed: a !== -1 && b !== -1 };
   }
 
   // ----- clipboard -----
