@@ -483,6 +483,48 @@ class Editor {
     try { st.doc.stamp = F.save(st.file, F.encode(st.buf.lines, st.doc)); st.buf.markSaved(); B.remove(st.file); st.git.saved(); return true; }
     catch (e) { this.say(`Failed to save ${path.basename(st.file)}: ${e.message}`, this.colors.error, 8000); return false; }
   }
+  // File: Save All: the current file as Save does, every other unsaved open file as it is; one changed on disk is left unsaved.
+  saveAll() {
+    const skipped = [];
+    for (const st of this.allStates().slice(1)) {
+      if (!st.buf.dirty) continue;
+      if (F.changedOnDisk(st.file, st.doc.stamp)) skipped.push(path.basename(st.file)); else this.writeState(st);
+    }
+    return this.track((this.buf.dirty ? this.saveFile() : Promise.resolve()).then(() => {
+      if (skipped.length) this.say(`Not saved, changed on disk: ${skipped.join(", ")}`, this.colors.warn, 8000);
+    }));
+  }
+  // File: Save As...: asks for a path (relative to the file's folder, which is prefilled), confirms replacing a file,
+  // then saves the text there and edits that file; the original stays as it is on disk.
+  saveAs() {
+    this.popup = new O.Input({ label: "Save As:", text: path.dirname(this.file) + path.sep, selectAll: false, onAccept: (v) => {
+      v = v.trim().replace(/^~(?=$|[\\/])/, os.homedir());
+      if (!v) return;
+      const target = path.resolve(path.dirname(this.file), v);
+      if (target === this.file) return this.track(this.saveFile());
+      let stat = null;
+      try { stat = fs.statSync(target); } catch {}
+      if (stat?.isDirectory()) return this.say(`${target} is a folder`, this.colors.warn, 6000);
+      if (!fs.existsSync(path.dirname(target))) return this.say(`Folder not found: ${path.dirname(target)}`, this.colors.warn, 6000);
+      if (!stat) return this.track(this.saveTo(target));
+      this.dialog(`'${path.basename(target)}' already exists. Do you want to replace it?`, "Replacing it will overwrite its contents.", [
+        { label: "Replace", key: "r", run: () => this.track(this.saveTo(target)) },
+        { label: "Cancel", key: "c", cancel: true, run: () => {} }]);
+    } });
+  }
+  // The current text becomes `target`'s document (its language from its name) and is saved; the original file's
+  // unsaved changes go with it (VS Code reverts the original).
+  async saveTo(target) {
+    const old = this.file, scope = L.scopeOf(this.index, path.basename(target));
+    const { grammar } = await H.loadGrammar(scope, this.index, this.theme);
+    if (this.file !== old) return false; // another file is showing by now
+    const st = this.makeState(target, { ...this.doc, lines: [...this.lines], stamp: null }, grammar, scope);
+    Object.assign(st, { sel: this.sel, top: this.top, left: this.left, indent: this.indent, seenVersion: st.buf.version });
+    st.buf.savedVersion = -1; // unsaved until written
+    this.activate(st);
+    this.docs.delete(old); B.remove(old);
+    return this.saveFile(true);
+  }
   trimTrailing() {
     const edits = [];
     this.lines.forEach((t, line) => { const n = t.trimEnd().length; if (n < t.length) edits.push({ line, col: n, remove: t.length - n, text: "" }); });

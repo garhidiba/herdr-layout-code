@@ -23,6 +23,8 @@
     {"id":"workbench.action.showCommands","title":"Command Palette...","keys":{"mac":["shift+cmd+p","f1"],"win":["ctrl+shift+p","f1"],"linux":["ctrl+shift+p","f1"]}},
     {"id":"workbench.action.quickOpen","title":"Go to File...","keys":{"mac":["cmd+p"],"win":["ctrl+p","ctrl+e"],"linux":["ctrl+p","ctrl+e"]}},
     {"id":"workbench.action.files.save","title":"File: Save","keys":{"mac":["cmd+s"],"win":["ctrl+s"],"linux":["ctrl+s"]}},
+    {"id":"workbench.action.files.saveAs","title":"File: Save As...","keys":{"mac":["shift+cmd+s"],"win":["ctrl+shift+s"],"linux":["ctrl+shift+s"]}},
+    {"id":"workbench.action.files.saveAll","title":"File: Save All","keys":{"mac":["alt+cmd+s"],"win":["ctrl+k s"],"linux":["ctrl+k s"]}},
     {"id":"workbench.action.files.toggleAutoSave","title":"File: Toggle Auto Save","keys":{"mac":[],"win":[],"linux":[]}},
     {"id":"workbench.action.files.setAutoSaveDelay","title":"File: Set Auto Save Delay…","keys":{"mac":[],"win":[],"linux":[]}},
     {"id":"workbench.action.openSettings","title":"Preferences: Open Settings","keys":{"mac":["cmd+,"],"win":["ctrl+,"],"linux":["ctrl+,"]}},

@@ -898,6 +898,7 @@ test("an empty problem range underlines the character at it, or the last one at 
   assert.deepEqual(span(3, "abc"), { from: 2, to: 3 });
   assert.equal(span(0, ""), null);
 });
+
 // ---------- small batch: line selection, join, block comment, brackets, selection search, Save As / Save All ----------
 const sel = (ed) => [ed.sel.anchor.line, ed.sel.anchor.col, ed.sel.head.line, ed.sel.head.col];
 const jsEditor = async (lines, scope = "source.js", file = "/tmp/x.js") => {
@@ -1042,3 +1043,73 @@ test("Find With Selection opens Find with the selection or the word; Find Next /
   assert.deepEqual(sel(ed), [0, 8, 0, 11]);
 });
 
+const until = async (ok) => { for (let i = 0; i < 100 && !ok(); i++) await new Promise(r => setTimeout(r, 20)); assert.ok(ok()); };
+
+test("Save As asks for a path in the file's folder, saves there and goes on editing that file", async () => {
+  process.env.VSEDIT_BACKUPS = fs.mkdtempSync(path.join(os.tmpdir(), "vsedit-bk-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vsedit-saveas-")), file = path.join(dir, "a.txt");
+  fs.writeFileSync(file, "one\n");
+  const ed = new Editor(file, F.load(file), await H.loadGrammar(null), H.loadTheme(), null);
+  ed.typed("x");
+  ed.runCommand("workbench.action.files.saveAs");
+  assert.equal(ed.popup.text, dir + path.sep);
+  ed.handle({ type: "text", text: "b.js" }); // typed after the folder, not over it
+  ed.handle({ type: "key", name: "enter" });
+  await until(() => fs.existsSync(path.join(dir, "b.js")) && !ed.buf.dirty);
+  assert.equal(fs.readFileSync(path.join(dir, "b.js"), "utf8"), "xone\n");
+  assert.equal(fs.readFileSync(file, "utf8"), "one\n");
+  assert.equal(ed.file, path.join(dir, "b.js"));
+  assert.equal(ed.language, "JavaScript");
+  assert.equal(ed.docs.has(file), false);
+  ed.saveAs(); // an existing file: asks first
+  ed.popup.text = file; ed.handle({ type: "key", name: "enter" });
+  assert.match(ed.popup.title, /'a.txt' already exists/);
+  ed.handle({ type: "key", name: "escape" });
+  assert.equal(fs.readFileSync(file, "utf8"), "one\n");
+  ed.saveAs();
+  ed.popup.text = path.join(dir, "missing", "c.txt"); ed.handle({ type: "key", name: "enter" });
+  assert.match(ed.message.text, /Folder not found/);
+  delete process.env.VSEDIT_BACKUPS;
+});
+
+test("Save All writes every unsaved open file, leaving one changed on disk", async () => {
+  process.env.VSEDIT_BACKUPS = fs.mkdtempSync(path.join(os.tmpdir(), "vsedit-bk-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vsedit-saveall-")), [a, b, c] = ["a.txt", "b.txt", "c.txt"].map(n => path.join(dir, n));
+  for (const f of [a, b, c]) fs.writeFileSync(f, "1\n");
+  const ed = new Editor(a, F.load(a), await H.loadGrammar(null), H.loadTheme(), null);
+  for (const f of [b, c, a]) { await ed.open(f); ed.typed("x"); }
+  fs.writeFileSync(c, "changed elsewhere\n");
+  await ed.runCommand("workbench.action.files.saveAll");
+  assert.equal(fs.readFileSync(a, "utf8"), "x1\n");
+  assert.equal(fs.readFileSync(b, "utf8"), "x1\n");
+  assert.equal(fs.readFileSync(c, "utf8"), "changed elsewhere\n");
+  assert.match(ed.message.text, /Not saved, changed on disk: c.txt/);
+  delete process.env.VSEDIT_BACKUPS;
+});
+
+test("the new commands have VS Code's keys on each OS", () => {
+  const on = (os) => { const km = K.resolve([], os); return (key) => km.byChord.get(key); };
+  const mac = on("mac"), win = on("win"), linux = on("linux");
+  assert.equal(mac("cmd+l"), "expandLineSelection");
+  assert.equal(win("ctrl+l"), "expandLineSelection");
+  assert.equal(mac("shift+cmd+s"), "workbench.action.files.saveAs");
+  assert.equal(linux("ctrl+shift+s"), "workbench.action.files.saveAs");
+  assert.equal(mac("alt+cmd+s"), "workbench.action.files.saveAll");
+  assert.equal(win("ctrl+k s"), "workbench.action.files.saveAll");
+  assert.equal(mac("shift+cmd+\\"), "editor.action.jumpToBracket");
+  assert.equal(linux("ctrl+shift+\\"), "editor.action.jumpToBracket");
+  assert.equal(mac("cmd+e"), "actions.findWithSelection");
+  assert.equal(win("ctrl+e"), "workbench.action.quickOpen");
+  assert.equal(mac("cmd+f3"), "editor.action.nextSelectionMatchFindAction");
+  assert.equal(win("ctrl+shift+f3"), "editor.action.previousSelectionMatchFindAction");
+  assert.equal(mac("ctrl+j"), "editor.action.joinLines");
+  assert.equal(win("ctrl+j"), undefined);
+  assert.equal(mac("alt+shift+a"), "editor.action.blockComment");
+  assert.equal(win("alt+shift+a"), "editor.action.blockComment");
+  assert.equal(linux("ctrl+shift+a"), "editor.action.blockComment");
+  assert.equal(linux("alt+shift+a"), undefined);
+  assert.equal(Cmd.label("shift+cmd+\\", "mac"), "⇧⌘\\");
+  assert.equal(Cmd.label("ctrl+k s", "win"), "Ctrl+K S");
+  assert.equal(keyOf("\x1b[92;10u"), "shift+cmd+\\"); // Kitty ⇧⌘\
+  assert.equal(keyOf("\x1b[13;9~"), "cmd+f3");
+});

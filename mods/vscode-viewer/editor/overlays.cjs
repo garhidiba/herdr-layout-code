@@ -152,7 +152,7 @@ class Picker {
 // ---------- input box (go to line, rename, change all, auto save delay) ----------
 // opts: { label, text, at: null (top) | { row, col } (under a text position), onChange?, onAccept, onCancel? }
 class Input {
-  constructor(opts) { Object.assign(this, opts); this.text ??= ""; this.selectAll = !!this.text; }
+  constructor(opts) { Object.assign(this, opts); this.text ??= ""; this.selectAll ??= !!this.text; } // selectAll: false types after the text
   render(P, ed) {
     const c = ed.colors;
     if (!this.at) {

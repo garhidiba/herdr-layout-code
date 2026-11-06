@@ -63,6 +63,8 @@ const RUNS = {
   "workbench.action.showCommands": ["openPicker", [">"]],
   "workbench.action.quickOpen": ["openPicker", [""]],
   "workbench.action.files.save": ["saveFile"],
+  "workbench.action.files.saveAs": ["saveAs"],
+  "workbench.action.files.saveAll": ["saveAll"],
   "expandLineSelection": ["expandLineSelection"],
   "editor.action.blockComment": ["blockComment"],
   "actions.findWithSelection": ["findWithSelection"],
