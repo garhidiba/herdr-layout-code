@@ -17,6 +17,7 @@ const { blend, paletteOf, Painter, fit } = require("./paint.cjs");
 const C = require("./commands.cjs");
 const O = require("./overlays.cjs");
 const S = require("./settings.cjs");
+const K = require("./keybindings.cjs");
 const B = require("./backup.cjs");
 // The language layer loads on first use (a server request, or shutdown when it was used), not before the first frame.
 let langModule = null;
@@ -62,6 +63,7 @@ class Editor {
   // settings: S.normalize()d values (the file is read by main, not here).
   constructor(file, doc, { grammar, colorMap, textmate }, theme, scope, settings = S.normalize()) {
     this.theme = theme; this.textmate = textmate; this.settings = settings;
+    this.keymap = K.resolve(); // main() swaps in the user's (vscode-keybindings.json)
     this.colors = paletteOf(theme.colors);
     this.colorMap = this.colorsOf(colorMap);
     this.docs = new Map(); this.loading = new Map(); this.fileLines = new Map();
@@ -477,14 +479,14 @@ class Editor {
   }
   // Screen cell under a buffer position (row, col), for popups placed at the cursor.
   screenOf(p) { return { row: p.line - this.top + 2, col: this.gutter + W.displayCol(this.lines[p.line], p.col, this.tab) - this.left + 1 }; }
-  openMenu(x, y) { this.popup = new O.Menu(C.menuRows(C.MENU, cap => this.lang.can(cap)), x, y); }
+  openMenu(x, y) { this.popup = new O.Menu(C.menuRows(C.MENU, cap => this.lang.can(cap), this.keymap.label), x, y); }
   openMenuAtCursor() { const s = this.screenOf(this.head); this.openMenu(Math.max(1, s.col), Math.min(this.rows, s.row + 1)); }
   openPicker(prefix) {
     this.popup = new O.Picker(prefix, (t) => this.pickItems(t), "Search files by name (: to go to a line, > for commands)");
   }
   pickItems(text) {
     if (text.startsWith(">")) {
-      return C.filter(C.COMMANDS, text.slice(1).trim(), c => c.title).map(({ item, hits }) => ({ label: item.title, hits, key: item.key,
+      return C.filter(C.COMMANDS, text.slice(1).trim(), c => c.title).map(({ item, hits }) => ({ label: item.title, hits, key: this.keymap.label(item.id),
         detail: item.run === "toggleAutoSave" || item.run === "askAutoSaveDelay" ? S.autoSaveLabel(this.settings) : "", run: () => this.runCommand(item.id) }));
     }
     if (text.startsWith(":")) return [{ label: text.length > 1 ? `Go to line ${text.slice(1)}` : "Type a line number to go to", run: () => this.gotoText(text.slice(1)) }];
@@ -723,10 +725,17 @@ class Editor {
     } });
   }
   openSettings() { S.load(); return this.track(this.open(S.settingsFile())); }
-  // The Settings dialog (the vscode-settings mod) through herdr-app; outside Herdr, the JSON file.
-  openSettingsUi() {
+  openKeybindings() {
+    const file = K.keybindingsFile();
+    if (!fs.existsSync(file)) { try { fs.mkdirSync(path.dirname(file), { recursive: true }); F.save(file, "[]\n"); } catch {} }
+    return this.track(this.open(file));
+  }
+  // The Settings dialog (the vscode-settings mod) through herdr-app, on its Keyboard Shortcuts page for "keybindings"
+  // (asked through <herdr home>/.vscode-settings-page, honored for a few seconds); outside Herdr, the JSON file.
+  openSettingsUi(page) {
     const bin = process.env.HC_TERMINAL_ID && which("herdr-app");
-    if (!bin) return this.openSettings();
+    if (!bin) return page ? this.openKeybindings() : this.openSettings();
+    try { fs.writeFileSync(path.join(path.dirname(S.settingsFile()), ".vscode-settings-page"), JSON.stringify({ page: page ?? "settings", at: Date.now() })); } catch {}
     require("child_process").spawn(bin, ["do", "mod.open", "--name", "vscode-settings"], { stdio: "ignore", detached: true }).on("error", () => {}).unref();
   }
   // After each input event: restart the auto-save timer when the text changed.
@@ -754,8 +763,8 @@ class Editor {
     if (this.panel?.focused && this.panel.key(ev, this)) return;
     if (ev.type === "text") return this.typed(ev.text);
     if (ev.type === "paste") return this.paste(ev.text);
-    const cmd = C.KEYMAP.get(C.chordOf(ev));
-    if (cmd) return this.runCommand(cmd.id);
+    const id = this.keymap.byChord.get(C.chordOf(ev));
+    if (C.BY_ID.has(id)) return this.runCommand(id);
     const { name, ctrl, shift, alt } = ev, last = this.lines.length - 1;
     if (ev.cmd) {
       switch (name) {
@@ -1111,6 +1120,9 @@ async function main() {
   const ed = new Editor(file, doc, { grammar: null, colorMap: [], textmate: { INITIAL: null } }, theme, scope, settings.values);
   ed.language = L.languageName(index.scopes[scope] ? scope : null);
   ed.settingsStamp = settings.stamp;
+  const keys = K.live();
+  ed.keymap = keys.keymap;
+  if (keys.error) ed.say(keys.error, ed.colors.warn, 6000);
 
   let restored = false;
   const restore = () => {
@@ -1149,7 +1161,11 @@ async function main() {
   ed.redraw = () => { ed.afterEvent(); schedule(); };
   ed.onExit = () => { restore(); process.exit(0); };
   Lang.setApplyEdit((ws) => { ed.applyEdit(ws); schedule(); return true; });
-  setInterval(() => { if (ed.pollSettings()) schedule(); }, 2000).unref();
+  setInterval(() => {
+    const rebound = keys.poll();
+    if (rebound) { ed.keymap = keys.keymap; if (keys.error) ed.say(keys.error, ed.colors.warn, 6000); }
+    if (ed.pollSettings() || rebound) schedule();
+  }, 2000).unref();
 
   let pending = "";
   process.stdin.on("data", (chunk) => {

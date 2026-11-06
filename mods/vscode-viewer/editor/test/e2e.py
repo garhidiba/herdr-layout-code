@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """End-to-end: runs vsedit.cjs in a 100x30 pseudo-terminal, types, saves, quits, and checks colors against tokenize.cjs;
-scrollbars (editor and hex viewer), the context menu, Kitty ⌘ keys, tsserver definition/references/rename, gofmt, the save dialog, auto save and hot exit.
+scrollbars (editor and hex viewer), the context menu, Kitty ⌘ keys, user keybindings, tsserver definition/references/rename, gofmt, the save dialog, auto save and hot exit.
 usage: python3 -I mods/vscode-viewer/editor/test/e2e.py"""
 import fcntl, json, os, pty, re, select, shutil, signal, struct, subprocess, sys, tempfile, termios, time
 
@@ -228,6 +228,35 @@ def run_menu_and_cmd_save(tmp):
     assert "do terminal.right_click --to menu --terminal term-7" in calls, calls
     assert "do mod.open --name vscode-settings" in calls, calls
     print("menu + ⌘S: ok")
+
+
+def run_keybindings(tmp):
+    """vscode-keybindings.json rebinds Delete Line to ⌘⇧D (Kitty CSI-u) and removes its ⌘⇧K default; the file is read
+    again while the editor runs."""
+    kb = ISOLATED["VSEDIT_KEYBINDINGS"]
+    os.makedirs(os.path.dirname(kb), exist_ok=True)
+    open(kb, "w").write('// mine\n[{ "key": "cmd+shift+d", "command": "editor.action.deleteLines" },\n'
+                        ' { "key": "cmd+shift+k", "command": "-editor.action.deleteLines" }]\n')
+    file = os.path.join(tmp, "keys.txt")
+    open(file, "w").write("one\ntwo\nthree\n")
+    t = Term(file)
+    assert t.read("Ln 1, Col 1"), "no first frame"
+    t.send("\x1b[107;10u")          # ⌘⇧K: removed, does nothing
+    t.send("\x1b[100;10u")          # ⌘⇧D: Delete Line
+    t.send("\x1b[115;9u")           # ⌘S
+    assert t.read("Saved", timeout=2), "⌘S did not save"
+    assert open(file).read() == "two\nthree\n", open(file).read()
+    open(kb, "w").write("[]\n")
+    time.sleep(2.5)                  # the 2s re-read
+    t.out = b""
+    t.send("\x1b[107;10u")          # ⌘⇧K is Delete Line again
+    t.send("\x1b[115;9u")
+    assert t.read("Saved", timeout=2), "⌘S did not save"
+    assert open(file).read() == "three\n", open(file).read()
+    t.send("\x11")
+    assert t.wait_exit() == 0
+    os.remove(kb)
+    print("keybindings: ok")
 
 
 TS_A = 'export function greet(name: string) {\n  return "hi " + name;\n}\n'
@@ -536,10 +565,11 @@ def run_scrollbars(tmp):
 
 def main():
     tmp = tempfile.mkdtemp(prefix="vsedit-e2e-")
-    ISOLATED.update(VSEDIT_SETTINGS=os.path.join(tmp, "settings", "vscode-settings.json"), VSEDIT_BACKUPS=os.path.join(tmp, "backups"))
+    ISOLATED.update(VSEDIT_SETTINGS=os.path.join(tmp, "settings", "vscode-settings.json"), VSEDIT_BACKUPS=os.path.join(tmp, "backups"),
+                    VSEDIT_KEYBINDINGS=os.path.join(tmp, "settings", "vscode-keybindings.json"))
     try:
         run_tsx(tmp); run_go(tmp); run_crlf(tmp); run_hex(tmp); run_error_page(tmp); run_drag_scroll(tmp); run_minified(tmp); run_scrollbars(tmp)
-        run_menu_and_cmd_save(tmp); run_save_dialog(tmp); run_auto_save(tmp); run_hot_exit(tmp)
+        run_menu_and_cmd_save(tmp); run_save_dialog(tmp); run_auto_save(tmp); run_hot_exit(tmp); run_keybindings(tmp)
         run_format(tmp); run_typescript(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

@@ -5,6 +5,7 @@ const fs = require("fs");
 const { Painter, fit, themePalette } = require("./paint.cjs");
 const { Dialog, Input } = require("./overlays.cjs");
 const { chordOf } = require("./commands.cjs");
+const K = require("./keybindings.cjs");
 const T = require("./terminal.cjs");
 const SB = require("./scrollbar.cjs");
 
@@ -113,8 +114,9 @@ class Reader {
 
 // ---------- viewer ----------
 class HexView {
-  // env: { file, crumbs: [folder, ..., name], colors, clipboard(text) }
+  // env: { file, crumbs: [folder, ..., name], colors, clipboard(text), keys? ({ keymap }: the user's keybindings) }
   constructor(reader, env) {
+    this.keys = { keymap: K.resolve() };
     Object.assign(this, env);
     this.reader = reader; this.size = reader.size;
     this.cursor = 0; this.anchor = null; this.top = 0; this.rows = 24; this.cols = 80;
@@ -143,14 +145,14 @@ class HexView {
     if (ev.type === "mouse") return this.mouse(ev);
     if (ev.type !== "key") return;
     const chord = chordOf(ev), page = this.height * ROW;
-    switch (chord) {
-      case "escape": if (this.anchor !== null) { this.anchor = null; return; } return this.onExit();
-      case "ctrl+q": case "cmd+w": return this.onExit();
-      case "ctrl+g": return this.openGoto();
-      case "ctrl+f": case "cmd+f": return this.openFind();
-      case "f3": case "cmd+g": return this.findNext(false);
-      case "shift+f3": case "shift+cmd+g": return this.findNext(true);
-      case "ctrl+c": case "cmd+c": return this.copy();
+    if (chord === "escape") { if (this.anchor !== null) { this.anchor = null; return; } return this.onExit(); }
+    switch (this.keys.keymap.byChord.get(chord)) { // the editor's commands, on the same (user) keys
+      case "workbench.action.closeActiveEditor": return this.onExit();
+      case "workbench.action.gotoLine": return this.openGoto();
+      case "actions.find": return this.openFind();
+      case "editor.action.nextMatchFindAction": return this.findNext(false);
+      case "editor.action.previousMatchFindAction": return this.findNext(true);
+      case "editor.action.clipboardCopyAction": return this.copy();
     }
     const step = { left: -1, right: 1, up: -ROW, down: ROW, pageup: -page, pagedown: page }[ev.name];
     if (step !== undefined) { if (Math.abs(step) === page) this.scroll(step / ROW); return this.moveTo(this.cursor + step, ev.shift); }
@@ -301,14 +303,15 @@ class BinaryPrompt {
 // opts: { ask, crumbs, clipboard(text) }
 function open(file, { ask = false, crumbs, clipboard }) {
   const fd = fs.openSync(file, "r"), reader = new Reader(fd, fs.fstatSync(fd).size);
-  const env = { file, crumbs, colors: themePalette(), clipboard };
+  const keys = K.live(), poll = setInterval(() => keys.poll(), 2000).unref();
+  const env = { file, crumbs, colors: themePalette(), clipboard, keys };
   return new Promise((resolve, reject) => {
     const viewer = new HexView(reader, env);
     let s = null, app = viewer;
     viewer.onExit = () => { s.end(); process.exit(0); };
-    if (ask) app = new BinaryPrompt(env, () => { app = viewer; }, () => { s.end(); fs.closeSync(fd); resolve("text"); }, viewer.onExit);
+    if (ask) app = new BinaryPrompt(env, () => { app = viewer; }, () => { s.end(); clearInterval(poll); fs.closeSync(fd); resolve("text"); }, viewer.onExit);
     // A read error later on (file removed, disk gone) ends the session and goes to the caller like an open error.
-    const guard = (fn) => (...a) => { try { return fn(...a); } catch (e) { s.end(); try { fs.closeSync(fd); } catch {} reject(e); return ""; } };
+    const guard = (fn) => (...a) => { try { return fn(...a); } catch (e) { s.end(); clearInterval(poll); try { fs.closeSync(fd); } catch {} reject(e); return ""; } };
     s = T.session({ render: guard((r, c) => app.render(r, c)), handle: guard((ev) => app.handle(ev)), hover: guard((ev) => app.hover?.(ev) ?? null) });
     viewer.redraw = s.draw;
   });

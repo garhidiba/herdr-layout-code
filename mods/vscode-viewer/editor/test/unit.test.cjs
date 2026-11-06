@@ -442,3 +442,84 @@ test("a 200 KB minified line is colored piece by piece, the visible window first
   hl.lines[0] = line.slice(0, 15000) + "x" + line.slice(15000); hl.onEdit(0, 1, 1); hl.ensure(1);
   assert.ok(hl.long[0].pieces.length > 0 && hl.long[0].pieces.length <= keep && hl.long[0].pos <= 15000, "typing keeps the pieces before the edit");
 });
+
+// ---------- user keybindings (vscode-keybindings.json) ----------
+const K = require("../keybindings.cjs");
+const press = (ed, name, m = {}) => ed.handle({ type: "key", name, ctrl: !!m.ctrl, shift: !!m.shift, alt: !!m.alt, cmd: !!m.cmd });
+
+test("VS Code key spellings become the editor's chords; two-step chords and unknown modifiers are not keys", () => {
+  assert.equal(K.canon("Cmd+Shift+K"), "shift+cmd+k");
+  assert.equal(K.canon("shift+cmd+k"), "shift+cmd+k");
+  assert.equal(K.canon("meta+alt+up"), "alt+cmd+up");
+  assert.equal(K.canon("ctrl+-"), "ctrl+-");
+  assert.equal(K.canon("ctrl++"), "ctrl++");
+  assert.equal(K.canon("f12"), "f12");
+  assert.equal(K.canon("cmd+k cmd+s"), null);
+  assert.equal(K.canon("hyper+x"), null);
+  assert.equal(K.canon(""), null);
+});
+
+test("a user binding adds a key; the default keys of the command keep working", () => {
+  const km = K.resolve([{ key: "cmd+shift+d", command: "editor.action.deleteLines" }]);
+  assert.equal(km.byChord.get("shift+cmd+d"), "editor.action.deleteLines");
+  assert.equal(km.byChord.get("shift+cmd+k"), "editor.action.deleteLines");
+  assert.equal(km.label("editor.action.deleteLines"), "⇧⌘D"); // menus show the user's key
+});
+
+test("a user binding on a default's key overrides it, and the last binding of a key wins", () => {
+  const km = K.resolve([
+    { key: "cmd+d", command: "editor.action.deleteLines" },
+    { key: "cmd+e", command: "editor.action.commentLine" },
+    { key: "cmd+e", command: "editor.action.selectAll" },
+  ]);
+  assert.equal(km.byChord.get("cmd+d"), "editor.action.deleteLines");
+  assert.equal(km.byChord.get("cmd+e"), "editor.action.selectAll");
+  assert.equal(km.label("editor.action.addSelectionToNextFindMatch"), "⌃D"); // ⌘D is taken; its Ctrl fallback is left
+});
+
+test("\"-command\" removes that command's default for the key, or all its defaults without a key", () => {
+  const one = K.resolve([{ key: "cmd+shift+k", command: "-editor.action.deleteLines" }]);
+  assert.equal(one.byChord.get("shift+cmd+k"), undefined);
+  assert.equal(one.byChord.get("ctrl+shift+k"), "editor.action.deleteLines");
+  const all = K.resolve([{ command: "-editor.action.deleteLines" }]);
+  assert.equal(all.byChord.get("ctrl+shift+k"), undefined);
+  assert.equal(all.label("editor.action.deleteLines"), "");
+  const other = K.resolve([{ key: "cmd+shift+k", command: "-undo" }]); // not that command's key: nothing removed
+  assert.equal(other.byChord.get("shift+cmd+k"), "editor.action.deleteLines");
+});
+
+test("entries that aren't keybindings are skipped and an invalid file falls back to the defaults", () => {
+  const km = K.resolve([null, 3, { key: "cmd+k cmd+s", command: "-undo" }, { key: "cmd+y" }, { key: "cmd+y", command: "" }]);
+  assert.equal(km.byChord.get("cmd+z"), "undo");
+  assert.equal(km.byChord.has("cmd+y"), false);
+  assert.match(K.parseText("{ \"key\": 1 }").error, /not a JSON array/);
+  assert.deepEqual(K.parseText("// mine\n[{ \"key\": \"cmd+e\", \"command\": \"undo\" },]").user, [{ key: "cmd+e", command: "undo" }]);
+  assert.deepEqual(K.parseText(null), { user: [], error: null });
+});
+
+test("the table has one row per binding in effect with its source, and commands without a key", () => {
+  const rows = K.table(K.resolve([{ key: "cmd+shift+k", command: "-editor.action.deleteLines" }, { key: "cmd+shift+d", command: "editor.action.deleteLines" },
+    { key: "cmd+9", command: "my.extension" }]));
+  assert.deepEqual(rows.filter(r => r.id === "editor.action.deleteLines").map(r => [r.key, r.source]), [["ctrl+shift+k", "Default"], ["shift+cmd+d", "User"]]);
+  assert.deepEqual(rows.find(r => r.id === "editor.action.goToTypeDefinition"), { id: "editor.action.goToTypeDefinition", title: "Go to Type Definition", key: "", source: "" });
+  assert.deepEqual(rows.at(-1), { id: "my.extension", title: "", key: "cmd+9", source: "User" });
+});
+
+test("the editor runs the user's key and no longer runs a removed default", async () => {
+  const ed = await plainEditor(["a", "b", "c"]);
+  ed.keymap = K.resolve([{ key: "cmd+shift+d", command: "editor.action.deleteLines" }, { key: "cmd+shift+k", command: "-editor.action.deleteLines" }]);
+  press(ed, "k", { cmd: true, shift: true });
+  assert.deepEqual(ed.lines, ["a", "b", "c"]);
+  press(ed, "d", { cmd: true, shift: true });
+  assert.deepEqual(ed.lines, ["b", "c"]);
+});
+
+test("live() reads the file again when it changes", () => {
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "vsedit-kb-")), "vscode-keybindings.json");
+  const kb = K.live(file);
+  assert.equal(kb.keymap.byChord.get("cmd+e"), undefined);
+  assert.equal(kb.poll(), false);
+  fs.writeFileSync(file, JSON.stringify([{ key: "cmd+e", command: "undo" }]));
+  assert.equal(kb.poll(), true);
+  assert.equal(kb.keymap.byChord.get("cmd+e"), "undo");
+});
