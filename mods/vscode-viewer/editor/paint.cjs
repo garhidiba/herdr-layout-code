@@ -27,6 +27,13 @@ function paletteOf(colors = {}) {
     accent: opaque(colors["focusBorder"]) ?? "#528bff", button: opaque(colors["button.background"]) ?? "#4d78cc",
     border: opaque(colors["editorWidget.border"]) ?? "#3a3f4b", highlight: opaque(colors["list.highlightForeground"]) ?? "#d7dae0",
     peek: opaque(colors["peekViewEditor.background"]) ?? "#1b1d23", peekLine: opaque(colors["list.activeSelectionBackground"]) ?? "#2c313a",
+    // scrollbars (One Dark's values as fallbacks) and the overview-ruler marks on the vertical one
+    slider: blend(colors["scrollbarSlider.background"] ?? "#4e566680", bg),
+    sliderHover: blend(colors["scrollbarSlider.hoverBackground"] ?? "#5a637580", bg),
+    sliderActive: blend(colors["scrollbarSlider.activeBackground"] ?? "#747d9180", bg),
+    rulerFind: blend(colors["editorOverviewRuler.findMatchForeground"] ?? "#d18616", bg),
+    rulerSelection: blend(colors["editorOverviewRuler.selectionHighlightForeground"] ?? "#a0a0a0cc", bg),
+    rulerCursor: opaque(colors["editorCursor.foreground"]) ?? "#528bff",
   };
 }
 // The palette of the installed theme.json (the defaults when it can't be read).

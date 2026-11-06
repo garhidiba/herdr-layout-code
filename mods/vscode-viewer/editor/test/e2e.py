@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """End-to-end: runs vsedit.cjs in a 100x30 pseudo-terminal, types, saves, quits, and checks colors against tokenize.cjs;
-the context menu, Kitty ⌘ keys, tsserver definition/references/rename, gofmt, the save dialog, auto save and hot exit.
+scrollbars (editor and hex viewer), the context menu, Kitty ⌘ keys, tsserver definition/references/rename, gofmt, the save dialog, auto save and hot exit.
 usage: python3 -I mods/vscode-viewer/editor/test/e2e.py"""
 import fcntl, json, os, pty, re, select, shutil, signal, struct, subprocess, sys, tempfile, termios, time
 
@@ -477,11 +477,68 @@ def run_minified(tmp):
     print("minified line colors: ok")
 
 
+BAR_CELL = r"(?:\x1b\[[\d;]*m)*[ ▁-█▉-▏━]"
+
+
+def run_scrollbars(tmp):
+    """A 500-line file has a vertical bar in the last column: dragging the thumb scrolls, a track click jumps, neither moves
+    the cursor; hover reports (1003) repaint only the bar. A long line gets a horizontal bar that drags sideways. The hex
+    viewer has the same vertical bar."""
+    file = os.path.join(tmp, "tall.txt")
+    open(file, "w").write("".join(f"row {i}\n" for i in range(500)))
+    t = Term(file)
+    assert colored_frame(t), "no colored frame"
+    sc = screen_of(t)
+    assert re.search(r"\x1b\[2;100H" + BAR_CELL, sc), "no vertical bar in the last column"
+    assert "\x1b[?1003h" in sc, "hover reports not on"
+    t.out = b""
+    t.send("\x1b[<35;100;2M")                     # buttonless motion onto the thumb: the bar alone repaints
+    assert b"\x1b7" in t.out and b"Ln 1, Col 1" not in t.out, "hover repainted more than the bar"
+    t.out = b""
+    t.send("\x1b[<0;100;2M"); t.send("\x1b[<32;100;16M", wait=0.3); t.send("\x1b[<0;100;16m", wait=0.3)
+    rows = [int(n) for n in re.findall(r"row (\d+)", plain(t))]
+    assert rows and max(rows) > 250, "dragging the thumb did not scroll: " + repr(rows[-3:])
+    assert "Ln 1, Col 1" in plain(t) and "selected" not in plain(t), "the drag moved the cursor"
+    t.out = b""
+    t.send("\x1b[<0;100;29M"); t.send("\x1b[<0;100;29m", wait=0.3)   # the end of the track: jump
+    assert "row 499" in plain(t) and "Ln 1, Col 1" in plain(t), "track click did not jump to the end"
+    t.send("\x11")
+    assert t.wait_exit() == 0
+    assert b"\x1b[?1003l" in t.out[-300:], "hover reports not turned off on exit"
+
+    wide = os.path.join(tmp, "wide.txt")
+    open(wide, "w").write("0123456789" * 40 + "\n")
+    t = Term(wide)
+    assert t.read("Ln 1, Col 1")
+    assert re.search(r"\x1b\[29;7H" + BAR_CELL, screen_of(t)), "no horizontal bar above the status bar"
+    t.out = b""
+    t.send("\x1b[<0;8;29M"); t.send("\x1b[<32;50;29M", wait=0.3); t.send("\x1b[<0;50;29m", wait=0.3)
+    m = re.findall(r"1  (\d{10})", plain(t))
+    assert m and m[-1] != "0123456789", "dragging the horizontal thumb did not scroll: " + repr(m[-1:])
+    assert "Ln 1, Col 1" in plain(t), "the drag moved the cursor"
+    t.send("\x11")
+    assert t.wait_exit() == 0
+
+    blob = os.path.join(tmp, "rows.bin")
+    open(blob, "wb").write(bytes(16 * 1000))
+    t = Term(blob)
+    assert t.read("Decoded Text", timeout=3) and t.read("\x1b[?1003h", timeout=2), "no hex view with hover reports"
+    assert re.search(r"\x1b\[3;100H" + BAR_CELL, screen_of(t)), "no bar in the hex viewer"
+    t.out = b""
+    t.send("\x1b[<0;100;3M"); t.send("\x1b[<32;100;20M", wait=0.3); t.send("\x1b[<0;100;20m", wait=0.3)
+    offs = [int(o, 16) for o in re.findall(r"([0-9a-f]{8})  00", plain(t))]
+    assert offs and max(offs) > 0x1000, "dragging the hex bar did not scroll"
+    assert "Offset 0x0 (0)" in plain(t), "the drag moved the hex cursor"
+    t.send("\x11")
+    assert t.wait_exit() == 0
+    print("scrollbars: ok")
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="vsedit-e2e-")
     ISOLATED.update(VSEDIT_SETTINGS=os.path.join(tmp, "settings", "vscode-settings.json"), VSEDIT_BACKUPS=os.path.join(tmp, "backups"))
     try:
-        run_tsx(tmp); run_go(tmp); run_crlf(tmp); run_hex(tmp); run_error_page(tmp); run_drag_scroll(tmp); run_minified(tmp)
+        run_tsx(tmp); run_go(tmp); run_crlf(tmp); run_hex(tmp); run_error_page(tmp); run_drag_scroll(tmp); run_minified(tmp); run_scrollbars(tmp)
         run_menu_and_cmd_save(tmp); run_save_dialog(tmp); run_auto_save(tmp); run_hot_exit(tmp)
         run_format(tmp); run_typescript(tmp)
     finally:

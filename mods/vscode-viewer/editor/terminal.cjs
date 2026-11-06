@@ -8,7 +8,7 @@ const { which } = require("./lang/proc.cjs");
 // Alternate screen, bracketed paste, SGR mouse, focus reports (1004), Kitty keyboard "disambiguate" (CSI > 1 u: ⌘ keys
 // arrive as CSI-u with the super bit), bar cursor; LEAVE undoes each.
 const ENTER = "\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?1004h\x1b[>1u\x1b[5 q";
-const LEAVE = "\x1b[0m\x1b[<u\x1b[?1004l\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[?2004l\x1b[0 q\x1b]112\x07\x1b[?25h\x1b[?1049l";
+const LEAVE = "\x1b[0m\x1b[<u\x1b[?1004l\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?2004l\x1b[0 q\x1b]112\x07\x1b[?25h\x1b[?1049l";
 
 // `herdr-app <args>` (PATH plus the usual tool folders); `wait` blocks until it ends (at most 1.5 s).
 function herdr(args, wait) {
@@ -26,8 +26,8 @@ function rightClicksTo(to, wait) {
   if (id) herdr(["do", "terminal.right_click", "--to", to, "--terminal", id], wait);
 }
 
-// Runs a full-screen app: { render(rows, cols) -> ANSI text, handle(ev) }. Each input batch is parsed (keys.cjs) and
-// handed over, then a frame is drawn; a split escape sequence that never completes is a plain Esc. Returns
+// Runs a full-screen app: { render(rows, cols) -> ANSI text, handle(ev), hover?(ev) -> text to write | null }. Each input
+// batch is parsed (keys.cjs) and handed over (to hover first: non-null means it took the event), then a frame is drawn; a split escape sequence that never completes is a plain Esc. Returns
 // { draw, end }: draw() schedules a frame; end() restores the terminal and stops listening (idempotent; it also runs
 // on exit, and signals or a closed input end the session and exit).
 function session(app) {
@@ -37,9 +37,13 @@ function session(app) {
   const onData = (chunk) => {
     const { events, rest } = parse(pending + chunk);
     pending = rest;
-    for (const ev of events) app.handle(ev);
+    let changed = false;
+    for (const ev of events) {
+      const out = app.hover?.(ev) ?? null; // hover motion repaints only what changed, without a frame
+      if (out === null) { app.handle(ev); changed = true; } else if (out) process.stdout.write(out);
+    }
     if (pending) setTimeout(() => { if (pending === rest) { pending = ""; app.handle({ type: "key", name: "escape" }); draw(); } }, 50);
-    draw();
+    if (changed || !events.length) draw();
   };
   const quit = (code) => () => { end(); process.exit(code); };
   const handlers = [[process, "exit", () => end()], [process.stdin, "data", onData], [process.stdout, "resize", draw],

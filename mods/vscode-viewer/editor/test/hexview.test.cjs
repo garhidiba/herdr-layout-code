@@ -109,6 +109,18 @@ test("the viewer moves by bytes and rows, extends a selection with Shift and cop
   assert.equal(v.offsetAt(HV.ASCII_COL + 1 + 2, 3), 2, "a click in the ASCII pane maps to its byte");
 });
 
+test("the viewer's scrollbar shows when rows don't fit, and dragging it scrolls without moving the cursor", () => {
+  const mouse = (y, more) => ({ type: "mouse", button: 0, x: 80, y, motion: false, release: false, ...more });
+  const v = new HV.HexView(readerOf(Buffer.alloc(16 * 100)), { file: "x", crumbs: ["x"], colors: require("../paint.cjs").paletteOf({}) });
+  assert.ok(v.render(14, 80).includes("\x1b[3;80H") && v.vbar.shown, "the bar in the last column from the first row");
+  v.handle(mouse(3)); v.handle(mouse(12, { motion: true })); v.handle(mouse(12, { release: true }));
+  assert.equal(v.top, 90, "dragged to the end: the last page");
+  assert.equal(v.cursor, 0);
+  const small = new HV.HexView(readerOf(Buffer.alloc(32)), { file: "x", crumbs: ["x"], colors: require("../paint.cjs").paletteOf({}) });
+  small.render(14, 80);
+  assert.equal(small.vbar.shown, false, "everything fits: no bar");
+});
+
 test("NUL bytes mark a file binary; Open Anyway decodes it as text", () => {
   const f = tmpFile(Buffer.from("a\0b\n"));
   assert.equal(F.load(f).binary, true);

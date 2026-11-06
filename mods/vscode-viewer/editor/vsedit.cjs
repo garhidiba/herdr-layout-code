@@ -27,6 +27,7 @@ const { gitRoot, run, which } = require("./lang/proc.cjs");
 const T = require("./terminal.cjs");
 const HV = require("./hexview.cjs");
 const E = require("./errorpage.cjs");
+const SB = require("./scrollbar.cjs");
 
 // VS Code's "Col": characters before the cursor, tabs counted to the next tab stop.
 function visibleColumn(line, index, tab) {
@@ -71,6 +72,7 @@ class Editor {
     this.clip = { text: "", whole: false };
     this.lastClick = { time: 0, line: -1, col: -1 }; this.dragging = false;
     this.rows = 24; this.cols = 80;
+    this.vbar = new SB.Bar(true); this.hbar = new SB.Bar(false); this.marks = null; // scrollbars, laid out each frame
     this.redraw = () => {}; this.onExit = null; this.autoTimer = null;
   }
 
@@ -101,9 +103,10 @@ class Editor {
   get tab() { return this.indent.size; }
   get head() { return this.sel.head; }
   get empty() { return cmp(this.sel.anchor, this.sel.head) === 0; }
-  get height() { return Math.max(1, this.rows - 2 - (this.panel ? this.panel.height(this) : 0)); }
+  // Text rows and columns, less the scrollbars of the last frame (the row above the status bar, the last column).
+  get height() { return Math.max(1, this.rows - 2 - (this.panel ? this.panel.height(this) : 0) - (this.hbar.shown ? 1 : 0)); }
   get gutter() { return Math.max(3, String(this.lines.length).length) + 3; }
-  get textWidth() { return Math.max(1, this.cols - this.gutter); }
+  get textWidth() { return Math.max(1, this.cols - this.gutter - (this.vbar.shown ? 1 : 0)); }
   range() { return ordered(this.sel.anchor, this.sel.head); }
   say(text, color = this.colors.barFg, ms = 3000) { this.message = { text, color, until: Date.now() + ms }; }
 
@@ -801,9 +804,10 @@ class Editor {
     const line = Math.max(0, Math.min(this.lines.length - 1, this.top + y - 2));
     return { line, col: W.indexAtCol(this.lines[line], Math.max(0, this.left + x - 1 - this.gutter), this.tab) };
   }
-  // How far past the text area a drag pointer is, in cells (the gutter and the last column count as past the side).
+  // How far past the text area a drag pointer is, in cells (the gutter and the last text column count as past the side).
   dragOverflow(x, y) {
-    return { dx: x <= this.gutter ? x - this.gutter - 1 : x >= this.cols ? x - this.cols + 1 : 0,
+    const right = this.gutter + this.textWidth;
+    return { dx: x <= this.gutter ? x - this.gutter - 1 : x >= right ? x - right + 1 : 0,
       dy: y < 2 ? y - 2 : y > this.height + 1 ? y - this.height - 1 : 0 };
   }
   // Extends the dragged selection to the pointer; past an edge, first scrolls toward it (faster the farther out).
@@ -811,18 +815,60 @@ class Editor {
   dragStep() {
     const { x, y } = this.drag, { dx, dy } = this.dragOverflow(x, y);
     if (dy) this.top = Math.max(0, Math.min(this.lines.length - 1, this.top + dy));
-    if (dx) {
-      let widest = 0;
-      for (let l = this.top; l < Math.min(this.lines.length, this.top + this.height); l++) widest = Math.max(widest, W.textWidth(this.lines[l], this.tab));
-      this.left = Math.max(0, Math.min(this.left + dx * 2, Math.max(this.left, widest - this.textWidth + 5)));
-    }
-    const p = this.cellToPos(Math.max(this.gutter + 1, Math.min(x, this.cols)), Math.max(2, Math.min(y, this.height + 1)));
+    if (dx) this.left = Math.max(0, Math.min(this.left + dx * 2, Math.max(this.left, this.widest(this.top, this.height) - this.textWidth + 5)));
+    const p = this.cellToPos(Math.max(this.gutter + 1, Math.min(x, this.gutter + this.textWidth)), Math.max(2, Math.min(y, this.height + 1)));
     this.sel = { anchor: this.sel.anchor, head: p };
     return !!(dx || dy);
   }
   stopDragScroll() { clearInterval(this.dragTimer); this.dragTimer = null; }
+  // Display width of the widest of `count` lines from `top` (a very long line counts its length: exact for ASCII, not walked).
+  widest(top, count) {
+    let w = 0;
+    for (let l = top; l < Math.min(this.lines.length, top + count); l++) { const t = this.lines[l]; w = Math.max(w, t.length > 1000 ? t.length : W.textWidth(t, this.tab)); }
+    return w;
+  }
+  // Shows the vertical bar when the file is taller than the view, the horizontal one when a line in view is wider; the
+  // vertical one scrolls to the last line at the top (VS Code's scroll beyond last line), the horizontal one 5 columns past the widest line.
+  layoutBars() {
+    const base = Math.max(1, this.rows - 2 - (this.panel ? this.panel.height(this) : 0)), n = this.lines.length, widest = this.widest(this.top, base);
+    let v = n > base || this.top > 0;
+    const h = widest > this.cols - this.gutter - (v ? 1 : 0) || this.left > 0;
+    if (h) v ||= n > base - 1;
+    const height = Math.max(1, base - (h ? 1 : 0)), width = Math.max(1, this.cols - this.gutter - (v ? 1 : 0));
+    this.vbar.layout(v, 2, this.cols, height, height, n + height - 1, this.top);
+    this.hbar.layout(h, height + 2, this.gutter + 1, width, width, widest + 5, this.left);
+  }
+  // Overview ruler marks on the vertical bar, like VS Code's: find matches, the selection's other end, the cursor line.
+  rulerMarks(ms) {
+    const n = this.lines.length, len = this.vbar.length, marks = new Array(len).fill(null), c = this.colors;
+    for (const m of ms) marks[SB.markCell(m.line, n, len)] = c.rulerFind;
+    if (!this.empty) marks[SB.markCell(this.sel.anchor.line, n, len)] = c.rulerSelection;
+    marks[SB.markCell(this.head.line, n, len)] = c.rulerCursor;
+    return marks;
+  }
+  // A buttonless motion: the changed bar alone, "" when nothing changed, null for a whole frame (or not a hover).
+  hover(ev) {
+    if (this.popup) return null; // menus highlight under the pointer
+    const out = SB.hover(ev, [[this.vbar, this.marks], [this.hbar, null]], this.colors);
+    return out && (this.peek || this.prompt) ? null : out; // overlays may cover the bars
+  }
+  // Presses, drags and wheels on the scrollbars (never the cursor or a selection); true when the event was theirs.
+  barMouse(ev) {
+    if (this.dragging) return false;
+    if ((ev.button === 64 || ev.button === 65) && this.hbar.contains(ev)) { this.left = Math.max(0, this.left + (ev.button === 64 ? -6 : 6)); return true; }
+    const covered = (this.peek && ev.y >= this.peekRow && ev.y < this.peekRow + this.peek.height) || (this.prompt && ev.y < (this.prompt.replace ? 4 : 3) && ev.x > this.cols - 48);
+    for (const [bar, key] of [[this.vbar, "top"], [this.hbar, "left"]]) {
+      if (covered && bar.drag === null) continue;
+      const pos = bar.mouse(ev);
+      if (pos === undefined) continue;
+      if (pos !== null) this[key] = pos;
+      return true;
+    }
+    return false;
+  }
   mouse(ev) {
     if (this.popup) return void this.popup.mouse(ev, this);
+    if (this.barMouse(ev)) return;
     if (this.panel && this.panel.mouse(ev, this)) return;
     const wheel = ev.button === 64 || ev.button === 65;
     if (wheel && !ev.shift) {
@@ -867,8 +913,9 @@ class Editor {
   // ----- drawing -----
   // budget: ms to spend tokenizing toward the viewport before painting the rest in the default color.
   render(budget = 60) {
-    const P = new Painter(), c = this.colors, height = this.height, width = this.textWidth, gw = this.gutter;
     this.top = Math.max(0, Math.min(this.top, this.lines.length - 1));
+    this.layoutBars();
+    const P = new Painter(), c = this.colors, height = this.height, width = this.textWidth, gw = this.gutter;
     const deadline = Date.now() + budget;
     // long lines get at most 25 ms a frame, so keys are handled between slices
     const done = this.hl.ensure(this.top + height, deadline) & this.hl.ensureLong(this.top, this.top + height, Math.min(deadline, Date.now() + 25));
@@ -895,6 +942,9 @@ class Editor {
       for (let k = mi; k < ms.length && ms[k].line === l; k++) lineMatches.push(ms[k]);
       this.paintLine(P, l, lineBg, ss, se, lineMatches, width);
     }
+    this.marks = this.vbar.shown ? this.rulerMarks(ms) : null;
+    this.vbar.paint(P, c, this.marks);
+    if (this.hbar.shown) { P.move(height + 2, 1); P.text(" ".repeat(this.cols), c.fg, c.bg); this.hbar.paint(P, c); }
 
     if (this.peek) {
       this.peekRow = Math.max(2, Math.min(this.head.line - this.top + 3, height + 2 - this.peek.height));
@@ -904,7 +954,7 @@ class Editor {
     this.renderStatus(P);
     let cursor = this.renderPrompt(P);
     if (this.popup) { this.popup.cursor = null; this.popup.render(P, this); cursor = this.popup.cursor ?? "hide"; }
-    P.out += "\x1b[0m";
+    P.out += "\x1b[0m" + SB.hoverMode(this, this.vbar.shown || this.hbar.shown);
     if (cursor === "hide") P.out += "\x1b[?25l";
     else if (cursor) P.out += `\x1b[${cursor[0]};${cursor[1]}H\x1b[?25h`;
     else {
@@ -1105,10 +1155,14 @@ async function main() {
   process.stdin.on("data", (chunk) => {
     const { events, rest } = parse(pending + chunk);
     pending = rest;
-    for (const ev of events) { ed.handle(ev); ed.afterEvent(); }
+    let changed = !events.length;
+    for (const ev of events) {
+      const out = ed.hover(ev); // hover motion repaints only the bar it changed, without a frame
+      if (out === null) { ed.handle(ev); ed.afterEvent(); changed = true; } else if (out) process.stdout.write(out);
+    }
     // A split escape sequence that never completes was a plain Esc.
     if (pending) setTimeout(() => { if (pending === rest) { pending = ""; ed.handle({ type: "key", name: "escape" }); schedule(); } }, 50);
-    schedule();
+    if (changed) schedule();
   });
   process.stdout.on("resize", schedule);
   ed.offerBackup();

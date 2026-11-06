@@ -6,6 +6,7 @@ const { Painter, fit, themePalette } = require("./paint.cjs");
 const { Dialog, Input } = require("./overlays.cjs");
 const { chordOf } = require("./commands.cjs");
 const T = require("./terminal.cjs");
+const SB = require("./scrollbar.cjs");
 
 // Names that are clearly binary: these skip the prompt and open in hex right away.
 const BINARY_NAME = /(^|\/)\.DS_Store$|\.(png|jpe?g|gif|webp|bmp|ico|icns|tiff?|heic|psd|zip|gz|tgz|bz2|xz|zst|7z|rar|tar|jar|war|dmg|iso|pkg|deb|rpm|exe|dll|so|dylib|o|a|obj|lib|class|pyc|wasm|bin|ttf|otf|woff2?|eot|pdf|sqlite3?|db|mp3|mp4|m4a|mov|avi|mkv|wav|flac|ogg|webm)$/i;
@@ -118,6 +119,7 @@ class HexView {
     this.reader = reader; this.size = reader.size;
     this.cursor = 0; this.anchor = null; this.top = 0; this.rows = 24; this.cols = 80;
     this.popup = null; this.message = null; this.query = ""; this.needle = null;
+    this.vbar = new SB.Bar(true);
   }
   get height() { return Math.max(1, this.rows - 4); } // breadcrumbs, column header, inspector, status bar
   get lastRow() { return Math.max(0, Math.ceil(this.size / ROW) - 1); }
@@ -164,7 +166,10 @@ class HexView {
     const o = (this.top + r) * ROW + i;
     return i === -1 || o >= this.size ? null : o;
   }
+  hover(ev) { return this.popup ? null : SB.hover(ev, [[this.vbar]], this.colors); }
   mouse(ev) {
+    const pos = this.vbar.mouse(ev);
+    if (pos !== undefined) { if (pos !== null) this.top = pos; return; }
     if (ev.button === 64 || ev.button === 65) return this.scroll(ev.button === 64 ? -3 : 3);
     if (ev.button !== 0 || ev.release) return;
     const o = this.offsetAt(ev.x, ev.y);
@@ -227,10 +232,12 @@ class HexView {
       }
       if (x < cols) P.text(" ".repeat(cols - x), c.fg, c.bg);
     }
+    // the vertical scrollbar over the last column, when there are more rows than fit
+    if (this.vbar.layout(this.lastRow >= h || this.top > 0, 3, cols, h, h, this.lastRow + 1, this.top)) this.vbar.paint(P, c);
     this.renderInspector(P, rows - 1);
     this.renderStatus(P);
     if (this.popup) this.popup.render(P, this);
-    return P.out + "\x1b[0m\x1b[?25l";
+    return P.out + "\x1b[0m\x1b[?25l" + SB.hoverMode(this, this.vbar.shown);
   }
   renderInspector(P, row) {
     const c = this.colors;
@@ -302,7 +309,7 @@ function open(file, { ask = false, crumbs, clipboard }) {
     if (ask) app = new BinaryPrompt(env, () => { app = viewer; }, () => { s.end(); fs.closeSync(fd); resolve("text"); }, viewer.onExit);
     // A read error later on (file removed, disk gone) ends the session and goes to the caller like an open error.
     const guard = (fn) => (...a) => { try { return fn(...a); } catch (e) { s.end(); try { fs.closeSync(fd); } catch {} reject(e); return ""; } };
-    s = T.session({ render: guard((r, c) => app.render(r, c)), handle: guard((ev) => app.handle(ev)) });
+    s = T.session({ render: guard((r, c) => app.render(r, c)), handle: guard((ev) => app.handle(ev)), hover: guard((ev) => app.hover?.(ev) ?? null) });
     viewer.redraw = s.draw;
   });
 }
