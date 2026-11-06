@@ -997,3 +997,28 @@ test("block comment pairs follow VS Code's language configurations", () => {
   assert.equal(L.blockCommentOf(null), null);
 });
 
+test("Go to Bracket jumps between partners, to the closer around the cursor, else to the next bracket", async () => {
+  const ed = await jsEditor(["foo(a, [b]) ", 'f(")")']);
+  const go = (col, line = 0) => { ed.moveTo({ line, col }); ed.runCommand("editor.action.jumpToBracket"); return [ed.head.line, ed.head.col]; };
+  assert.deepEqual(go(4), [0, 10]);  // after `(`: before its `)`
+  ed.jumpToBracket();
+  assert.deepEqual([ed.head.line, ed.head.col], [0, 3]); // and back before the `(`
+  assert.deepEqual(go(8), [0, 9]);   // after `[`
+  assert.deepEqual(go(5), [0, 10]);  // inside (…): its closer
+  assert.deepEqual(go(0), [0, 3]);   // before any bracket: the next one
+  assert.deepEqual(go(2, 1), [1, 5]); // the `)` in the string doesn't count
+});
+
+test("Select to Bracket selects the pair with its brackets, backwards from the closer", async () => {
+  const ed = await jsEditor(["foo(a, [b]) x"]);
+  ed.moveTo({ line: 0, col: 5 });
+  ed.runCommand("editor.action.selectToBracket");
+  assert.deepEqual(sel(ed), [0, 3, 0, 11]);
+  ed.moveTo({ line: 0, col: 11 });
+  ed.selectToBracket();
+  assert.deepEqual(sel(ed), [0, 11, 0, 3]);
+  ed.moveTo({ line: 0, col: 12 });
+  ed.selectToBracket(); // nothing around or after: unchanged
+  assert.deepEqual(sel(ed), [0, 12, 0, 12]);
+});
+

@@ -1304,11 +1304,29 @@ class Editor {
   // The bracket at the cursor and its partner ([at, partner] or null), brackets in strings and comments not counting.
   bracketPair() {
     const key = `${this.buf.version}:${this.head.line}:${this.head.col}:${this.hl.validTo}`;
-    if (this._brackets?.key !== key || this._brackets.buf !== this.buf) {
-      const code = (line, col) => { const tk = this.hl.tokens[line]; return !tk || H.tokenTypeOf(tk[H.tokenIndex(tk, col) + 1]) === 0; };
-      this._brackets = { key, buf: this.buf, pair: D.matchBracket(this.lines, this.head, code) };
-    }
+    if (this._brackets?.key !== key || this._brackets.buf !== this.buf) this._brackets = { key, buf: this.buf, pair: D.matchBracket(this.lines, this.head, this.isCode) };
     return this._brackets.pair;
+  }
+  // False inside strings, comments and regexes (by the token type): their brackets don't count. Lines not tokenized yet count as code.
+  isCode = (line, col) => { const tk = this.hl.tokens[line]; return !tk || H.tokenTypeOf(tk[H.tokenIndex(tk, col) + 1]) === 0; };
+  // Go to Bracket (VS Code's jumpToBracket): from the bracket touching the cursor (the one after it first) to the
+  // position before its partner, else to the closer of the pair around the cursor, else to the next bracket.
+  jumpToBracket() {
+    const p = this.range()[0], pair = D.matchBracket(this.lines, p, this.isCode, undefined, true);
+    const touches = (b) => b.line === p.line && (p.col === b.col || p.col === b.col + 1);
+    const to = pair ? pair[touches(pair[1]) ? 0 : 1] : D.enclosingBrackets(this.lines, p, this.isCode)?.[1] ?? D.nextBracket(this.lines, p, this.isCode);
+    if (to) this.moveTo(to);
+  }
+  // Select to Bracket: the pair at the cursor (else around it, else the next one) with its brackets, backwards from the closer.
+  selectToBracket() {
+    const p = this.range()[0];
+    let pair = D.matchBracket(this.lines, p, this.isCode, undefined, true) ?? D.enclosingBrackets(this.lines, p, this.isCode);
+    if (!pair) { const n = D.nextBracket(this.lines, p, this.isCode); pair = n && D.matchBracket(this.lines, n, this.isCode, undefined, true); }
+    if (!pair) return;
+    const [open, close] = cmp(pair[0], pair[1]) < 0 ? pair : [pair[1], pair[0]];
+    const from = open, to = { line: close.line, col: close.col + 1 }, back = close.line === p.line && (p.col === close.col || p.col === to.col);
+    this.sel = back ? { anchor: to, head: from } : { anchor: from, head: to };
+    this.buf.seal(); this.reveal();
   }
   // The word whose occurrences highlight: the one at the cursor once it has rested there WORD_DELAY ms (a redraw is
   // scheduled for then), null before that, while typing or with a selection.

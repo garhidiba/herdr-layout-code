@@ -1,5 +1,6 @@
 // Editor decorations from the text, computed for the visible lines only: indent guides (editor.guides.indentation, with
-// the active one), the matching bracket, and word / selection occurrences. Pure functions over lines.
+// the active one), the matching bracket (and the pair around a position or the next bracket, for Go to Bracket), and
+// word / selection occurrences. Pure functions over lines.
 const { wordOccurrences } = require("./lang/fallback.cjs");
 
 const SCAN = 1000;     // lines walked from a line to find its block or the content around a blank line
@@ -63,11 +64,12 @@ function indentGuides(lines, first, last, size, tab, cursorLine) {
   return out;
 }
 
-// The bracket touching p (the one before it first) and its partner: [at, partner], or null. code(line, col) is false
-// inside strings and comments, whose brackets don't count. At most `limit` characters are scanned.
-function matchBracket(lines, p, code, limit = 20000) {
+// The bracket touching p (the one before it first; after it first with `afterFirst`, as VS Code's Go to Bracket) and its
+// partner: [at, partner], or null. code(line, col) is false inside strings and comments, whose brackets don't count.
+// At most `limit` characters are scanned.
+function matchBracket(lines, p, code, limit = 20000, afterFirst = false) {
   const text = lines[p.line] ?? "";
-  for (const col of [p.col - 1, p.col]) {
+  for (const col of afterFirst ? [p.col, p.col - 1] : [p.col - 1, p.col]) {
     const ch = text[col];
     if (!(BRACKETS[ch] || OPENS[ch]) || !code(p.line, col)) continue;
     const other = partner(lines, { line: p.line, col }, ch, code, limit);
@@ -90,6 +92,33 @@ function partner(lines, at, ch, code, limit) {
   }
   return null;
 }
+// The innermost pair around p: the nearest opener before p that is still open there, and its partner ([open, close]), or null.
+function enclosingBrackets(lines, p, code, limit = 20000) {
+  const depth = { "(": 0, "[": 0, "{": 0 };
+  let line = p.line, col = p.col - 1;
+  for (let budget = limit; budget > 0;) {
+    const t = lines[line] ?? "";
+    for (; col >= 0 && budget > 0; col--, budget--) {
+      const c = t[col];
+      if (!(BRACKETS[c] || OPENS[c]) || !code(line, col)) continue;
+      if (OPENS[c]) depth[OPENS[c]]++;
+      else if (depth[c]) depth[c]--;
+      else { const close = partner(lines, { line, col }, c, code, limit); if (close) return [{ line, col }, close]; }
+    }
+    if (--line < 0) return null;
+    col = lines[line].length - 1; budget--;
+  }
+  return null;
+}
+// The first bracket at or after p ({ line, col }), or null.
+function nextBracket(lines, p, code, limit = 20000) {
+  let line = p.line, col = p.col;
+  for (let budget = limit; budget > 0 && line < lines.length; line++, col = 0, budget--) {
+    const t = lines[line];
+    for (; col < t.length && budget > 0; col++, budget--) if ((BRACKETS[t[col]] || OPENS[t[col]]) && code(line, col)) return { line, col };
+  }
+  return null;
+}
 
 // Whole-word matches of `word` on lines [first, last]: [{ line, col, len }].
 function wordMatches(lines, first, last, word) {
@@ -105,4 +134,4 @@ function textMatches(lines, first, last, text) {
   return out;
 }
 
-module.exports = { leadCols, guideLevels, activeGuide, indentGuides, matchBracket, wordMatches, textMatches };
+module.exports = { leadCols, guideLevels, activeGuide, indentGuides, matchBracket, enclosingBrackets, nextBracket, wordMatches, textMatches };

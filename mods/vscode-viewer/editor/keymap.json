@@ -53,6 +53,8 @@
     {"id":"editor.action.marker.next","title":"Go to Next Problem (Error, Warning, Info)","keys":{"mac":["f8","alt+f8"],"win":["f8","alt+f8"],"linux":["f8","alt+f8"]},"note":"F8 is VS Code's Go to Next Problem in Files (editor.action.marker.nextInFiles); with one file both keys run this command."},
     {"id":"editor.action.marker.prev","title":"Go to Previous Problem (Error, Warning, Info)","keys":{"mac":["shift+f8","alt+shift+f8"],"win":["shift+f8","alt+shift+f8"],"linux":["shift+f8","alt+shift+f8"]},"note":"Shift+F8 is VS Code's Go to Previous Problem in Files; with one file both keys run this command."},
     {"id":"workbench.action.gotoLine","title":"Go to Line/Column...","keys":{"mac":["ctrl+g"],"win":["ctrl+g"],"linux":["ctrl+g"]}},
+    {"id":"editor.action.jumpToBracket","title":"Go to Bracket","keys":{"mac":["shift+cmd+\\"],"win":["ctrl+shift+\\"],"linux":["ctrl+shift+\\"]}},
+    {"id":"editor.action.selectToBracket","title":"Select to Bracket","keys":{"mac":[],"win":[],"linux":[]}},
     {"id":"editor.action.deleteLines","title":"Delete Line","keys":{"mac":["shift+cmd+k"],"win":["ctrl+shift+k"],"linux":["ctrl+shift+k"]}},
     {"id":"editor.action.moveLinesUpAction","title":"Move Line Up","keys":{"mac":["alt+up"],"win":["alt+up"],"linux":["alt+up"]}},
     {"id":"editor.action.moveLinesDownAction","title":"Move Line Down","keys":{"mac":["alt+down"],"win":["alt+down"],"linux":["alt+down"]}},

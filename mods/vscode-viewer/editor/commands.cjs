@@ -65,6 +65,8 @@ const RUNS = {
   "workbench.action.files.save": ["saveFile"],
   "expandLineSelection": ["expandLineSelection"],
   "editor.action.blockComment": ["blockComment"],
+  "editor.action.jumpToBracket": ["jumpToBracket"],
+  "editor.action.selectToBracket": ["selectToBracket"],
   "editor.action.joinLines": ["joinLines"],
   "workbench.action.files.toggleAutoSave": ["toggleAutoSave"],
   "workbench.action.files.setAutoSaveDelay": ["askAutoSaveDelay"],
