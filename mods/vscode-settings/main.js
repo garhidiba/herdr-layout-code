@@ -14,7 +14,7 @@ import { FILE as KB_FILE, fromHerdr, label, matchesRow, conflicts, parseFile, se
   hasUserEntries, herdrRoute, withPassthrough, recordStep } from "./keybindings.js";
 import { createOpenTab } from "./launch.js";
 
-const openTab = createOpenTab({ hc, run, spaces });
+const openTab = createOpenTab({ hc, run, spaces, local: true }); // Settings acts on this computer, whatever space is focused
 const settingsPath = () => `${appHome()}/${FILE}`;
 const kbPath = () => `${appHome()}/${KB_FILE}`;
 const keysPath = () => `${appHome()}/keys.json`;
@@ -175,9 +175,9 @@ export default class Settings extends View {
     });
   }
 
-  buildCore() {
+  buildCore(cx) {
     this.building = true;
-    run("tab.new", { name: "Build Rust core", folder: appHome(), argv: ["sh", `${appHome()}/mods/vscode-settings/build-core.sh`, appHome()] });
+    return openTab({ name: "Build Rust core", folder: appHome(), argv: ["sh", `${appHome()}/mods/vscode-settings/build-core.sh`, appHome()] }, cx);
   }
 
   // The dialog closes once the editor tab is shown: closing first could end the wait (see launch.js).
@@ -256,7 +256,7 @@ export default class Settings extends View {
   statusLine(t, id, status, built, checking, button) {
     return h_flex().gap(10).items_center()
       .child(div().flex_1().text_size(11.5).text_color(built ? t.done : t.dim).child(status ?? checking))
-      .when(button && this.needsBuild(), (el) => el.child(this.button(t, id, this.building ? "Building… (see tab)" : "Build Rust core", () => this.buildCore())));
+      .when(button && this.needsBuild(), (el) => el.child(this.button(t, id, this.building ? "Building… (see tab)" : "Build Rust core", (_e, cx) => cx.spawn((cx) => this.buildCore(cx)))));
   }
 
   // ----- keyboard shortcuts page -----

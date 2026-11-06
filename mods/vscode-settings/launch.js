@@ -4,6 +4,8 @@
 // as that tab instead (Herdr's docs: "A terminal with those labels shows up there"), started straight from `sh -c`;
 // once Herdr shows it, the tab is named and selected. Mod tabs, remote spaces, an hc failure or a tab that never
 // shows up go through tab.new as before.
+// `local` (Settings: its files and the Rust core are on this computer) opens the tab in a space on this computer even
+// while a remote space is focused: tab.new has no machine argument, only `space` (and the new tab's folder is local).
 // The same file is in vscode-explorer and vscode-settings (mods are installed on their own); a test keeps them equal.
 import { randomUUID } from "crypto";
 
@@ -19,18 +21,21 @@ export function directRun({ folder, argv }, { space, tab }) {
 }
 
 // `herdr`'s hc, run and spaces; `newId` makes the tab id. Returns openTab(args, cx), awaitable.
-export function createOpenTab({ hc, run, spaces, newId = () => `tb${randomUUID().replaceAll("-", "")}`, wait = 3000, step = 25 }) {
+export function createOpenTab({ hc, run, spaces, local = false, newId = () => `tb${randomUUID().replaceAll("-", "")}`, wait = 3000, step = 25 }) {
   const hasTab = (space, tab) => spaces().some(s => s.id === space && s.tabs.some(t => t.id === tab));
   return async function openTab(args, cx) {
-    const space = spaces().find(s => s.active);
-    if (!args.argv || !space || space.machine) return run("tab.new", args);
+    const all = spaces(), active = all.find(s => s.active);
+    const space = local && active?.machine ? all.find(s => !s.machine) : active;
+    const tabNew = () => run("tab.new", local && space ? { ...args, space: space.id } : args);
+    if (!args.argv || !space || space.machine) return tabNew();
     const tab = newId();
     const r = await hc(directRun(args, { space: space.id, tab })).catch(() => null);
     let address = null;
     try { address = r?.code === 0 ? JSON.parse(r.stdout).address : null; } catch {}
-    if (!address) return run("tab.new", args);
+    if (!address) return tabNew();
     for (let waited = 0; !hasTab(space.id, tab) && waited < wait; waited += step) await cx.sleep(step);
-    if (!hasTab(space.id, tab)) { await hc(["kill", address]).catch(() => null); return run("tab.new", args); }
+    if (!hasTab(space.id, tab)) { await hc(["kill", address]).catch(() => null); return tabNew(); }
+    if (!space.active) run("space.select", { id: space.id });
     run("tab.rename", { id: tab, name: args.name });
     run("tab.select", { id: tab });
   };

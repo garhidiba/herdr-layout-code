@@ -75,6 +75,39 @@ test("mod tabs and remote spaces open with tab.new as before", async () => {
   assert.deepEqual([h.calls, h.hcCalls], [[["tab.new", editor]], []]);
 });
 
+// Settings' files and Rust core are on this computer: with a remote space focused it uses a local space.
+function localHarness({ hcResult = { code: 0, stdout: '{"address":"t9"}' }, appearsAfter = 1 } = {}) {
+  const calls = [], hcCalls = [];
+  let polls = 0;
+  const spaces = () => [{ id: "box/sp1", machine: "box", active: true, tabs: [] },
+    { id: "sp2", machine: null, active: false, tabs: polls >= appearsAfter ? [{ id: "tbX" }] : [] }];
+  const openTab = createOpenTab({ hc: async (a) => { hcCalls.push(a); return hcResult; }, run: (n, a) => calls.push([n, a]),
+    spaces, local: true, newId: () => "tbX", wait: 100, step: 25 });
+  return { openTab: (args) => openTab(args, { sleep: async () => { polls++; } }), calls, hcCalls };
+}
+
+test("local: a remote space in focus still opens the tab on this computer (local space id, no --on)", async () => {
+  const h = localHarness();
+  await h.openTab(editor);
+  assert.ok(h.hcCalls[0].includes("herdr.space=sp2") && h.hcCalls[0].includes("herdr.tab=tbX"));
+  assert.ok(!h.hcCalls[0].includes("--on") && !h.hcCalls[0].some(a => String(a).includes("box")));
+  assert.deepEqual(h.calls, [["space.select", { id: "sp2" }], ["tab.rename", { id: "tbX", name: "a.ts" }], ["tab.select", { id: "tbX" }]]);
+});
+
+test("local: when hc can't start it, tab.new names the local space, never the remote one", async () => {
+  const h = localHarness({ hcResult: { code: 1, stdout: "" } });
+  await h.openTab(editor);
+  assert.deepEqual(h.calls, [["tab.new", { ...editor, space: "sp2" }]]);
+});
+
+test("local: a local space in focus opens as usual, without space.select", async () => {
+  const h = harness();
+  const openTab = createOpenTab({ hc: async () => ({ code: 0, stdout: '{"address":"t9"}' }), run: (n, a) => h.calls.push([n, a]),
+    spaces: () => [{ id: "sp1", machine: null, active: true, tabs: [{ id: "tbX" }] }], local: true, newId: () => "tbX" });
+  await openTab(editor, { sleep: async () => {} });
+  assert.deepEqual(h.calls.map(c => c[0]), ["tab.rename", "tab.select"]);
+});
+
 test("when hc can't start it, tab.new opens it instead", async () => {
   for (const hcResult of [{ code: 1, stdout: "", stderr: "no core" }, { code: 0, stdout: "not json" }, new Error("spawn")]) {
     const h = harness({ hcResult });
