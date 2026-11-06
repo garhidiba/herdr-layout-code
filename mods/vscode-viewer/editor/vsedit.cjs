@@ -932,7 +932,7 @@ class Editor {
     const [ss, se] = this.range(), empty = this.empty;
     const showMatches = this.prompt?.kind === "find" && this.find.query;
     const ms = showMatches ? this.matches() : [];
-    const guides = this.guidesFor(height);
+    const guides = this.guidesFor(height), brackets = this.bracketPair() ?? [];
     let mi = 0;
 
     // breadcrumbs
@@ -951,7 +951,7 @@ class Editor {
       while (mi < ms.length && ms[mi].line < l) mi++;
       const lineMatches = [];
       for (let k = mi; k < ms.length && ms[k].line === l; k++) lineMatches.push(ms[k]);
-      this.paintLine(P, l, lineBg, ss, se, lineMatches, width, { guide: guides[r] });
+      this.paintLine(P, l, lineBg, ss, se, lineMatches, width, { guide: guides[r], brackets: brackets.filter(b => b.line === l) });
     }
     this.marks = this.vbar.shown ? this.rulerMarks(ms) : null;
     this.vbar.paint(P, c, this.marks);
@@ -984,7 +984,16 @@ class Editor {
     }
     return this._guides.rows;
   }
-  // deco: { guide: { count, active } } for this line.
+  // The bracket at the cursor and its partner ([at, partner] or null), brackets in strings and comments not counting.
+  bracketPair() {
+    const key = `${this.buf.version}:${this.head.line}:${this.head.col}:${this.hl.validTo}`;
+    if (this._brackets?.key !== key || this._brackets.buf !== this.buf) {
+      const code = (line, col) => { const tk = this.hl.tokens[line]; return !tk || H.tokenTypeOf(tk[H.tokenIndex(tk, col) + 1]) === 0; };
+      this._brackets = { key, buf: this.buf, pair: D.matchBracket(this.lines, this.head, code) };
+    }
+    return this._brackets.pair;
+  }
+  // deco: { guide: { count, active }, brackets: [{ col }] } for this line.
   paintLine(P, l, lineBg, ss, se, lineMatches, width, deco = {}) {
     const c = this.colors, text = this.lines[l], g = deco.guide, size = this.tab;
     const selFrom = l < ss.line || l > se.line ? -1 : l === ss.line ? ss.col : 0;
@@ -993,7 +1002,8 @@ class Editor {
     const bgAt = (i) => {
       const m = lineMatches.find(m => i >= m.col && i < m.col + m.len);
       if (m) return cur && cur.line === l && cur.col === m.col ? c.match : c.matchOther;
-      return selFrom !== -1 && i >= selFrom && i < selTo ? c.selection : null;
+      if (selFrom !== -1 && i >= selFrom && i < selTo) return c.selection;
+      return deco.brackets?.some(b => b.col === i) ? c.bracketMatch : null;
     };
     // a guide at every indent step the line has, the active block's in its own color
     const guideAt = g?.count ? (k) => (k % size === 0 && k / size < g.count ? (k / size === g.active ? c.guideActive : c.guide) : null) : null;

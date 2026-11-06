@@ -568,7 +568,8 @@ def bg(hexcolor):
 
 
 def run_decorations(tmp):
-    """Indent guides in the theme's editorIndentGuide colors (the cursor's block in activeBackground)."""
+    """Indent guides in the theme's editorIndentGuide colors (the cursor's block in activeBackground); the bracket pair at
+    the cursor on editorBracketMatch.background."""
     file = os.path.join(tmp, "deco.go")
     open(file, "w").write("package main\n\nfunc main() {\n\tif true {\n\t\tprintln(1)\n\t}\n}\n")
     t = Term(file)
@@ -579,6 +580,11 @@ def run_decorations(tmp):
     assert sgr("#3c4049") + "│" in sc, "no indent guide in editorIndentGuide.background #abb2bf26"
     assert sgr("#626772") + "│" in sc, "no active guide in editorIndentGuide.activeBackground #626772"
     assert "5  │   │   println(1)" in plain(t), "guides not at each indent step"
+    t.out = b""
+    t.send("\x1b[C" * 8)                          # after the ( of println(
+    assert t.read("Ln 5, Col 17", timeout=2)
+    sc = screen_of(t)
+    assert re.search(re.escape(bg("#515a6b")) + r"\((?:\x1b\[[\d;]*m)*1(?:\x1b\[[\d;]*m)*" + re.escape(bg("#515a6b")) + r"\)", sc), "brackets not highlighted"
     t.send("\x11")
     assert t.wait_exit() == 0
     print("decorations: ok")

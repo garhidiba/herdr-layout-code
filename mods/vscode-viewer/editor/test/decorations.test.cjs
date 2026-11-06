@@ -45,3 +45,38 @@ test("the painted frame draws guides in the leading whitespace and on blank line
   ed.sel = { anchor: { line: 1, col: 0 }, head: { line: 2, col: 3 } };
   assert.ok(!plain(ed.render().out).includes("3  │   │   y()"), "a selection hides the guides under it");
 });
+
+// ---------- bracket matching ----------
+const code = () => true;
+test("the bracket before the cursor, else the one after it, is matched with its partner across lines", () => {
+  const lines = ["f(a, [b]) {", "  g(c)", "}"];
+  assert.deepEqual(D.matchBracket(lines, { line: 0, col: 2 }, code), [{ line: 0, col: 1 }, { line: 0, col: 8 }], "after (: before wins");
+  assert.deepEqual(D.matchBracket(lines, { line: 0, col: 5 }, code), [{ line: 0, col: 5 }, { line: 0, col: 7 }], "before [: the one after");
+  assert.deepEqual(D.matchBracket(lines, { line: 2, col: 1 }, code), [{ line: 2, col: 0 }, { line: 0, col: 10 }], "} back to {");
+  assert.equal(D.matchBracket(lines, { line: 1, col: 1 }, code), null, "no bracket at the cursor");
+  assert.equal(D.matchBracket(["(("], { line: 0, col: 1 }, code), null, "unbalanced: no partner");
+});
+
+test("brackets inside strings and comments don't count, by the grammar's token types", async () => {
+  const ed = await editor(['f("(", x) // )', ")"], "source.ts", "/tmp/x.ts");
+  ed.hl.ensure(1);
+  ed.moveTo({ line: 0, col: 2 });
+  assert.deepEqual(ed.bracketPair(), [{ line: 0, col: 1 }, { line: 0, col: 8 }]);
+  ed.moveTo({ line: 0, col: 4 });
+  assert.equal(ed.bracketPair(), null, "the ( in the string is not a bracket");
+});
+
+test("the scan for a partner stops after its character budget", () => {
+  const lines = ["(" + "x".repeat(100) + ")"];
+  assert.equal(D.matchBracket(lines, { line: 0, col: 1 }, code, 50), null);
+  assert.ok(D.matchBracket(lines, { line: 0, col: 1 }, code, 200));
+});
+
+test("both brackets are painted on editorBracketMatch.background", async () => {
+  const ed = await editor(["f(x)"], "source.ts", "/tmp/x.ts");
+  ed.rows = 6; ed.cols = 30;
+  ed.moveTo({ line: 0, col: 2 });
+  const bgOf = (hex) => fgSGR(hex).replace("[38;", "[48;"), out = ed.render().out;
+  assert.ok(out.includes(bgOf(ed.colors.bracketMatch) + "("), "( highlighted");
+  assert.ok(out.includes(bgOf(ed.colors.bracketMatch) + ")"), ") highlighted");
+});

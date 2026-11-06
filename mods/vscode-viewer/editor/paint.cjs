@@ -34,9 +34,10 @@ function paletteOf(colors = {}) {
     rulerFind: blend(colors["editorOverviewRuler.findMatchForeground"] ?? "#d18616", bg),
     rulerSelection: blend(colors["editorOverviewRuler.selectionHighlightForeground"] ?? "#a0a0a0cc", bg),
     rulerCursor: opaque(colors["editorCursor.foreground"]) ?? "#528bff",
-    // indent guides (the theme's, else One Dark's), alpha blended over the background
+    // decorations (the theme's, else One Dark's), alpha blended over the background
     guide: blend(colors["editorIndentGuide.background"] ?? "#abb2bf26", bg),
     guideActive: blend(colors["editorIndentGuide.activeBackground"] ?? "#626772", bg),
+    bracketMatch: blend(colors["editorBracketMatch.background"] ?? colors["editorBracketMatch.border"] ?? "#515a6b", bg),
   };
 }
 // The palette of the installed theme.json (the defaults when it can't be read).

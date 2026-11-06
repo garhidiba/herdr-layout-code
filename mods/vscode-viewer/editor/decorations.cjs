@@ -1,6 +1,8 @@
 // Editor decorations from the text, computed for the visible lines only: indent guides (editor.guides.indentation, with
-// the active one). Pure functions over lines.
+// the active one) and the matching bracket. Pure functions over lines.
 const SCAN = 1000;     // lines walked from a line to find its block or the content around a blank line
+const BRACKETS = { "(": ")", "[": "]", "{": "}" };
+const OPENS = { ")": "(", "]": "[", "}": "{" };
 
 // Display columns of a line's leading whitespace, or -1 for a blank (whitespace-only) line.
 function leadCols(text, tab) {
@@ -59,4 +61,32 @@ function indentGuides(lines, first, last, size, tab, cursorLine) {
   return out;
 }
 
-module.exports = { leadCols, guideLevels, activeGuide, indentGuides };
+// The bracket touching p (the one before it first) and its partner: [at, partner], or null. code(line, col) is false
+// inside strings and comments, whose brackets don't count. At most `limit` characters are scanned.
+function matchBracket(lines, p, code, limit = 20000) {
+  const text = lines[p.line] ?? "";
+  for (const col of [p.col - 1, p.col]) {
+    const ch = text[col];
+    if (!(BRACKETS[ch] || OPENS[ch]) || !code(p.line, col)) continue;
+    const other = partner(lines, { line: p.line, col }, ch, code, limit);
+    if (other) return [{ line: p.line, col }, other];
+  }
+  return null;
+}
+function partner(lines, at, ch, code, limit) {
+  const dir = BRACKETS[ch] ? 1 : -1, other = BRACKETS[ch] ?? OPENS[ch];
+  let depth = 0, { line, col } = at;
+  for (let budget = limit; budget > 0;) {
+    const t = lines[line];
+    for (; col >= 0 && col < t.length && budget > 0; col += dir, budget--) {
+      const c = t[col];
+      if ((c === ch || c === other) && code(line, col) && !(depth += c === ch ? 1 : -1)) return { line, col };
+    }
+    line += dir; budget--;
+    if (line < 0 || line >= lines.length) return null;
+    col = dir > 0 ? 0 : lines[line].length - 1;
+  }
+  return null;
+}
+
+module.exports = { leadCols, guideLevels, activeGuide, indentGuides, matchBracket };
