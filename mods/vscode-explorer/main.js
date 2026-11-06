@@ -6,6 +6,7 @@ import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, window, run, appHome, props, shared } from "herdr";
 import { openArgs } from "./paths.js";
+import { freshRoot, encode, decode } from "./cache.js";
 import { ExplorerMenu, ExplorerDialog, openMenu, refreshKey } from "./menu.js";
 // Herdr starts with PATH=/usr/bin:/bin, so Homebrew/user tools (node, code, codex, trash) are looked up here too.
 const userExec = (cmd, args, opts) => exec("sh", ["-c", 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; exec "$0" "$@"', cmd, ...args], opts);
@@ -19,18 +20,29 @@ function location() {
   const on = f?.pane === null ? (f.terminal?.includes("/") ? f.terminal.split("/")[0] : null) : space?.machine ?? null;
   const cwd = f?.pane === null ? f?.cwd : pane?.terminal ? pane.cwd : null;
   if (cwd) return (lastRoot[space?.id] = { cwd, on, space: space?.id });
-  if (lastRoot[space?.id]) return lastRoot[space?.id];
-  const tabs = new Set((space?.tabs ?? []).map(t => t.id));
-  const first = panes().find(p => tabs.has(p.tab) && p.terminal && p.cwd);
-  return { cwd: first?.cwd || space?.folder, on: space?.machine ?? null, space: space?.id };
+  return lastRoot[space?.id] ?? freshRoot(space, panes());
 }
 const key = () => JSON.stringify(location());
 const PER_FOLDER = 500, TOTAL = 5000;
+// Other spaces' trees load in the background: 3s after start, 2 at a time, again every 10 minutes
+// (and when a space appears), skipping ones loaded in the last 2 minutes.
+const CACHE = "vscode-explorer.cache", FRESH = 120000, PRELOAD_EVERY = 600000, SAVE_EVERY = 60000;
 
 // VS Code's git decoration colors and how severe each state is (a folder shows its worst child).
 const GIT_COLOR = { M: "#e2c08d", A: "#73c991", U: "#73c991", D: "#c74e39", "!": "#e4676b" };
 const GIT_RANK = { U: 1, A: 1, M: 2, D: 3, "!": 4 };
 const gitLetter = (xy) => xy === "??" ? "U" : /U|AA|DD/.test(xy) ? "!" : xy.includes("D") ? "D" : xy.includes("A") ? "A" : "M";
+
+// Every folder above a changed file takes the worst state below it, like VS Code's colored folders and dots.
+function dirtyOf(marks) {
+  const dirty = new Map();
+  // A deleted file colors itself only; VS Code doesn't pass deletions up to the folders.
+  for (const [file, letter] of Object.entries(marks).filter(([, l]) => l !== "D")) for (let i = file.lastIndexOf("/"); i > 0; i = file.lastIndexOf("/", i - 1)) {
+    const folder = file.slice(0, i);
+    if ((GIT_RANK[dirty.get(folder)] ?? 0) < GIT_RANK[letter]) dirty.set(folder, letter);
+  }
+  return dirty;
+}
 
 // Git repos below the folder (up to 3 levels), each with its own status: for a folder that holds many projects.
 // Prints "@@<repo>" then that repo's `status -z`. Untracked folders are collapsed to one entry.
@@ -61,12 +73,40 @@ async function directory(path, on) {
   return out;
 }
 
+// The git state of a folder: its own repo's status plus the repos nested below it, path → letter.
+async function gitMarks(cwd, on) {
+  const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd, on }).catch(() => null);
+  const marks = {};
+  if (top?.code === 0) {
+    // Writes nothing under .git (index lock, fsmonitor cookie): the folder watch would refresh again.
+    const status = await exec("git", ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"], { cwd, on }).catch(() => null);
+    if (status?.code === 0) for (const entry of status.stdout.split("\0").filter(Boolean).slice(0, TOTAL)) {
+      marks[`${top.stdout.trim()}/${entry.slice(3)}`] = gitLetter(entry.slice(0, 2));
+    }
+  }
+  // Projects below this folder that are repos of their own.
+  const nested = await exec("sh", ["-c", NESTED_STATUS, "explorer", cwd], { on }).catch(() => null);
+  if (nested?.code === 0) for (const part of nested.stdout.split("@@").slice(1)) {
+    const nl = part.indexOf("\n"), repo = part.slice(0, nl);
+    for (const entry of part.slice(nl + 1).split("\0").filter(Boolean).slice(0, TOTAL)) {
+      if (entry.length > 3) marks[`${repo}/${entry.slice(3).replace(/\/$/, "").replace(/\n$/, "")}`] ??= gitLetter(entry.slice(0, 2));
+    }
+  }
+  return marks;
+}
+
 export default class Files extends View {
   init(_props, cx) {
     const p = props();
     if (p?.menu) { this.overlay = new ExplorerMenu(cx); return; }
     if (p?.dialog) { this.overlay = new ExplorerDialog(cx); return; }
-    this.saved = new Map();
+    // Every project's last tree from before the restart, so each space shows at once and refreshes behind it.
+    let cache = null;
+    try { cache = localStorage.getItem(CACHE); } catch {}
+    const restored = decode(cache);
+    this.saved = restored.saved;
+    for (const s of this.saved.values()) s.dirty = dirtyOf(s.marks);
+    Object.assign(lastRoot, restored.lastRoot);
     this.entries = new Map(); this.folders = new Set(); this.pending = new Set(); this.marks = {}; this.dirty = new Map();
     this.icons = null;
     cx.spawn(async cx => {
@@ -74,7 +114,59 @@ export default class Files extends View {
       cx.notify();
     });
     this.refresh(cx);
-    cx.timer.every(10000, cx => this.refresh(cx));
+    cx.timer.every(10000, cx => {
+      this.refresh(cx);
+      if (this.known && spaces().some(s => !this.known.has(s.id))) this.preloadAll(cx);
+    });
+    cx.timer.after(3000, cx => this.preloadAll(cx));
+    cx.timer.every(PRELOAD_EVERY, cx => this.preloadAll(cx));
+  }
+
+  // Saves the trees 2s after a change, at most once a minute.
+  changed(cx) {
+    if (this.saving) return;
+    this.saving = true;
+    cx.timer.after(Math.max(2000, (this.savedAt ?? 0) + SAVE_EVERY - Date.now()), () => {
+      this.saving = false; this.savedAt = Date.now();
+      try { localStorage.setItem(CACHE, encode(this.saved, lastRoot)); } catch {}
+    });
+  }
+
+  // Loads every other local space's tree and git state into `saved`, as refresh() would show it there.
+  // Spaces sharing a folder load it once. The shown tree is never touched.
+  preloadAll(cx) {
+    if (this.preloading) return;
+    const all = spaces(), list = panes(), now = Date.now(), roots = new Map();
+    this.known = new Set(all.map(s => s.id));
+    for (const space of all) {
+      if (space.machine) continue;
+      // Pinned, so switching there with an editor tab focused gives this same key.
+      const loc = (lastRoot[space.id] ??= freshRoot(space, list)), k = JSON.stringify(loc);
+      if (!loc.cwd || k === this.context?.key || now - (this.saved.get(k)?.at ?? 0) < FRESH) continue;
+      const root = JSON.stringify([loc.cwd, loc.on]);
+      roots.set(root, [...(roots.get(root) ?? []), k]);
+    }
+    const jobs = [...roots.values()];
+    if (!jobs.length) return;
+    this.preloading = true;
+    cx.spawn(async cx => {
+      const worker = async () => {
+        for (let keys; (keys = jobs.shift());) { await this.preload(keys).catch(() => {}); this.changed(cx); }
+      };
+      try { await Promise.all([worker(), worker()]); } finally { this.preloading = false; }
+    });
+  }
+
+  async preload(keys) {
+    const { cwd, on } = JSON.parse(keys[0]), context = { key: keys[0], cwd, on };
+    const tree = { entries: new Map(), folders: new Set(keys.flatMap(k => [...this.saved.get(k)?.folders ?? []])), limited: false };
+    for (const path of ["", ...tree.folders]) {
+      await this.loadFolder(path, context, tree).catch(e => { if (!path) throw e; tree.folders.delete(path); });
+    }
+    const marks = await gitMarks(cwd, on), dirty = dirtyOf(marks), at = Date.now();
+    for (const k of keys) if (k !== this.context?.key) {
+      this.saved.set(k, { folders: new Set(this.saved.get(k)?.folders), entries: tree.entries, marks, dirty, at });
+    }
   }
 
   // Material Icon Theme: exact file name, then the longest matching extension, then the default.
@@ -103,20 +195,21 @@ export default class Files extends View {
     return this.context === context && key() === context.key;
   }
 
-  async loadFolder(path, context) {
+  // `tree` is the shown one (this) or a background preload's { entries, folders, limited }.
+  async loadFolder(path, context, tree = this) {
     const { on, cwd: root } = context;
     const entries = await directory(path ? `${root}/${path}` : root, on);
-    if (!this.current(context) || (path && !this.folders.has(path))) return;
-    const used = [...this.entries.entries()].filter(([p]) => p !== path).reduce((n, [, e]) => n + e.length, 0);
-    this.entries.set(path, entries.slice(0, Math.max(0, Math.min(PER_FOLDER, TOTAL - used))).sort((a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name)));
-    if (entries.length > PER_FOLDER || used + entries.length > TOTAL) this.limited = true;
+    if ((tree === this && !this.current(context)) || (path && !tree.folders.has(path))) return;
+    const used = [...tree.entries.entries()].filter(([p]) => p !== path).reduce((n, [, e]) => n + e.length, 0);
+    tree.entries.set(path, entries.slice(0, Math.max(0, Math.min(PER_FOLDER, TOTAL - used))).sort((a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name)));
+    if (entries.length > PER_FOLDER || used + entries.length > TOTAL) tree.limited = true;
   }
 
   refresh(cx) {
     const { cwd, on } = location(), next = key();
     if (next !== this.context?.key) {
       // Keep each project's last tree and git state, so coming back shows it at once and only refreshes behind it.
-      if (this.context) this.saved.set(this.context.key, { folders: this.folders, entries: this.entries, marks: this.marks, dirty: this.dirty });
+      if (this.context) this.saved.set(this.context.key, { ...this.saved.get(this.context.key), folders: this.folders, entries: this.entries, marks: this.marks, dirty: this.dirty });
       const saved = this.saved.get(next);
       this.context = { key: next, cwd, on }; this.root = cwd; this.on = on; this.entries = new Map(saved?.entries); this.folders = new Set(saved?.folders);
       this.pending = new Set(); this.marks = saved?.marks ?? {}; this.dirty = new Map(saved?.dirty); this.watched = null; this.error = null; this.limited = false;
@@ -132,32 +225,11 @@ export default class Files extends View {
           if (!this.current(context)) return;
           await this.loadFolder(path, context);
         }
-        const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd, on }).catch(() => null);
-        const marks = {};
-        if (top?.code === 0) {
-          // Writes nothing under .git (index lock, fsmonitor cookie): the folder watch would refresh again.
-          const status = await exec("git", ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"], { cwd, on }).catch(() => null);
-          if (status?.code === 0) for (const entry of status.stdout.split("\0").filter(Boolean).slice(0, TOTAL)) {
-            marks[`${top.stdout.trim()}/${entry.slice(3)}`] = gitLetter(entry.slice(0, 2));
-          }
-        }
-        // Projects below this folder that are repos of their own.
-        const nested = await exec("sh", ["-c", NESTED_STATUS, "explorer", cwd], { on }).catch(() => null);
-        if (nested?.code === 0) for (const part of nested.stdout.split("@@").slice(1)) {
-          const nl = part.indexOf("\n"), repo = part.slice(0, nl);
-          for (const entry of part.slice(nl + 1).split("\0").filter(Boolean).slice(0, TOTAL)) {
-            if (entry.length > 3) marks[`${repo}/${entry.slice(3).replace(/\/$/, "").replace(/\n$/, "")}`] ??= gitLetter(entry.slice(0, 2));
-          }
-        }
+        const marks = await gitMarks(cwd, on);
         if (!this.current(context)) return;
-        // Every folder above a changed file takes the worst state below it, like VS Code's colored folders and dots.
-        const dirty = new Map();
-        // A deleted file colors itself only; VS Code doesn't pass deletions up to the folders.
-        for (const [file, letter] of Object.entries(marks).filter(([, l]) => l !== "D")) for (let i = file.lastIndexOf("/"); i > 0; i = file.lastIndexOf("/", i - 1)) {
-          const folder = file.slice(0, i);
-          if ((GIT_RANK[dirty.get(folder)] ?? 0) < GIT_RANK[letter]) dirty.set(folder, letter);
-        }
-        this.marks = marks; this.dirty = dirty; this.error = null; this.watch(cwd, cx);
+        this.marks = marks; this.dirty = dirtyOf(marks); this.error = null; this.watch(cwd, cx);
+        this.saved.set(context.key, { folders: this.folders, entries: this.entries, marks, dirty: this.dirty, at: Date.now() });
+        this.changed(cx);
       } catch (e) { if (this.current(context)) this.error = String(e); }
       finally { if (this.context === context) this.loading = false; cx.notify(); }
     });
