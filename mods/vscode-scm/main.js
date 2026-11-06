@@ -3,8 +3,9 @@
 // Commits expand to their changed files; a file opens a diff tab (vscode-diff mod).
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list } from "gpui-base";
-import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, run, appHome } from "herdr";
+import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, run, appHome, notify, shared, setShared } from "herdr";
 import { freshRoot, encode, decode } from "./cache.js";
+import { createCore } from "./core.js";
 
 // The project you work in: the focused terminal's folder. Editor and diff tabs have no folder, so focusing
 // them keeps this space's last project instead of reloading; a fresh space starts at its first terminal's folder.
@@ -138,10 +139,23 @@ async function readRepo(repo, root, on) {
   let commits = [];
   if (hasHead) {
     // The branch and, like VS Code's graph, its upstream (only when it still exists: `branch.ab` is there).
-    const log = await git(["log", "--topo-order", "--date-order", "-n", String(COMMITS), LOG_FORMAT, "HEAD", ...(repo?.ahead !== null && repo?.upstream ? [repo.upstream] : []), "--"]);
+    const log = await git(["log", "--topo-order", "--date-order", "-n", String(COMMITS), LOG_FORMAT, "HEAD", ...upstreamOf(repo), "--"]);
     if (log.code === 0) commits = graph(parseLog(log.stdout));
   }
   return { files, limited: entries.length > FILES, hasHead, commits };
+}
+
+// With "core.engine": "rust", vscode-core does the reads (same shapes); each falls back to the JS above when it gives null.
+const core = createCore({ exec, readTextFile, notify, appHome, shared, setShared });
+const upstreamOf = (repo) => repo?.ahead !== null && repo?.upstream ? [repo.upstream] : [];
+const repoList = async (cwd, on) => (await core(["repos", cwd], on)) ?? scanRepos(cwd, on);
+const repoData = async (repo, root, on) => (await core(["repo", root, ...upstreamOf(repo).flatMap((u) => ["--upstream", u])], on)) ?? readRepo(repo, root, on);
+async function commitFiles(root, hash, on) {
+  const fast = await core(["commit-files", root, hash], on);
+  if (fast) return fast;
+  const r = await exec("git", [...READ, "show", "--name-status", "-z", "--format=", "-M", "-m", "--first-parent", hash], { cwd: root, on });
+  if (r.code !== 0) throw new Error(r.stderr.trim());
+  return parseNameStatus(r.stdout).slice(0, FILES);
 }
 
 export default class SourceControl extends View {
@@ -211,13 +225,16 @@ export default class SourceControl extends View {
     });
   }
 
+  // With the Rust core, one `vscode-core all` call reads the repos and the picked repo's changes and graph.
   async preload(context, { cwd, on }) {
-    const { top, repos } = await scanRepos(cwd, on);
+    const current = this.chosen.get(context) ?? this.lastSelected.get(context);
+    const fast = await core(["all", cwd, ...(current ? ["--repo", current] : [])], on);
+    const { top, repos } = fast?.repos ?? await scanRepos(cwd, on);
     if (context === this.context) return;
-    const selected = pickRepo(repos, top, this.chosen.get(context) ?? this.lastSelected.get(context));
+    const selected = pickRepo(repos, top, current);
     this.seen.set(context, { repos, at: Date.now() }); this.lastSelected.set(context, selected);
     if (!selected || selected === this.selected || Date.now() - (this.repoCache.get(selected)?.at ?? 0) < FRESH) return;
-    const data = await readRepo(repos.find((r) => r.path === selected), selected, on), old = this.repoCache.get(selected);
+    const data = (fast?.selected === selected && fast.repo) || await readRepo(repos.find((r) => r.path === selected), selected, on), old = this.repoCache.get(selected);
     if (selected !== this.selected) this.repoCache.set(selected, { ...data, expanded: old?.expanded ?? new Set(), commitFiles: old?.commitFiles ?? new Map(), at: Date.now() });
   }
 
@@ -258,7 +275,7 @@ export default class SourceControl extends View {
     this.loading = true; this.queued = false; this.last = Date.now();
     cx.spawn(async (cx) => {
       try {
-        const { top, repos } = await scanRepos(cwd, on);
+        const { top, repos } = await repoList(cwd, on);
         if (key() !== context) return;
         const selected = pickRepo(repos, top, this.selected);
         this.repos = repos; this.error = repos.length ? null : "No git repositories in this folder";
@@ -277,7 +294,7 @@ export default class SourceControl extends View {
   }
 
   async loadRepo(context, root) {
-    const data = await readRepo(this.repos.find((r) => r.path === root), root, this.on);
+    const data = await repoData(this.repos.find((r) => r.path === root), root, this.on);
     if (key() !== context || this.selected !== root) return;
     Object.assign(this, data);
     this.repoCache.set(root, { ...data, expanded: this.expanded, commitFiles: this.commitFiles, at: Date.now() });
@@ -299,9 +316,7 @@ export default class SourceControl extends View {
       files.set(row.hash, "Loading…");
       cx.spawn(async (cx) => {
         try {
-          const r = await exec("git", [...READ, "show", "--name-status", "-z", "--format=", "-M", "-m", "--first-parent", row.hash], { cwd: root, on });
-          if (r.code !== 0) throw new Error(r.stderr.trim());
-          const list = parseNameStatus(r.stdout).slice(0, FILES);
+          const list = await commitFiles(root, row.hash, on);
           files.set(row.hash, list.length ? list : "No changed files");
         } catch (e) { files.set(row.hash, `Cannot list the files: ${e}`); }
         if (this.context === context && this.selected === root) cx.notify();

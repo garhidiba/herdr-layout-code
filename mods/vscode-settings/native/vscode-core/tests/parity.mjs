@@ -56,7 +56,7 @@ function lift(file, names, methods = []) {
 }
 const load = (source, names, env) => new Function(...Object.keys(env), `${source}\nreturn { ${names.join(", ")} };`)(...Object.values(env));
 
-const scmNames = ["READ", "ROW", "gitLetter", "REPOS", "parseRepos", "scanRepos", "pickRepo", "LOG_FORMAT", "parseLog", "parseRefs", "graph", "NAME_STATUS", "parseNameStatus", "readRepo"];
+const scmNames = ["READ", "ROW", "gitLetter", "REPOS", "parseRepos", "scanRepos", "pickRepo", "LOG_FORMAT", "parseLog", "parseRefs", "graph", "NAME_STATUS", "parseNameStatus", "upstreamOf", "readRepo"];
 const scm = load(lift("mods/vscode-scm/main.js", scmNames), ["scanRepos", "pickRepo", "readRepo", "parseNameStatus", "READ", "FILES"], { exec });
 const exNames = ["PER_FOLDER", "GIT_RANK", "gitLetter", "dirtyOf", "NESTED_STATUS", "directory", "gitMarks"];
 const ex = load(lift("mods/vscode-explorer/main.js", exNames, ["loadFolder"]), ["dirtyOf", "gitMarks", "loadFolder"], { exec, window: () => ({ platform: "macos" }) });
