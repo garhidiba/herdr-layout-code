@@ -1318,3 +1318,64 @@ test("the light bulb shows in the gutter of the cursor line once its problems ha
   ed.moveTo({ line: 1, col: 0 });
   assert.doesNotMatch(ed.render(0).out, /◆/, "a line without problems has none");
 });
+
+// ---------- medium batch: hover ----------
+const O = require("../overlays.cjs");
+const { hoverText } = require("../lang/lsp.cjs");
+
+test("hover Markdown becomes plain lines: code blocks kept, marks and links dropped, wrapped at the width", () => {
+  const md = "```typescript\nfunction greet(name: string): string\n```\n\nSays **hi** to `name`, see {@link Foo the foo} and [docs](http://x).\n\n\n\n*@param* — name\n\n---\nlast";
+  assert.deepEqual(O.markdownLines(md, 20), [
+    { text: "function greet(name:", code: true }, { text: " string): string", code: true }, { text: "" },
+    { text: "Says hi to name, see" }, { text: "the foo and docs." }, { text: "" }, { text: "@param — name" }, { text: "" },
+    { text: "─".repeat(20), rule: true }, { text: "last" }]);
+  assert.equal(hoverText({ kind: "markdown", value: "**x**" }), "**x**");
+  assert.equal(hoverText([{ language: "rust", value: "fn f()" }, "docs"]), "```rust\nfn f()\n```\n\ndocs");
+  assert.equal(hoverText(null), "");
+});
+
+test("Show Hover (⌘K ⌘I) shows the problem, then the type and docs, above the word; the next key closes it, Esc only that", async () => {
+  const p = problem(0, 8, 0, 9, 1, "Cannot find name 'b'.");
+  const ed = await withProblems(["", "", "", "let a = 1;", "let c = b;"], [{ ...p, start: { line: 4, col: 8 }, end: { line: 4, col: 9 } }]);
+  ed.session = stubSession({ hover: async (ctx) => ({ contents: `\`\`\`ts\nlet ${ctx.word}: number\n\`\`\`\nThe docs.` }) }, ["hover"], ed.problems());
+  ed.moveTo({ line: 4, col: 8 });
+  press(ed, "k", { cmd: true }); await press(ed, "i", { cmd: true });
+  const screen = ed.render(0).out.replace(/\x1b\[[\d;:]*m/g, "");
+  assert.match(screen, /Cannot find name 'b'\. {2}ts\(1\)[^]*let b: number[^]*The docs\./);
+  assert.ok(ed.hoverBox.box(ed).y < 6, "above the cursor line");
+  press(ed, "escape");
+  assert.equal(ed.hoverBox, null);
+  assert.deepEqual(ed.head, { line: 4, col: 8 });
+  await ed.runCommand("editor.action.showHover");
+  press(ed, "right");
+  assert.equal(ed.hoverBox, null);
+  assert.equal(ed.head.col, 9, "the key still does its work");
+  ed.session = stubSession({ hover: async () => null }, ["hover"]);
+  ed.moveTo({ line: 3, col: 4 });
+  await ed.runCommand("editor.action.showHover");
+  assert.equal(ed.hoverBox, null);
+  assert.equal(ed.message.text, "No hover information");
+});
+
+test("the mouse resting 300 ms on a word shows its hover (editor.hover.enabled), leaving the word closes it", async () => {
+  const ed = await plainEditor(["alpha beta", ""]);
+  ed.rows = 12; ed.cols = 80;
+  ed.session = stubSession({ hover: async (ctx) => ({ contents: `about ${ctx.word}` }) }, ["hover"]);
+  ed.render(0);
+  const at = (x, y) => ed.hover({ type: "mouse", motion: true, button: 3, x, y });
+  at(ed.gutter + 8, 2); // over "beta"
+  await new Promise(r => setTimeout(r, 360));
+  assert.equal(ed.hoverBox?.markdown, "about beta");
+  assert.equal(ed.hoverBox.source, "mouse");
+  at(ed.gutter + 9, 2); // still on beta: stays
+  assert.ok(ed.hoverBox);
+  at(ed.gutter + 30, 2); // past the line's end
+  assert.equal(ed.hoverBox, null);
+  ed.settings = { ...ed.settings, "editor.hover.enabled": false };
+  at(ed.gutter + 2, 2);
+  await new Promise(r => setTimeout(r, 360));
+  assert.equal(ed.hoverBox, null, "off: no mouse hover");
+  assert.equal(S.normalize({})["editor.hover.enabled"], true);
+  assert.equal(S.normalize({ "editor.hover.enabled": 0 })["editor.hover.enabled"], true);
+  assert.equal(K.resolve([], "linux").byChord.get("ctrl+k ctrl+i"), "editor.action.showHover");
+});

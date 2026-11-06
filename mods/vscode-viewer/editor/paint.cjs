@@ -29,6 +29,7 @@ function paletteOf(colors = {}) {
     toggleOn: blend(colors["inputOption.activeBackground"] ?? (opaque(colors["focusBorder"]) ?? "#528bff") + "66", opaque(colors["editorWidget.background"]) ?? "#21252b"),
     toggleFg: opaque(colors["inputOption.activeForeground"]) ?? "#ffffff",
     border: opaque(colors["editorWidget.border"]) ?? "#3a3f4b", highlight: opaque(colors["list.highlightForeground"]) ?? "#d7dae0",
+    hoverBg: opaque(colors["editorHoverWidget.background"]) ?? "#21252b", hoverBorder: opaque(colors["editorHoverWidget.border"]) ?? "#454545",
     lightBulb: opaque(colors["editorLightBulb.foreground"]) ?? "#ffcc00",
     peek: opaque(colors["peekViewEditor.background"]) ?? "#1b1d23", peekLine: opaque(colors["list.activeSelectionBackground"]) ?? "#2c313a",
     // scrollbars (One Dark's values as fallbacks) and the overview-ruler marks on the vertical one

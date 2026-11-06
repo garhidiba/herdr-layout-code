@@ -68,6 +68,7 @@ const DOC_FIELDS = ["file", "doc", "buf", "hl", "indent", "scope", "language", "
 const GIT_GLYPHS = { added: "▎", modified: "▎", deletedBelow: "▁", deletedAbove: "▔" };
 const GIT_COLORS = { added: "gitAdded", modified: "gitModified", deletedBelow: "gitDeleted", deletedAbove: "gitDeleted" };
 const WORD_DELAY = 250; // ms the cursor rests on a word before its occurrences highlight, like VS Code
+const HOVER_DELAY = 300; // ms the pointer rests on a word before its hover shows (VS Code's editor.hover.delay)
 const CURSOR_STACK = 50; // cursor states Cursor Undo keeps, like VS Code
 const NOT_FOUND = { definition: "definition", typeDefinition: "type definition", implementation: "implementation", references: "references" };
 const PEEK_TITLE = { definition: "Definition", typeDefinition: "Type Definition", implementation: "Implementations", references: "References" };
@@ -1003,10 +1004,10 @@ class Editor {
   };
 
   // ----- language features -----
-  langCtx() {
-    const [s, e] = this.range(), { line, col } = this.head;
+  langCtx(p = this.head) {
+    const [s, e] = this.range(), { line, col } = p;
     return { file: this.file, lines: this.lines, line, col, sel: { start: s, end: e }, tabSize: this.tab, insertSpaces: !this.indent.useTabs,
-      word: this.wordAt()?.text ?? "", language: this.language };
+      word: this.wordAt(p)?.text ?? "", language: this.language };
   }
   locate(kind) { return this.lang.run(kind, kind, this.langCtx()); }
   noResult(kind) { const w = this.wordAt()?.text; this.say(`No ${NOT_FOUND[kind]} found${w ? ` for '${w}'` : ""}`, this.colors.warn); }
@@ -1168,6 +1169,35 @@ class Editor {
     return -1;
   }
 
+  // ----- hover (Show or Focus Hover, and the mouse resting on a word while editor.hover.enabled) -----
+  // The problems at p, then the language server's hover there, in a box at the word; dropped when another hover was
+  // asked for or the text changed meanwhile. source: "keyboard" | "mouse" (a mouse hover closes when the pointer leaves).
+  showHover(p = this.head, source = "keyboard") {
+    const token = this.hoverToken = (this.hoverToken ?? 0) + 1, buf = this.buf, version = buf.version;
+    const at = this.wordAt(p)?.start ?? p, problems = this.problemsAt(p).map(d => d.message + (d.source ? `  ${d.source}` : ""));
+    const show = (h) => {
+      if (token !== this.hoverToken || this.buf !== buf || buf.version !== version) return;
+      const md = [...problems, h?.contents].filter(Boolean).join("\n\n---\n\n");
+      this.hoverBox = md ? Object.assign(new O.Hover(md, this.screenOf(at)), { source }) : null;
+      if (!md && source === "keyboard") this.say("No hover information", this.colors.warn);
+    };
+    if (!this.lang.can("hover")) { show(null); return this.redraw(); }
+    return this.track(this.lang.run("hover", "hover", this.langCtx(p)).then(show, () => show(null)));
+  }
+  // A buttonless motion: resting HOVER_DELAY ms on a word (or a problem) of the text shows its hover; moving off it
+  // closes a mouse hover, unless onto the box.
+  mouseHover(ev) {
+    if (this.hoverBox?.contains(ev)) return;
+    const p = !this.prompt && !this.peek && ev.x > this.gutter && ev.y >= 2 && ev.y <= this.height + 1 ? this.cellToPos(ev.x, ev.y) : null;
+    const t = p && this.lines[p.line], over = p && p.col < t.length && W.displayCol(t, p.col, this.tab) === this.left + ev.x - 1 - this.gutter;
+    const w = over && (classOf(t[p.col]) === 1 ? this.wordAt(p) : this.problemsAt(p).length ? { start: p } : null);
+    const key = w ? `${p.line}:${w.start.col}` : null;
+    if (key === this.hoverKey) return;
+    this.hoverKey = key; clearTimeout(this.hoverTimer);
+    if (this.hoverBox?.source === "mouse") { this.hoverBox = null; this.hoverToken = (this.hoverToken ?? 0) + 1; this.redraw(); }
+    if (w && this.settings["editor.hover.enabled"]) (this.hoverTimer = setTimeout(() => this.showHover(p, "mouse"), HOVER_DELAY)).unref?.();
+  }
+
   // ----- folding -----
   // Foldable ranges (folding.cjs, cached per text version); collapsed folds follow them by their header line.
   foldRanges() {
@@ -1253,6 +1283,7 @@ class Editor {
     if (ev.type === "focus") return this.focusChanged(ev.focused);
     if (ev.type === "mouse") return this.mouse(ev);
     if (this.chordPrefix) return this.chordKey(ev);
+    if (this.hoverBox && !this.popup) { this.hoverBox = null; if (ev.type === "key" && ev.name === "escape") return; } // any key closes the hover; Esc only that
     if (this.popup) return void this.popup.key(ev, this);
     if (this.prompt) return this.promptKey(ev);
     if (this.peek && this.peek.key(ev, this)) return;
@@ -1347,6 +1378,7 @@ class Editor {
     if (ev.type === "mouse" && ev.motion && ev.button === 3) { // the fold chevrons show while the pointer is on the gutter
       const over = ev.x <= this.gutter && ev.y >= 2 && ev.y <= this.height + 1;
       if (over !== !!this.gutterHover) { this.gutterHover = over; this.redraw(); }
+      this.mouseHover(ev);
     }
     const out = SB.hover(ev, [[this.vbar, this.marks], [this.hbar, null]], this.colors);
     return out && (this.peek || this.prompt) ? null : out; // overlays may cover the bars
@@ -1367,6 +1399,7 @@ class Editor {
   }
   mouse(ev) {
     if (this.popup) return void this.popup.mouse(ev, this);
+    if (this.hoverBox && !ev.motion && !ev.release) this.hoverBox = null; // a click or the wheel closes the hover
     if (this.findMouse(ev)) return;
     if (this.barMouse(ev)) return;
     if (this.panel && this.panel.mouse(ev, this)) return;
@@ -1476,6 +1509,7 @@ class Editor {
       this.peek.render(P, this, this.peekRow);
     }
     if (this.panel) this.panel.render(P, this);
+    this.hoverBox?.render(P, this);
     this.renderStatus(P);
     let cursor = this.renderPrompt(P);
     if (this.popup) { this.popup.cursor = null; this.popup.render(P, this); cursor = this.popup.cursor ?? "hide"; }

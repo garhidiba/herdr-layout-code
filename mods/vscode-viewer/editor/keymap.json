@@ -12,6 +12,7 @@
     {"id":"references-view.findReferences","title":"Find All References","keys":{"mac":["alt+shift+f12"],"win":["alt+shift+f12"],"linux":["alt+shift+f12"]}},
     {"id":"references-view.findImplementations","title":"Find All Implementations","keys":{"mac":[],"win":[],"linux":[]}},
     {"id":"references-view.showCallHierarchy","title":"Show Call Hierarchy","keys":{"mac":["alt+shift+h"],"win":["alt+shift+h"],"linux":["alt+shift+h"]}},
+    {"id":"editor.action.showHover","title":"Show or Focus Hover","keys":{"mac":["cmd+k cmd+i"],"win":["ctrl+k ctrl+i"],"linux":["ctrl+k ctrl+i"]}},
     {"id":"editor.action.rename","title":"Rename Symbol","keys":{"mac":["f2"],"win":["f2"],"linux":["f2"]}},
     {"id":"editor.action.changeAll","title":"Change All Occurrences","keys":{"mac":["cmd+f2"],"win":["ctrl+f2"],"linux":["ctrl+f2"]}},
     {"id":"editor.action.formatDocument","title":"Format Document","keys":{"mac":["alt+shift+f"],"win":["alt+shift+f"],"linux":["ctrl+shift+i"]}},

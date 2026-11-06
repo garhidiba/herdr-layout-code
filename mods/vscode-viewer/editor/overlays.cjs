@@ -1,5 +1,5 @@
 // Editor overlays drawn over the text: context menu (also the quick fix menu), quick pick (files / commands), input box,
-// modal dialog, results panel (references, implementations, calls) and the peek box. Each has render(P, ed), key(ev, ed) and
+// modal dialog, results panel (references, implementations, calls), the peek box and the hover box. Each has render(P, ed), key(ev, ed) and
 // mouse(ev, ed); key/mouse return true when they consumed the event. They act on the editor only through its methods.
 const path = require("path");
 const W = require("./width.cjs");
@@ -330,4 +330,63 @@ class Peek {
   }
 }
 
-module.exports = { Menu, Picker, Input, Dialog, Panel, Peek };
+// ---------- hover ----------
+// Hover Markdown as terminal lines [{ text, code?, rule? }], each at most `width` cells: code blocks keep their lines,
+// other text loses its Markdown marks (headings, emphasis, inline code ticks, links and JSDoc {@link}s to their text,
+// escapes) and wraps at spaces; runs of blank lines become one, none at the ends.
+function markdownLines(md, width) {
+  const out = [];
+  let fence = false;
+  const push = (line) => { if (line.text || (out.length && out.at(-1).text)) out.push(line); };
+  const hardWrap = (line, code) => { // pieces of at most `width` cells; the last one is returned
+    for (;;) {
+      let i = 0, w = 0;
+      for (const ch of line) { const cw = W.charWidth(ch.codePointAt(0)); if (w + cw > width) break; w += cw; i += ch.length; }
+      if (i >= line.length) return line;
+      push(code ? { text: line.slice(0, i), code } : { text: line.slice(0, i) }); line = line.slice(i);
+    }
+  };
+  for (const raw of md.replace(/\r\n?/g, "\n").split("\n")) {
+    if (/^\s*(```|~~~)/.test(raw)) { fence = !fence; continue; }
+    if (fence) { push({ text: hardWrap(raw.replace(/\t/g, "    "), true), code: true }); continue; }
+    if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(raw)) { push({ text: "─".repeat(width), rule: true }); continue; }
+    const text = raw.replace(/^\s{0,3}#{1,6}\s+/, "").replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+      .replace(/\{@link(?:code|plain)?\s+([^}|\s]+)[|\s]?([^}]*)\}/g, (_, target, label) => label.trim() || target)
+      .replace(/(\*\*|__)(.+?)\1/g, "$2").replace(/(^|[^\w*])[*_](?=\S)(.+?)[*_](?![\w*])/g, "$1$2").replace(/`([^`]+)`/g, "$1")
+      .replace(/\\([\\`*_{}[\]()#+\-.!|<>])/g, "$1").replace(/&nbsp;/g, " ").replace(/<br\s*\/?>/gi, "").trimEnd();
+    let line = "";
+    for (const word of text.split(/(?<=\S)(?= )/)) { // words keep the spaces before them, so indentation stays
+      if (line && W.textWidth(line + word, 8) > width) { push({ text: line }); line = word.trimStart(); } else line += word;
+      line = hardWrap(line, false);
+    }
+    push({ text: line });
+  }
+  while (out.length && !out.at(-1).text) out.pop();
+  return out;
+}
+
+// Markdown in a box over the text, above `at` (the screen cell of the hovered word) or below it without room there;
+// not modal: the editor closes it on the next key or when the pointer leaves.
+class Hover {
+  static ROWS = 14; // VS Code's 250px
+  constructor(markdown, at) { this.markdown = markdown; this.at = at; }
+  box(ed) {
+    const max = Math.max(10, Math.min(ed.cols - 2, 80)), lines = markdownLines(this.markdown, max - 2);
+    const w = Math.min(max, Math.max(...lines.map(l => (l.rule ? 0 : W.textWidth(l.text, 8)))) + 4), rows = Math.min(lines.length, Hover.ROWS, ed.rows - 4);
+    const h = rows + 2, y = this.at.row - h >= 1 ? this.at.row - h : Math.min(this.at.row + 1, ed.rows - h);
+    return { x: Math.max(1, Math.min(this.at.col - 1, ed.cols - w + 1)), y, w, h, lines: lines.slice(0, rows), more: lines.length > rows };
+  }
+  render(P, ed) {
+    const c = ed.colors, b = this.box(ed), inner = b.w - 2;
+    this.rect = b;
+    frame(P, ed, b.x, b.y, b.w, b.h, c.hoverBorder);
+    b.lines.forEach((l, i) => {
+      P.move(b.y + 1 + i, b.x + 1);
+      const last = b.more && i === b.lines.length - 1;
+      P.text(l.rule ? "─".repeat(inner) : fit(" " + (last ? "…" : l.text), inner), l.rule ? c.border : l.code ? c.highlight : c.fg, c.hoverBg);
+    });
+  }
+  contains(ev) { const r = this.rect; return !!r && inside(ev, r.x, r.y, r.w, r.h); }
+}
+
+module.exports = { Menu, Picker, Input, Dialog, Panel, Peek, Hover, markdownLines };

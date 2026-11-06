@@ -18,6 +18,12 @@ function locations(result) {
   }).filter(Boolean);
 }
 
+// Hover contents (MarkupContent | MarkedString | MarkedString[]) -> Markdown; a language's MarkedString becomes a code block.
+function hoverText(contents) {
+  const one = (c) => (typeof c === "string" ? c : c?.language ? "```" + c.language + "\n" + c.value + "\n```" : c?.value ?? "");
+  return [].concat(contents ?? []).map(one).filter(Boolean).join("\n\n");
+}
+
 // WorkspaceEdit -> { file: edits } (create/rename/delete file operations are not supported and skipped).
 function workspaceEdit(we) {
   const ws = {};
@@ -40,10 +46,10 @@ function diagnosticsOf(params) {
 const OPS = { definition: "definitionProvider", typeDefinition: "typeDefinitionProvider", implementation: "implementationProvider",
   references: "referencesProvider", rename: "renameProvider", format: "documentFormattingProvider", refactor: "codeActionProvider",
   source: "codeActionProvider", callHierarchy: "callHierarchyProvider", symbols: "documentSymbolProvider", quickFix: "codeActionProvider",
-  selectionRange: "selectionRangeProvider", formatRange: "documentRangeFormattingProvider" };
+  hover: "hoverProvider", selectionRange: "selectionRangeProvider", formatRange: "documentRangeFormattingProvider" };
 const METHOD_OP = { "textDocument/definition": "definition", "textDocument/typeDefinition": "typeDefinition", "textDocument/implementation": "implementation",
   "textDocument/references": "references", "textDocument/rename": "rename", "textDocument/formatting": "format", "textDocument/codeAction": "refactor",
-  "textDocument/prepareCallHierarchy": "callHierarchy", "textDocument/documentSymbol": "symbols",
+  "textDocument/prepareCallHierarchy": "callHierarchy", "textDocument/documentSymbol": "symbols", "textDocument/hover": "hover",
   "textDocument/selectionRange": "selectionRange", "textDocument/rangeFormatting": "formatRange" };
 
 const CLIENT_CAPS = {
@@ -52,7 +58,7 @@ const CLIENT_CAPS = {
   textDocument: {
     synchronization: { didSave: true }, definition: { linkSupport: true }, typeDefinition: { linkSupport: true },
     implementation: { linkSupport: true }, references: {}, rename: { prepareSupport: false }, formatting: {}, rangeFormatting: {}, callHierarchy: {},
-    selectionRange: {},
+    hover: { contentFormat: ["markdown", "plaintext"] }, selectionRange: {},
     documentSymbol: { hierarchicalDocumentSymbolSupport: true },
     codeAction: { codeActionLiteralSupport: { codeActionKind: { valueSet: ["", "quickfix", "refactor", "refactor.extract", "refactor.inline", "refactor.rewrite", "source", "source.organizeImports", "source.fixAll"] } },
       resolveSupport: { properties: ["edit"] }, dataSupport: true },
@@ -157,6 +163,7 @@ class Lsp {
   refactors(ctx) { return this.actions(ctx, "refactor"); }
   sourceActions(ctx) { return this.actions(ctx, "source"); }
   quickFixes(ctx) { return this.actions(ctx, "quickfix"); }
+  async hover(ctx) { const h = await this.optional("hover", "textDocument/hover", this.tdp(ctx)); return h ? { contents: hoverText(h.contents) } : null; }
   // Innermost first.
   async selectionRanges(ctx) {
     const out = [];
@@ -186,4 +193,4 @@ class Lsp {
   kill() { this.child.kill(); }
 }
 
-module.exports = { Lsp, locations, workspaceEdit, diagnosticsOf, uri, fileOf };
+module.exports = { Lsp, locations, workspaceEdit, diagnosticsOf, hoverText, uri, fileOf };

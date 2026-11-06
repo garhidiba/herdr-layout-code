@@ -15,6 +15,7 @@ const DEFAULTS = {
   "files.trimTrailingWhitespace": false,
   "files.insertFinalNewline": false,
   "breadcrumbs.enabled": true,       // the top line's folders and the symbols at the cursor
+  "editor.hover.enabled": true,      // the hover after the pointer rests 300 ms on a word
 };
 const AUTO_SAVE = ["off", "afterDelay", "onFocusChange"];
 
@@ -30,7 +31,7 @@ function normalize(raw = {}) {
   if (raw["files.autoSaveDelay"] != null && Number.isFinite(d)) v["files.autoSaveDelay"] = clamp(d, 0.1, 3600);
   const t = Number(raw["editor.tabSize"]);
   if (Number.isInteger(t)) v["editor.tabSize"] = clamp(t, 1, 16);
-  for (const k of ["editor.insertSpaces", "editor.formatOnSave", "files.trimTrailingWhitespace", "files.insertFinalNewline", "breadcrumbs.enabled"])
+  for (const k of ["editor.insertSpaces", "editor.formatOnSave", "files.trimTrailingWhitespace", "files.insertFinalNewline", "breadcrumbs.enabled", "editor.hover.enabled"])
     if (typeof raw[k] === "boolean") v[k] = raw[k];
   return v;
 }

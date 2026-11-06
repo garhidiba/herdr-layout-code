@@ -39,7 +39,7 @@ const EMPTY = /no content|could not find|cannot|not found/i;
 
 class TsServer {
   static CAPS = ["definition", "typeDefinition", "implementation", "references", "rename", "format", "refactor", "source", "callHierarchy", "symbols",
-    "quickFix", "selectionRange", "formatRange"];
+    "quickFix", "hover", "selectionRange", "formatRange"];
   label = "TypeScript server";
 
   constructor(file, root) {
@@ -122,6 +122,14 @@ class TsServer {
       for (const f of fixes) if (!seen.has(f.description)) { seen.add(f.description); out.push({ title: f.description, kind: "quickfix", resolve: async () => wsEdit(f.changes) }); }
     }
     return out;
+  }
+  // quickinfo as VS Code's TypeScript hover shows it: the signature as a code block, then the documentation and the tags.
+  async hover(ctx) {
+    const b = await this.list("quickinfo", at(ctx));
+    if (!b?.displayString) return null;
+    const text = (parts) => (typeof parts === "string" ? parts : (parts ?? []).map(p => p.text).join(""));
+    const tags = (b.tags ?? []).map(t => `*@${t.name}*` + (t.text ? ` — ${text(t.text)}` : ""));
+    return { contents: ["```typescript\n" + b.displayString + "\n```", text(b.documentation), tags.join("\n\n")].filter(Boolean).join("\n\n") };
   }
   // Selection ranges at the cursor, innermost first.
   async selectionRanges(ctx) {
