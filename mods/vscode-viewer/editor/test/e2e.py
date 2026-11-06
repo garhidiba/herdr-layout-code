@@ -939,7 +939,8 @@ def no_lenses(tmp):
     """Settings with CodeLens off, for scenarios that click rows of TypeScript (the lens rows would move them)."""
     file = os.path.join(tmp, "settings", "no-lenses.json")
     os.makedirs(os.path.dirname(file), exist_ok=True)
-    open(file, "w").write('{"editor.codeLens": false}')
+    shared = json.load(open(ISOLATED["VSEDIT_SETTINGS"])) if os.path.exists(ISOLATED["VSEDIT_SETTINGS"]) else {}
+    open(file, "w").write(json.dumps({**shared, "editor.codeLens": False}))  # the shared settings (provider off) kept
     return {"VSEDIT_SETTINGS": file}
 
 
