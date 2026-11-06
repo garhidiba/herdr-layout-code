@@ -79,7 +79,7 @@ Herdr's main layout turned into a VS Code–style workbench: a file explorer wit
   - Clicking a file in Changes opens a diff tab of `HEAD` ↔ the working tree (untracked and new files show as all added, deleted ones as all removed).
   - Clicking a commit in the Graph expands it to its changed files (against its first parent for merges); clicking it again collapses it. The expanded commits are kept across refreshes until the repo changes. Clicking a file there opens a diff tab of the parent ↔ that commit. Every click opens a new tab.
   - **Enter** in the message or the Commit button runs `git add -A` then `git commit -m <message>` in the selected repo, as Herdr's `changes` mod; errors show in `ansi1` under the button. Esc leaves the input.
-  - It refreshes when files change under the folder (at most every 2s) and every 10s, and keeps its folder while an editor or diff tab is focused, so opening a file or diff tab (a mod pane with no folder) does not reload it; it follows the focused pane only in a space without a folder.
+  - It refreshes when files change under the folder (at most every 2s) and every 10s, and keeps its folder while an editor or diff tab is focused, so opening a file or diff tab (a mod pane with no folder) does not reload it; it follows the focused pane only in a space without a folder. Each repo's last changes, graph and expanded commits are kept too, so switching spaces or repos shows them at once and reloads behind them.
 - **Editor:**
   - Typing marks the file dirty (8px `#e5c07b` dot). `cmd-s` (or Save) writes only if the file on disk is still what was loaded.
   - If the disk changed while editing, a banner offers **Reload (discard my edits)** or **Overwrite**. Untouched buffers follow the disk every 3s.

@@ -146,9 +146,11 @@ export default class SourceControl extends View {
     cx.timer.every(10000, (cx) => this.refresh(cx));
   }
 
-  clearRepo() {
-    this.files = []; this.commits = []; this.note = null; this.limited = false; this.hasHead = true;
-    this.expanded = new Set(); this.commitFiles = new Map();
+  // Switching to a repo shows its last changes, graph and expanded commits at once (if seen before) while it reloads.
+  clearRepo(root = null) {
+    const c = root && this.repoCache?.get(root);
+    this.files = c?.files ?? []; this.commits = c?.commits ?? []; this.note = null; this.limited = c?.limited ?? false; this.hasHead = c?.hasHead ?? true;
+    this.expanded = c?.expanded ?? new Set(); this.commitFiles = c?.commitFiles ?? new Map();
     if (this.message) this.input.set_value("");
     this.message = "";
   }
@@ -174,8 +176,9 @@ export default class SourceControl extends View {
     if (context !== this.context) {
       // Each project's last repo list stays, so switching back shows it at once while it refreshes.
       (this.seen ??= new Map()).set(this.context, this.repos);
-      this.context = context; this.on = on; this.repos = this.seen.get(context) ?? []; this.selected = this.chosen.get(context) ?? null;
-      this.clearRepo(); this.error = null; this.watched = null;
+      this.context = context; this.on = on; this.repos = this.seen.get(context) ?? [];
+      this.selected = this.chosen.get(context) ?? this.lastSelected?.get(context) ?? null;
+      this.clearRepo(this.selected); this.error = null; this.watched = null;
     }
     if (!cwd) return;
     this.loading = true; this.queued = false; this.last = Date.now();
@@ -185,7 +188,8 @@ export default class SourceControl extends View {
         if (key() !== context) return;
         const { top, repos } = parseRepos(r.stdout), selected = pickRepo(repos, top, this.selected);
         this.repos = repos; this.error = repos.length ? null : "No git repositories in this folder";
-        if (selected !== this.selected) { this.selected = selected; this.clearRepo(); }
+        if (selected !== this.selected) { this.selected = selected; this.clearRepo(selected); }
+        (this.lastSelected ??= new Map()).set(context, selected);
         this.watch(top || cwd, cx);
         if (selected) await this.loadRepo(context, selected);
       } catch (e) { if (key() === context) this.error = String(e); }
@@ -212,11 +216,12 @@ export default class SourceControl extends View {
     }
     if (key() !== context || this.selected !== root) return;
     this.files = files; this.limited = entries.length > FILES; this.hasHead = hasHead; this.commits = commits;
+    (this.repoCache ??= new Map()).set(root, { files, commits, limited: this.limited, hasHead, expanded: this.expanded, commitFiles: this.commitFiles });
   }
 
   select(path, cx) {
     if (path === this.selected) return;
-    this.selected = path; this.chosen.set(this.context, path); this.clearRepo();
+    this.selected = path; this.chosen.set(this.context, path); this.clearRepo(path);
     this.refresh(cx);
     cx.notify();
   }
