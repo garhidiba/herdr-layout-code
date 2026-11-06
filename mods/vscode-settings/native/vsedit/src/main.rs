@@ -1,5 +1,6 @@
 //! vsedit: the terminal editor of the herdr-layout-vscode mods (mods/vscode-viewer/editor/vsedit.cjs) in Rust.
 //! usage: vsedit <file> [--close-on-exit] [--vscode <dir>] [--fallback <vsedit.cjs>]
+//!        vsedit --serve [--vscode <dir>]   (the tokenizer for the native editor mod: serve.rs)
 //! When it can't start (no grammars, no raw mode) it execs `node <vsedit.cjs>` with the same arguments before
 //! touching the terminal (the launcher, vsedit.sh, passes the path); without --fallback it exits 86 then.
 
@@ -24,6 +25,7 @@ mod language;
 mod overlays;
 mod paint;
 mod scrollbar;
+mod serve;
 mod settings;
 mod smartselect;
 mod symbols;
@@ -72,7 +74,7 @@ fn vscode_dir(arg: Option<String>) -> PathBuf {
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let (mut file, mut vscode, mut js, mut rest) = (None, None, None, vec![]);
+    let (mut file, mut vscode, mut js, mut rest, mut serve) = (None, None, None, vec![], false);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--api" => {
@@ -85,6 +87,7 @@ fn main() {
             }
             "--vscode" => vscode = args.next(),
             "--fallback" => js = args.next(),
+            "--serve" => serve = true,
             _ => {
                 if file.is_none() && !a.starts_with("--") {
                     file = Some(a.clone());
@@ -92,6 +95,9 @@ fn main() {
                 rest.push(a);
             }
         }
+    }
+    if serve {
+        serve::run(vscode_dir(vscode));
     }
     if let Some(js) = js {
         let _ = JS.set((js, rest));
