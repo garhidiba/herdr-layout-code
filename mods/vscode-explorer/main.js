@@ -1,9 +1,12 @@
 // A lazy file explorer for the focused pane's folder, with Material Icon Theme icons.
 // Click a code/text file to edit it in a new terminal tab (vsedit); images, markdown and remote files
-// open in the vscode-viewer mod tab. Cmd+click opens it in VS Code.
+// open in the vscode-viewer mod tab. Cmd+click opens it in VS Code. Right-click opens a VS Code-style menu
+// (menu.js), which runs as an overlay of this same mod.
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, window, run, appHome } from "herdr";
+import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, window, run, appHome, props, shared } from "herdr";
+import { openArgs } from "./paths.js";
+import { ExplorerMenu, ExplorerDialog, openMenu, refreshKey } from "./menu.js";
 
 // Rooted at the active space's folder, like a VS Code workspace (opening a file in a new tab doesn't move it);
 // the focused pane's folder only when the space has none.
@@ -16,7 +19,6 @@ function location() {
 }
 const key = () => JSON.stringify(location());
 const PER_FOLDER = 500, TOTAL = 5000;
-const VIEWER_EXT = /\.(png|jpe?g|gif|webp|bmp|ico|svg|tiff?|md|markdown|mdx|mkd)$/i;
 
 // VS Code's git decoration colors and how severe each state is (a folder shows its worst child).
 const GIT_COLOR = { M: "#e2c08d", A: "#73c991", U: "#73c991", D: "#c74e39", "!": "#e4676b" };
@@ -54,6 +56,9 @@ async function directory(path, on) {
 
 export default class Files extends View {
   init(_props, cx) {
+    const p = props();
+    if (p?.menu) { this.overlay = new ExplorerMenu(cx); return; }
+    if (p?.dialog) { this.overlay = new ExplorerDialog(cx); return; }
     this.saved = new Map();
     this.entries = new Map(); this.folders = new Set(); this.pending = new Set(); this.marks = {}; this.dirty = new Map();
     this.icons = null;
@@ -172,9 +177,12 @@ export default class Files extends View {
   }
 
   open(path) {
-    const file = `${this.root}/${path}`, name = path.split("/").pop();
-    if (this.on || VIEWER_EXT.test(name)) return run("tab.new", { name, mod: "vscode-viewer", props: { file, on: this.on } });
-    run("tab.new", { name, folder: file.slice(0, file.lastIndexOf("/")) || "/", argv: ["node", `${appHome()}/mods/vscode-viewer/editor/vsedit.cjs`, file] });
+    run("tab.new", openArgs(`${this.root}/${path}`, { on: this.on, appHome: appHome() }));
+  }
+
+  menu(abs, dir, cx) {
+    cx.stop_propagation();
+    if (this.root) openMenu({ path: abs, root: this.root, dir, on: this.on });
   }
 
   // `inherited` is "U" below an untracked folder: git lists the folder once, its files are untracked too.
@@ -185,6 +193,7 @@ export default class Files extends View {
       const path = prefix ? `${prefix}/${entry.name}` : entry.name, abs = `${this.root}/${path}`, open = this.folders.has(path), own = this.marks[abs];
       const status = own ?? (entry.dir ? this.dirty.get(abs) : null) ?? inherited, color = GIT_COLOR[status], icon = this.icon(entry.name, entry.dir, open);
       out.push(h_flex().id(`file-${path}`).h(22).flex_none().pl(6 + depth * 12).pr(8).gap(5).items_center().rounded(4).cursor_pointer().hover(s => s.bg(t.hover))
+        .on_mouse_down("right", (_e, cx) => this.menu(abs, entry.dir, cx))
         .on_click((e, cx) => {
           if (entry.dir) return this.toggle(path, cx);
           if (e.modifiers.platform && !this.on) exec("code", [abs]).catch(() => {});
@@ -200,13 +209,18 @@ export default class Files extends View {
   }
 
   render(cx) {
+    if (this.overlay) return this.overlay.render(cx);
     if (key() !== this.context?.key) this.refresh(cx);
+    // A file operation from the menu asks for a reload.
+    const asked = shared(refreshKey);
+    if (asked !== this.asked) { if (this.asked !== undefined) this.refresh(cx); this.asked = asked; }
     const t = theme();
     return v_flex().id("explorer").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
       .child(h_flex().h(36).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .child(div().font_semibold().child("Explorer"))
         .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim).child(this.root?.split(/[\\/]/).pop() ?? "")))
-      .child(v_flex().id("explorer-tree").flex_1().min_h(0).overflow_y_scrollbar().p(4).children(this.rows("", 0, [], t))
+      .child(v_flex().id("explorer-tree").flex_1().min_h(0).overflow_y_scrollbar().p(4)
+        .on_mouse_down("right", (_e, cx) => this.menu(this.root, true, cx)).children(this.rows("", 0, [], t))
         .when(Boolean(this.error) || !this.entries.get("")?.length, el => el.child(div().p(8).text_size(12).text_color(t.dim).child(this.error || (this.loading ? "Loading files…" : this.root ? "No files" : "No folder"))))
         .when(this.limited, el => el.child(div().p(8).text_size(11).text_color(t.dim).child("File list limited to 500 entries per folder and 5,000 total"))));
   }
