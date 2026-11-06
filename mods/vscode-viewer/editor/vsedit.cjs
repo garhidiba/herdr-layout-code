@@ -1478,7 +1478,10 @@ class Editor {
     for (const st of this.allStates()) if (st.file !== this.file && st.buf.dirty) this.writeState(st);
     if (this.buf.dirty) this.track(this.saveFile(false, { auto: true }));
   }
-  focusChanged(focused) { if (!focused && this.settings["files.autoSave"] === "onFocusChange") this.autoSave(); }
+  focusChanged(focused) {
+    if (focused) T.rightClicksTo("program"); // again, in case Herdr hadn't adopted the terminal yet
+    else if (this.settings["files.autoSave"] === "onFocusChange") this.autoSave();
+  }
 
   // ----- input -----
   handle(ev) {

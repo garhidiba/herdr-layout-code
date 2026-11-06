@@ -29,10 +29,40 @@ function herdr(args, wait) {
   } catch {}
 }
 
+// herdr-app's JSON answer: {"ok": ...} is true; {"error": ...} or no answer is false.
+function answeredOk(out) {
+  try { return !!JSON.parse(out).ok; } catch { return false; }
+}
+
 // Inside a Herdr terminal, right-clicks go to the program (Shift+right-click stays Herdr's menu) while it runs.
-function rightClicksTo(to, wait) {
+// A tab started with `hc run` is adopted a moment after the program starts, and until then Herdr answers
+// {"error": "no such running terminal"}: "program" is asked again every `every` ms in the background until it is ok
+// or `until` ms passed (and again on focus-in); "menu" stops that first.
+let routing = null; // { child, timer } while asking
+function rightClicksTo(to, wait, { every = 150, until = 10000 } = {}) {
   const id = process.env.HC_TERMINAL_ID;
-  if (id) herdr(["do", "terminal.right_click", "--to", to, "--terminal", id], wait);
+  if (!id) return;
+  if (routing) { clearTimeout(routing.timer); routing.child?.kill("SIGKILL"); routing = null; }
+  const args = ["do", "terminal.right_click", "--to", to, "--terminal", id];
+  if (to !== "program") return herdr(args, wait);
+  const bin = which("herdr-app");
+  if (!bin) return;
+  const state = routing = {}, end = Date.now() + until;
+  const ask = () => {
+    let out = "", done = false;
+    const answered = () => {
+      if (done) return;
+      done = true;
+      state.child = null;
+      if (routing !== state) return;
+      if (answeredOk(out) || Date.now() + every > end) routing = null;
+      else state.timer = setTimeout(ask, every).unref();
+    };
+    try { state.child = spawn(bin, args, { stdio: ["ignore", "pipe", "ignore"], timeout: 1500 }); } catch { return answered(); }
+    state.child.stdout.on("data", (d) => { out += d; });
+    state.child.on("error", answered).on("close", answered);
+  };
+  ask();
 }
 
 // Runs a full-screen app: { render(rows, cols) -> ANSI text, handle(ev), hover?(ev) -> text to write | null }. Each input
@@ -50,6 +80,7 @@ function session(app) {
     pending = rest;
     let changed = false;
     for (const ev of events) {
+      if (ev.type === "focus" && ev.focused) rightClicksTo("program"); // again, in case Herdr hadn't adopted it yet
       const out = app.hover?.(ev) ?? null; // hover motion repaints only what changed, without a frame
       if (out === null) { app.handle(ev); changed = true; } else if (out) process.stdout.write(out);
     }
@@ -81,4 +112,4 @@ function session(app) {
 // tab closes when it exits, and a file that isn't there is an error rather than a new file.
 const closeOnExit = () => process.argv.includes("--close-on-exit");
 
-module.exports = { ENTER, LEAVE, inputLog, herdr, rightClicksTo, session, closeOnExit };
+module.exports = { ENTER, LEAVE, inputLog, herdr, answeredOk, rightClicksTo, session, closeOnExit };

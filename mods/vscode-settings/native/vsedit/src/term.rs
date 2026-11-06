@@ -4,9 +4,10 @@
 use std::io::{self, Write};
 use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicI32, Ordering};
-use std::time::Duration;
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// Alternate screen, bracketed paste, SGR mouse, alternate scroll off (saved first), focus reports, Kitty keyboard
 /// "disambiguate", bar cursor; LEAVE undoes each.
@@ -167,29 +168,83 @@ pub fn which(name: &str) -> Option<PathBuf> {
     search_path().into_iter().map(|d| d.join(name)).find(|f| std::fs::metadata(f).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0))
 }
 
+/// Waits for `child` at most 1.5 s, then kills it.
+fn wait_briefly(child: &mut Child) {
+    let end = Instant::now() + Duration::from_millis(1500);
+    while Instant::now() < end {
+        if let Ok(Some(_)) = child.try_wait() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 /// `herdr-app <args>`; `wait` blocks until it ends (at most 1.5 s).
 pub fn herdr(args: &[&str], wait: bool) {
     let Some(bin) = which("herdr-app") else { return };
     let Ok(mut child) = Command::new(bin).args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() else { return };
     if wait {
-        let end = std::time::Instant::now() + Duration::from_millis(1500);
-        while std::time::Instant::now() < end {
-            if let Ok(Some(_)) = child.try_wait() {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let _ = child.kill();
+        wait_briefly(&mut child);
     } else {
         std::thread::spawn(move || child.wait());
     }
 }
 
+/// herdr-app's JSON answer: `{"ok": ...}` is true; `{"error": ...}` or no answer is false.
+fn answered_ok(out: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(out).ok().and_then(|v| v.get("ok").cloned()).is_some_and(|ok| !ok.is_null() && ok != false)
+}
+
+/// Bumped by each routing start and each `--to menu`: an older retry loop stops at its next attempt.
+static ROUTE: AtomicUsize = AtomicUsize::new(0);
+/// Held around each routing call, so a `--to menu` lands after an attempt in progress.
+static ROUTE_CALL: Mutex<()> = Mutex::new(());
+
 /// Inside a Herdr terminal, right-clicks go to the program (Shift+right-click stays Herdr's menu) while it runs.
+/// A tab started with `hc run` is adopted a moment after the program starts, and until then Herdr answers
+/// `{"error": "no such running terminal"}`: "program" is asked again every 150 ms on a thread until it is ok or 10 s
+/// passed (and again on focus-in); "menu" stops that first.
 pub fn right_clicks_to(to: &str, wait: bool) {
-    if let Ok(id) = std::env::var("HC_TERMINAL_ID") {
-        herdr(&["do", "terminal.right_click", "--to", to, "--terminal", &id], wait);
+    let Ok(id) = std::env::var("HC_TERMINAL_ID") else { return };
+    let args = ["do", "terminal.right_click", "--to", to, "--terminal", &id];
+    if to != "program" {
+        let _call = stop_routing();
+        return herdr(&args, wait);
     }
+    if let Some(bin) = which("herdr-app") {
+        route(bin, args.map(String::from).to_vec(), Duration::from_millis(150), Duration::from_secs(10));
+    }
+}
+
+/// Stops a retry loop; holding the guard keeps a new attempt from starting.
+fn stop_routing() -> std::sync::MutexGuard<'static, ()> {
+    ROUTE.fetch_add(1, Ordering::SeqCst);
+    ROUTE_CALL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// `bin <args>` every `every` until it answers ok or `until` passed, unless a newer start or a stop came meanwhile.
+fn route(bin: PathBuf, args: Vec<String>, every: Duration, until: Duration) -> std::thread::JoinHandle<()> {
+    let turn = ROUTE.fetch_add(1, Ordering::SeqCst) + 1;
+    let end = Instant::now() + until;
+    std::thread::spawn(move || loop {
+        let ok = {
+            let _call = ROUTE_CALL.lock().unwrap_or_else(|e| e.into_inner());
+            if ROUTE.load(Ordering::SeqCst) != turn {
+                return;
+            }
+            let Ok(mut child) = Command::new(&bin).args(&args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn() else { return };
+            wait_briefly(&mut child);
+            let mut out = String::new();
+            let _ = child.stdout.take().map(|mut o| io::Read::read_to_string(&mut o, &mut out));
+            answered_ok(&out)
+        };
+        if ok || Instant::now() + every > end {
+            return;
+        }
+        std::thread::sleep(every);
+    })
 }
 
 /// Started by the Explorer with `--close-on-exit`: the tab closes when the editor exits, and a missing file is an
@@ -248,10 +303,70 @@ pub fn git_root(file: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     #[test]
     fn base64_pads_like_buffer_to_string() {
         assert_eq!(super::base64(b"hi"), "aGk=");
         assert_eq!(super::base64(b"abc"), "YWJj");
         assert_eq!(super::base64(b"a"), "YQ==");
+    }
+
+    #[test]
+    fn herdr_answer_is_ok_only_for_an_ok_object() {
+        assert!(super::answered_ok("{\"ok\": true}\n"));
+        assert!(!super::answered_ok("{\"error\": \"no such running terminal\"}"));
+        assert!(!super::answered_ok(""));
+        assert!(!super::answered_ok("null"));
+        assert!(!super::answered_ok("{\"ok\": false}"));
+    }
+
+    /// A fake herdr-app: logs its arguments, answers `{"error"}` to the first `fails` calls, then `{"ok": true}`.
+    fn fake_herdr(fails: usize) -> (std::path::PathBuf, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("vsedit-herdr-{}-{fails}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (bin, log, count) = (dir.join("herdr-app"), dir.join("log"), dir.join("count"));
+        let script = format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\nn=$(cat '{c}' 2>/dev/null || echo 0); echo $((n + 1)) > '{c}'\n\
+             if [ \"$n\" -lt {fails} ]; then echo '{{\"error\": \"no such running terminal\"}}'; else echo '{{\"ok\": true}}'; fi\n",
+            log.display(),
+            c = count.display()
+        );
+        std::fs::write(&bin, script).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (bin, log)
+    }
+
+    fn calls(log: &std::path::Path) -> usize {
+        std::fs::read_to_string(log).map(|s| s.lines().count()).unwrap_or(0)
+    }
+
+    /// One test: the retry loops share the routing turn, so they must not run side by side.
+    #[test]
+    fn right_click_routing_retries_until_ok_gives_up_and_stops_on_menu() {
+        let args = || vec!["do".to_string(), "x".into()];
+        let ms = Duration::from_millis;
+        // asked again until Herdr knows the terminal, then no more
+        let (bin, log) = fake_herdr(2);
+        super::route(bin, args(), ms(20), Duration::from_secs(10)).join().unwrap();
+        assert_eq!(calls(&log), 3);
+        // gives up after `until`
+        let (bin, log) = fake_herdr(1_000_000);
+        super::route(bin, args(), ms(20), ms(1000)).join().unwrap();
+        let n = calls(&log);
+        assert!((2..60).contains(&n), "{n} calls");
+        // --to menu stops a loop in progress
+        let (bin, log) = fake_herdr(1_000_000);
+        let routing = super::route(bin, args(), ms(20), Duration::from_secs(10));
+        while calls(&log) < 2 {
+            std::thread::sleep(ms(10));
+        }
+        drop(super::stop_routing());
+        routing.join().unwrap();
+        let n = calls(&log);
+        std::thread::sleep(ms(200));
+        assert_eq!(calls(&log), n);
     }
 }

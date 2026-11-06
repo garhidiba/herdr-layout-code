@@ -201,13 +201,15 @@ def screen_of(t):
     return t.out.decode("utf8", "replace")
 
 
-def herdr_stub(tmp):
-    """A herdr-app on PATH that logs its arguments: (env for Term, log path)."""
+def herdr_stub(tmp, fails=0):
+    """A herdr-app on PATH that logs its arguments and answers ok, after an error to the first `fails` calls (Herdr
+    hasn't adopted the terminal yet): (env for Term, log path)."""
     stub = os.path.join(tmp, "stub")
     os.makedirs(stub, exist_ok=True)
     log = os.path.join(tmp, "herdr.log")
     with open(os.path.join(stub, "herdr-app"), "w") as f:
-        f.write(f'#!/bin/sh\necho "$@" >> "{log}"\n')
+        f.write(f'#!/bin/sh\necho "$@" >> "{log}"\n'
+                f'[ "$(wc -l < "{log}")" -gt {fails} ] && echo \'{{"ok": true}}\' || echo \'{{"error": "no such running terminal"}}\'\n')
     os.chmod(os.path.join(stub, "herdr-app"), 0o755)
     if os.path.exists(log):
         os.remove(log)
@@ -216,13 +218,23 @@ def herdr_stub(tmp):
 
 def run_menu_and_cmd_save(tmp):
     """Right-click (SGR button 2) opens VS Code's context menu; Herdr is told to route right-clicks; Preferences: Open Settings
-    asks Herdr for the Settings dialog; Kitty ⌘S saves."""
-    env, log = herdr_stub(tmp)
+    asks Herdr for the Settings dialog; Kitty ⌘S saves. Herdr doesn't know the terminal at first: routing is asked
+    again until it answers ok, and once more on focus-in."""
+    env, log = herdr_stub(tmp, fails=2)
     file = os.path.join(tmp, "menu.txt")
     open(file, "w").write("hello world\n")
     t = Term(file, env={**env, **MAC})
     assert t.read("Ln 1, Col 1"), "no first frame"
     assert "\x1b[>1u" in screen_of(t) and "\x1b[?1004h" in screen_of(t), "Kitty keyboard / focus reports not enabled"
+    program = "do terminal.right_click --to program --terminal term-7"
+    asked = lambda: open(log).read().count(program) if os.path.exists(log) else 0
+    for _ in range(60):
+        if asked() >= 3:
+            break
+        t.read(timeout=0.05)            # keeps draining the screen, or the editor blocks writing it
+    assert asked() == 3, open(log).read()
+    t.send("\x1b[I", wait=0.3)        # focus-in asks again
+    assert asked() == 4, open(log).read()
     t.send("\x1b[<2;20;2M\x1b[<2;20;2m")
     assert t.read("Command Palette...", timeout=2), "right-click did not open the menu"
     sc = screen_of(t)

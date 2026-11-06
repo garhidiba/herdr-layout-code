@@ -1483,3 +1483,65 @@ test("a missing server's install hint takes the first installer whose tool this 
   assert.equal(LANG.installHint("dockerfile", brewOnly), null, "npm alone installs it");
   assert.equal(LANG.installHint("clangd", () => true), null, "no installer for a system server");
 });
+
+// A fake herdr-app on PATH: logs its arguments, answers {"error": ...} to the first `fails` right_click --to program
+// calls (Herdr hasn't adopted the terminal yet), then {"ok": true}.
+function fakeHerdr(fails) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "herdr-"));
+  const log = path.join(dir, "log"), count = path.join(dir, "count");
+  fs.writeFileSync(path.join(dir, "herdr-app"), `#!/bin/sh
+echo "$@" >> "${log}"
+case "$*" in *"--to program"*) ;; *) echo '{"ok": true}'; exit 0 ;; esac
+n=$(cat "${count}" 2>/dev/null || echo 0); echo $((n + 1)) > "${count}"
+if [ "$n" -lt ${fails} ]; then echo '{"error": "no such running terminal"}'; else echo '{"ok": true}'; fi
+`, { mode: 0o755 });
+  const saved = { PATH: process.env.PATH, HC_TERMINAL_ID: process.env.HC_TERMINAL_ID };
+  process.env.PATH = `${dir}:${process.env.PATH}`;
+  process.env.HC_TERMINAL_ID = "term-7";
+  const calls = () => { try { return fs.readFileSync(log, "utf8").trim().split("\n"); } catch { return []; } };
+  const restore = () => { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } };
+  return { calls, restore };
+}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const T = require("../terminal.cjs");
+const PROGRAM = "do terminal.right_click --to program --terminal term-7";
+
+test("herdr-app's answer: ok only for an {\"ok\"} object", () => {
+  assert.equal(T.answeredOk('{"ok": true}\n'), true);
+  assert.equal(T.answeredOk('{"error": "no such running terminal"}'), false);
+  assert.equal(T.answeredOk(""), false);
+  assert.equal(T.answeredOk("null"), false);
+  assert.equal(T.answeredOk("not json"), false);
+});
+
+test("right-click routing is asked again until Herdr knows the terminal, then stops", async () => {
+  const h = fakeHerdr(2);
+  try {
+    T.rightClicksTo("program", false, { every: 20, until: 5000 });
+    for (let i = 0; i < 100 && h.calls().length < 3; i++) await sleep(20);
+    await sleep(150);
+    assert.deepEqual(h.calls(), [PROGRAM, PROGRAM, PROGRAM]);
+  } finally { h.restore(); }
+});
+
+test("right-click routing gives up after `until`, and --to menu stops a retry in progress", async () => {
+  let h = fakeHerdr(1000);
+  try {
+    T.rightClicksTo("program", false, { every: 20, until: 1000 }); // a new executable's first start can take ~0.5 s
+    await sleep(2500);
+    const n = h.calls().length;
+    assert.ok(n >= 2 && n < 60, `${n} calls`);
+    await sleep(300);
+    assert.equal(h.calls().length, n, "still asking after giving up");
+  } finally { h.restore(); }
+  h = fakeHerdr(1000);
+  try {
+    T.rightClicksTo("program", false, { every: 20, until: 5000 });
+    for (let i = 0; i < 100 && h.calls().length < 2; i++) await sleep(20);
+    T.rightClicksTo("menu", true);
+    const n = h.calls().length;
+    await sleep(200);
+    assert.equal(h.calls().length, n, "still asking after --to menu");
+    assert.equal(h.calls().at(-1), "do terminal.right_click --to menu --terminal term-7");
+  } finally { h.restore(); }
+});

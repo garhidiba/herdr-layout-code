@@ -86,6 +86,9 @@ pub fn run<A: App>(term: &mut Term, app: &mut A) -> A::Out {
             events.push(keys::key("escape"));
         }
         for ev in events {
+            if let Ev::Focus(true) = ev {
+                term::right_clicks_to("program", false); // again, in case Herdr hadn't adopted it yet
+            }
             match app.hover(&ev) {
                 Some(out) => {
                     if !out.is_empty() {

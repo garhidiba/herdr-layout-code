@@ -1935,7 +1935,9 @@ impl Editor {
     pub fn handle(&mut self, ev: &Ev, term: &mut Term) {
         match ev {
             Ev::Focus(focused) => {
-                if !focused && self.settings.auto_save == AutoSave::OnFocusChange {
+                if *focused {
+                    term::right_clicks_to("program", false); // again, in case Herdr hadn't adopted the terminal yet
+                } else if self.settings.auto_save == AutoSave::OnFocusChange {
                     self.auto_save();
                 }
                 return;
