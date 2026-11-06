@@ -12,7 +12,6 @@ mod tree;
 use git::Status;
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::path::{Path, PathBuf};
 use std::thread;
 
 const COMMITS: usize = 300;
@@ -26,7 +25,7 @@ const USAGE: &str = "usage: vscode-core <command>
   commit-files <repo> <hash>
   tree <dir> [--expanded p1,p2,...]
   all <root> [--expanded p1,p2,...] [--repo <current>]
-  tokenize <file> [maxLines] [--vscode <dir>] [--stack]
+  tokenize <file> [maxLines] [--vscode <dir>] [--stack]   (built with --features tokenize)
   --version";
 
 struct Args {
@@ -182,14 +181,21 @@ fn version() -> Value {
     json!({ "version": env!("CARGO_PKG_VERSION"), "backend": "git", "git": git })
 }
 
-/// The viewer's grammars and theme: `--vscode`, else `mods/vscode-viewer/vscode` in the herdr home the binary
-/// is installed in (`<home>/vscode-core/vscode-core`).
-fn vscode_dir(flag: Option<&str>) -> PathBuf {
-    if let Some(dir) = flag {
-        return dir.into();
-    }
-    let exe = std::env::current_exe().unwrap_or_default();
-    exe.parent().and_then(Path::parent).unwrap_or(Path::new(".")).join("mods/vscode-viewer/vscode")
+/// tokenize.cjs's JSON for a file. The viewer's grammars and theme: `--vscode`, else
+/// `mods/vscode-viewer/vscode` in the herdr home the binary is installed in (`<home>/vscode-core/vscode-core`).
+#[cfg(feature = "tokenize")]
+fn tokenize(a: &Args, file: &str) -> Result<Value, String> {
+    use std::path::{Path, PathBuf};
+    let dir: PathBuf = match a.vscode.as_deref() {
+        Some(dir) => dir.into(),
+        None => std::env::current_exe().unwrap_or_default().parent().and_then(Path::parent).unwrap_or(Path::new(".")).join("mods/vscode-viewer/vscode"),
+    };
+    vscode_textmate::tokenize_file(&dir, Path::new(file), a.positional.get(2).map(String::as_str), a.stack)
+}
+
+#[cfg(not(feature = "tokenize"))]
+fn tokenize(_: &Args, _: &str) -> Result<Value, String> {
+    Err("vscode-core was built without tokenize (cargo build --release --features tokenize)".into())
 }
 
 fn run(a: Args) -> Result<Value, String> {
@@ -208,7 +214,7 @@ fn run(a: Args) -> Result<Value, String> {
         "commit-files" => Ok(json!(git::commit_files(p(1)?, p(2)?)?.into_iter().take(FILES).collect::<Vec<_>>())),
         "tree" => tree_cmd(p(1)?, &a.expanded),
         "all" => all_cmd(p(1)?, &a.expanded, a.repo.as_deref()),
-        "tokenize" => vscode_textmate::tokenize_file(&vscode_dir(a.vscode.as_deref()), Path::new(p(1)?), a.positional.get(2).map(String::as_str), a.stack),
+        "tokenize" => tokenize(&a, p(1)?),
         other => Err(format!("unknown command {other}\n{USAGE}")),
     }
 }

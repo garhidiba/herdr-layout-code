@@ -210,7 +210,9 @@ for whether moving the editor to Rust pays off.
   `onig.rs` (vscode-oniguruma's scanner), `raw.rs` (JSON/plist grammars, JSONC theme), `rule.rs`,
   `grammar.rs` (rule factory, scope/state stacks, `_tokenizeString`), `registry.rs` (dependency
   closure), `theme.rs`, `matcher.rs`, `file.rs` (tokenize.cjs).
-- `vscode-core tokenize <file> [maxLines] [--vscode <dir>] [--stack]` prints tokenize.cjs's JSON
+- `vscode-core tokenize <file> [maxLines] [--vscode <dir>] [--stack]` (only with the cargo feature
+  `tokenize`, off by default; without it the command prints `{"error": "vscode-core was built
+  without tokenize …"}` and exits 1) prints tokenize.cjs's JSON
   (`{scope, total, eol, indent, colors, lines, theme}`); `--stack` adds the final rule stack.
   `--vscode` defaults to `<herdr home>/mods/vscode-viewer/vscode` next to the installed binary.
 - `tests/parity.mjs` (vs the unchanged tokenize.cjs; a preload hook records the JS rule stack),
@@ -295,12 +297,27 @@ disposes each registry.
 
 ### Build
 
-Five more crates (`onig_sys`, `cc`, `find-msvc-tools`, `pkg-config`, `shlex`; first-build download
-~0.8 MB) and a C compiler (Xcode Command Line Tools' `cc` on macOS). `install.sh` with the crates
-cached and `PATH=/usr/bin:/bin`, `HERDR_APP_HOME=<temp>`: offline fetch succeeds, release build
-27 s (was ~9 s; Oniguruma's C sources), binary 1.6 MB (was 0.8 MB). `onig_sys` builds its bundled
-copy unless `RUSTONIG_SYSTEM_LIBONIG`/`RUSTONIG_DYNAMIC_LIBONIG` is set, so a Homebrew oniguruma
-does not leak in.
+The tokenizer is opt-in so the Rust engine the mods use today keeps its old build: `vscode-textmate`
+is an optional dependency of vscode-core behind the feature `tokenize`, and the workspace's
+`default-members` is vscode-core alone, so a plain `cargo build` / `install.sh` neither compiles the
+tokenizer nor needs a C compiler.
+
+| Build | Command (in `mods/vscode-settings/native`) | Release build | Binary |
+| --- | --- | ---: | ---: |
+| Default (`install.sh`) | `cargo build --release` | 8.4 s | 0.77 MB |
+| With the tokenizer | `cargo build --release --features tokenize` | 27 s | 1.6 MB |
+
+Measured with `install.sh`, crates cached, `PATH=/usr/bin:/bin`, `HERDR_APP_HOME=<temp>`, empty
+target dir: offline fetch succeeds and Oniguruma is not compiled. The tokenize build adds five
+crates (`onig_sys`, `cc`, `find-msvc-tools`, `pkg-config`, `shlex`; ~0.8 MB to download) and needs a
+C compiler (Xcode Command Line Tools' `cc` on macOS). They are in `Cargo.lock`, so a first
+`cargo fetch --locked` downloads them even for the default build; they are just not compiled.
+`onig_sys` builds its bundled copy unless `RUSTONIG_SYSTEM_LIBONIG`/`RUSTONIG_DYNAMIC_LIBONIG` is
+set, so a Homebrew oniguruma does not leak in.
+
+Tests: `cargo test` (vscode-core), `cargo test --workspace --features vscode-core/tokenize`
+(everything); the parity and bench scripts need `cargo build --release --features tokenize` (and
+`cargo build --release -p vscode-textmate --examples` for the bench).
 
 ### Recommendation for phase 2 (editor core in Rust)
 
@@ -319,7 +336,7 @@ to color in Rust; a 500 KB minified line ~5 s. What a Rust editor core would act
    opens very many files can reach it. Native Oniguruma frees with the grammar.
 
 Recommendation: do **not** start phase 2 for speed. If it is done, do it for (2) and (1): first ship
-`vscode-core tokenize` as an optional engine behind `core.engine` for the viewer (drop-in: same JSON,
+`vscode-core tokenize` (turning the feature on by default, or building it on demand) as an optional engine behind `core.engine` for the viewer (drop-in: same JSON,
 1.2–2.2× per file), then move the editor's `Highlighter` (per-line stacks, incremental retokenize,
 `LongLine` chunks) to a Rust worker that streams tokens, and only then the buffer/paint core if
 profiling of the editor itself (not the tokenizer) shows it is the bottleneck. Real tokenizer speed-ups

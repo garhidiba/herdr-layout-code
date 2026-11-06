@@ -8,7 +8,7 @@
 //
 //   node mods/vscode-settings/native/vscode-textmate/tests/bench.mjs [--root /Volumes/exusb/project]
 //        [--files <list written by parity.mjs --list>] [--runs 3]
-// Build first: cargo build --release && cargo build --release --examples (in mods/vscode-settings/native).
+// Build first (in mods/vscode-settings/native): cargo build --release --features tokenize && cargo build --release -p vscode-textmate --examples
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";

@@ -9,7 +9,8 @@
 //        [--per-lang 20] [--jobs 6] [--list <file to write the tested paths to>] [--only <scope>]
 //
 // Prints a per-language table and the first mismatch of each failing language; exit code 1 on any mismatch.
-import { execFile } from "node:child_process";
+// Build first (in mods/vscode-settings/native): cargo build --release --features tokenize
+import { execFile, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, openSync, readSync, closeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -143,7 +144,8 @@ async function check([scope, file, kind]) {
   return { ...r, lines: a.lines.length, mismatch: m };
 }
 
-if (!existsSync(BIN)) { console.error(`no binary at ${BIN} (cargo build --release first)`); process.exit(2); }
+const probe = existsSync(BIN) && JSON.parse(spawnSync(BIN, ["tokenize", join(VSCODE, "index.json"), "--vscode", VSCODE], { encoding: "utf8" }).stdout || "{}");
+if (!probe || probe.error) { console.error(`${BIN}: ${probe ? probe.error : "missing (cargo build --release --features tokenize in mods/vscode-settings/native)"}`); process.exit(2); }
 const tmp = mkdtempSync(join(tmpdir(), "textmate-parity-"));
 const files = [...findFiles(), ...synthetic(tmp)];
 console.error(`${files.length} files (${files.filter((f) => f[2] === "real").length} real) in ${languages.length} languages`);

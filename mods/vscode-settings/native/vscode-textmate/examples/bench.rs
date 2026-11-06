@@ -5,7 +5,7 @@
 //!
 //! --cold stops after the first pass (a whole cold run, timed from outside).
 //!
-//!   cargo run --release --example bench -- --vscode <dir> [--chunked | --whole] [--cold] [--max-lines N] <file>...
+//!   cargo run --release -p vscode-textmate --example bench -- --vscode <dir> [--chunked | --whole] [--cold] [--max-lines N] <file>...
 
 use std::path::Path;
 use std::time::{Duration, Instant};
