@@ -7,7 +7,7 @@ A VS Code–style layout for [Herdr](https://herdr.dev):
 - **Diff tab:** VS Code-style inline diff with VS Code's own syntax colors.
 - **Editor:** files open in their own tab as an Atom One Dark editor; images open as a preview, markdown opens rendered with an Edit toggle.
 - **Pane menu:** Open in VS Code / Finder.
-- **Status bar:** Claude and Codex usage meters.
+- **Status bar:** Claude and Codex usage meters; Codex limit resets can be redeemed from the card.
 
 See [RECIPE.md](RECIPE.md) for exactly what it does and how it is built.
 
@@ -30,9 +30,10 @@ Optional Claude meter: set Claude Code's `statusLine.command` to `sh ~/.config/h
 - `node` (diff tab colors: `mods/vscode-diff/tokens.cjs` with the engine in `mods/vscode-viewer/vscode/`)
 - `code` (Open in VS Code), `open` (Finder)
 - `stat`, `cp`, `sips` (image preview: copies the image into `mods/vscode-viewer/.cache/`)
-- `grep` over `~/.codex/sessions` (Codex usage)
+- `node` + `codex app-server` (Codex usage and limit resets, with your Codex login: it reads every 5 min and redeems a reset only when you click Use a reset and confirm)
+- `grep` over `~/.codex/sessions` (Codex usage when the app-server is unavailable)
 
-Nothing reaches the network.
+Only `codex app-server` reaches the network (OpenAI, as Codex itself does).
 
 ## Credits
 

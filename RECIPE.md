@@ -22,7 +22,8 @@ Herdr's main layout turned into a VS Code–style workbench: a file explorer wit
   - Each usage window shows: time to reset (session `3h 25m`; weekly `4d 21h`, `5h 10m` once under a day), a 40×5px bar (green `ansi2` < 70%, yellow `ansi3` 70–90%, red `ansi1` ≥ 90%), the percent.
   - Codex credit balance (e.g. `29,412`).
   - Hovering a group opens a 250px card with each window's name, `N% used`, a full-width bar and `resets 11/12 19:00 (4d 21h left)`.
-  - The card ends with a **Reset limits ↗** button that opens the provider's usage page (`https://claude.ai/settings/usage`, `https://chatgpt.com/codex/settings/usage`), where saved limit resets are redeemed. There is no CLI or local API for them, so nothing is redeemed from Herdr.
+  - The Claude card ends with a **Reset limits ↗** button that opens `https://claude.ai/settings/usage` (Claude Code has no API for limit resets).
+  - The Codex card ends with a **Limit resets** row (`N available`), one dimmed 11px line per available credit (`expires 12/1 04:22`, or `no expiry`), and a full-width 26px **Use a reset** button (dimmed and inert at 0 or while redeeming, when it reads **Redeeming…**). Without the `codex` CLI it shows **Reset limits ↗** to `https://chatgpt.com/codex/settings/usage` instead.
 - **Diff tab** (`vscode-diff`, opened from Source Control), named `<file> (<parent short hash>) ↔ <file> (<short hash>)` (the old name on the left for renames; `∅` for a root commit's parent), or `<file> (HEAD) ↔ <file> (Working Tree)` from Changes:
   - Header (30px): breadcrumbs of the last 3 folders `›` the file with its Material icon, then `<old short> ↔ <new short>` (11.5px, `dim`), then ghost buttons **Open File** and **Open in VS Code** (local only).
   - One inline column on `#282c34`, editor font 13px, 20px rows: old and new line numbers (two 44px gutters, `#636d83`), the sign (`-`/`+`), then the text. Removed lines on `#e06c7520`, added on `#98c37920`, removed before added in each change. Tabs show as 4 spaces. Long lines scroll sideways.
@@ -55,7 +56,10 @@ Herdr's main layout turned into a VS Code–style workbench: a file explorer wit
   - **Images:** checked every 3s (`stat` mtime + size); when either changes the file is copied again and the strip updates. Remote images show "Image preview is local only".
 - **Pane right-click** (`vscode-menu`): Herdr's pane menu plus **Open in VS Code** and **Open in Finder** for the pane's folder (local panes only).
 - **Diff tab:** read-only. Clicking a `⋯ N unchanged lines` row shows those lines. A commit diff is read once; a working-tree diff reads the file again every 3s and redraws when it changed. **Open File** opens `<repo>/<path>` in a `vscode-viewer` tab; **Open in VS Code** runs `code <repo>/<path>`.
-- **Status bar:** Codex usage re-read every 60s, Claude every 10s.
+- **Status bar:** Codex rollout log re-read every 60s, Codex app-server every 5 min (and at start and after a reset), Claude every 10s. The bars and credit balance use the app-server's numbers when its last read worked, else the log.
+- **Use a reset** opens the shipped `confirm` mod as a dialog (420×180): "Use a Codex limit reset?" / "Restores the 5-hour and weekly limits now. N left after this; it cannot be undone." Confirm (or Enter) runs `vscode-status.consume-reset`; Cancel or Esc does nothing.
+  - It redeems the available credit that expires first (none listed: Codex picks), with a new UUID idempotency key. A failed attempt keeps its key, so the next try retries the same attempt instead of spending a second credit. One redemption runs at a time.
+  - The outcome becomes a toast: `reset` → success "Codex limits reset", `nothingToReset` → info "Nothing to reset", `noCredit` → warning "No limit resets left", `alreadyRedeemed` → success "Reset already used", an error → error "Codex limit reset failed" with the message.
 
 ## Built from
 
@@ -86,7 +90,12 @@ Herdr's main layout turned into a VS Code–style workbench: a file explorer wit
   - `tokens.cjs`: the `tokenize.cjs` engine code as a helper, `node tokens.cjs <engine dir> <file name> [file] [maxLines]` (text on stdin without a file) printing `{colors, lines: [[text, colorIndex, fontStyle, …]]}`. Run as `git cat-file blob <rev> | node …` through `sh`, or with the working-tree file, engine `<herdr home>/mods/vscode-viewer/vscode`.
   - `v_virtual_list` inside an `overflow_x_scrollbar` box with `Scrollbar.vertical`; fold clicks through `on_item_click` (`fold:<index>`). Runs `code` from Open in VS Code.
 - **`vscode-status`:**
-  - Codex usage comes from the newest `~/.codex/sessions/**/rollout-*.jsonl` that has a `rate_limits` event (`sh` + `grep`, no network). Claude usage comes from `<herdr home>/claude-usage.json`, written by `claude-usage-tap.sh`.
+  - Codex usage comes from `codex-limits.mjs` (run with `node`), which starts `codex app-server` (or `$CODEX_BIN`) and speaks its JSON-RPC over stdio: `initialize` (clientInfo `herdr-vscode-status` 0.1.0), `initialized`, then one request. It kills the child after the answer or 20s.
+    - `node codex-limits.mjs read` → `account/rateLimits/read`, printed as `{rate_limits: {primary, secondary: {used_percent, window_minutes, resets_at}, credits: {balance, has_credits, unlimited}}, ordinaryUsageAllowed, resets: {availableCount, credits: [{id, description, expiresAt, status}] | null}}` (the rollout-log shape, so both parse the same).
+    - `node codex-limits.mjs consume <creditId> <idempotencyKey>` → `account/rateLimitResetCredit/consume {creditId, idempotencyKey}` (`""` sends `creditId: null`), printed as `{outcome}`: `reset`, `nothingToReset`, `noCredit` or `alreadyRedeemed`.
+    - Exit codes: 0 ok, 1 usage, 2 error or timeout, 3 `codex` not found (message on stderr).
+  - Fallback for the bars: the newest `~/.codex/sessions/**/rollout-*.jsonl` that has a `rate_limits` event (`sh` + `grep`). Claude usage comes from `<herdr home>/claude-usage.json`, written by `claude-usage-tap.sh`.
+  - `nextCommand()` loop for `consume-reset`; `openOverlay` with the shipped `confirm` mod; `notify` for the outcome.
   - Wire the tap in as Claude Code's `statusLine.command` (`sh <herdr home>/mods/vscode-status/claude-usage-tap.sh`). It saves `rate_limits` from the statusLine input and then runs `<herdr home>/claude-statusline-orig.sh` with the same input, if present.
   - Uses `HoverCard` from `gpui-base`. Icons: `claude.svg`, `codex.svg`.
 - **`vscode-menu`:** the shipped menu plus two pane items that call `exec("code", [cwd])` and `exec("open", [cwd])`.
@@ -101,9 +110,9 @@ Herdr's main layout turned into a VS Code–style workbench: a file explorer wit
 - **Image preview.** `image()` only loads paths inside the Herdr app folder, so each image is copied into the hidden `.cache/` folder (hidden files don't trigger a mod reload; `.cache/` is git-ignored). The last copy per file stays after its tab closes. Pixel size needs macOS `sips`; elsewhere it is left out.
 - **No HTML preview.** Herdr has no webview; `TextView` renders markdown (and simple HTML) without CSS or scripts, so `.html` files open in the editor only.
 - **Editor limits.** It opens files up to 1 MiB. With `line_numbers: false` the editor scrolls 4 columns left; keep line numbers on.
-- **Assumptions.** The VS Code `code` CLI (Shell Command: Install 'code' in PATH) and macOS `open` are assumed. The Claude meter needs the statusLine tap and shows `–` until Claude Code has refreshed its status line once. Codex needs local session logs.
+- **Assumptions.** The VS Code `code` CLI (Shell Command: Install 'code' in PATH) and macOS `open` are assumed. The Claude meter needs the statusLine tap and shows `–` until Claude Code has refreshed its status line once. Codex needs `node` and the `codex` CLI signed in (else only local session logs, and no Use a reset).
+- **Limit resets spend real credits.** `consume` cannot be undone; it runs only after Confirm in the dialog. The app-server list of credits may be capped or missing (`credits: null`), so the row count can be less than `N available`.
 - **Source Control.** Git reads use `--no-optional-locks -c core.fsmonitor=false` so polling writes no lock files (otherwise the folder watch refreshes itself forever). It never pushes, fetches or switches branches; ahead/behind is as of the last fetch. Graph links are straight horizontal lines, not VS Code's curves; lanes past 12 are not drawn. Limits: 200 repos, 300 commits, 1,000 files (per commit too). Remote (SSH) folders refresh on the 10s timer only.
-- **Diff tab.** It needs `node` on PATH and the full engine in `<herdr home>/mods/vscode-viewer/vscode/` (`lib/`, `grammars/`, `theme.json`) for colors; the repo ships only `index.json` there. Remote (SSH) repos show plain text, since the engine runs locally. File types without a VS Code grammar (e.g. `.tf`) show plain `#abb2bf`. Readable working-tree files are limited to 1 MiB (`readTextFile`). Graph rows have no hover: rows in a virtual list cannot take handlers.
 - **Changing the mods.** Herdr replaces shipped mods and layouts on every start (edits move to `<name>-edited`). That is why everything here is a separately named mod; don't edit the shipped ones.
 
 ## Done when
@@ -115,4 +124,5 @@ Herdr's main layout turned into a VS Code–style workbench: a file explorer wit
 - Clicking a `.ts` file opens a tab whose status strip says `TypeScript`. Editing shows the dot. `cmd-s` writes the file and the button returns to Saved.
 - Clicking a `.png` shows it centered on the checkerboard with `PNG`, `W × H` and its size in the strip. Clicking `README.md` shows it rendered; Edit opens the editor, and an unsaved edit appears after Preview.
 - With a Codex session log present, the status bar shows the Codex glyph with two bars and a credit number; hovering shows the card with reset times.
+- `node mods/vscode-status/codex-limits.mjs read` prints `resets.availableCount`; the Codex card shows `N available`, an expiry line per credit and **Use a reset**, which opens the confirm dialog (test `consume` only against a fake `CODEX_BIN`).
 - Right-clicking a pane shows Open in VS Code and Open in Finder; Finder opens the pane's folder.
