@@ -6,6 +6,7 @@ import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list } from "gp
 import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, run, appHome, notify, shared, setShared } from "herdr";
 import { freshRoot, encode, decode } from "./cache.js";
 import { createCore } from "./core.js";
+import { layoutSections, flexSection, sashPair, dragSash } from "./sections.js";
 
 // The project you work in: the focused terminal's folder. Editor and diff tabs have no folder, so focusing
 // them keeps this space's last project instead of reloading; a fresh space starts at its first terminal's folder.
@@ -26,6 +27,8 @@ const CACHE = "vscode-scm.cache", FRESH = 120000, PRELOAD_EVERY = 600000, SAVE_E
 // the folder watch would see it, and every refresh would start the next one.
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
 const ROW = 22, LANE = 12, MAX_LANES = 12, COMMITS = 300, FILES = 1000;
+// The panel title row, and the message input plus the Commit button above the changed files.
+const TITLE = 36, COMMIT_BOX = 72;
 
 // VS Code's git decoration colors (as vscode-explorer) and its scmGraph.foreground1–5 lane colors.
 const GIT_COLOR = { M: "#e2c08d", A: "#73c991", U: "#73c991", D: "#c74e39", R: "#73c991", "!": "#e4676b" };
@@ -173,6 +176,9 @@ export default class SourceControl extends View {
       cx.notify();
     });
     try { this.collapsed = JSON.parse(localStorage.getItem("collapsed") ?? "{}"); } catch { this.collapsed = {}; }
+    // Section heights the sashes were dragged to (px by section id), and the panel's height.
+    try { this.sizes = JSON.parse(localStorage.getItem("sizes") ?? "{}") || {}; } catch { this.sizes = {}; }
+    this.height = 0; this.drag = null;
     this.clearRepo();
     this.input = InputState.new({ placeholder: "Message (Enter to commit)" });
     this.input.on("change", (_e, cx) => {
@@ -371,13 +377,33 @@ export default class SourceControl extends View {
     cx.notify();
   }
 
-  section(id, title, t, extra) {
-    const open = !this.collapsed[id];
-    return h_flex().id(`scm-section-${id}`).h(ROW).flex_none().px(4).gap(2).items_center().cursor_pointer().border_t(1).border_color(t.border).hover((s) => s.bg(t.hover))
+  // A sash drag: the root follows the pointer while it is over the panel; releasing or leaving ends it.
+  dragTo(y, cx) {
+    if (!this.drag) return;
+    const { pair, from, heights, mins } = this.drag;
+    Object.assign(this.sizes, dragSash(heights, mins, pair, y - from));
+    cx.notify();
+  }
+
+  endDrag(cx) {
+    if (!this.drag) return;
+    this.drag = null;
+    try { localStorage.setItem("sizes", JSON.stringify(this.sizes)); } catch {}
+    cx.notify();
+  }
+
+  // A section header; `sash` ({pair, heights, mins} or null) puts a resize handle on its top edge.
+  section(id, title, t, extra, sash) {
+    const open = !this.collapsed[id], dragging = this.drag?.id === id;
+    const header = h_flex().id(`scm-section-${id}`).h(ROW).flex_none().px(4).gap(2).items_center().cursor_pointer().border_t(1).border_color(t.border).hover((s) => s.bg(t.hover))
       .on_click((_e, cx) => this.toggle(id, cx))
       .child(svg(`mods/vscode-scm/chevron-${open ? "down" : "right"}.svg`).size(14).flex_none().text_color(t.muted))
       .child(div().text_size(11).font_bold().child(title.toUpperCase()))
       .child(h_flex().flex_1().min_w(0).gap(6).justify_end().items_center().children(extra ?? []));
+    if (!sash) return header;
+    return div().relative().flex_none().child(header)
+      .child(div().id(`scm-sash-${id}`).absolute().left(0).top(-2).w_full().h(4).cursor_row_resize().hover((s) => s.bg(t.accent)).when(dragging, (e) => e.bg(t.accent))
+        .on_mouse_down("left", (e, cx) => { cx.stop_propagation(); this.drag = { id, from: e.position.y, ...sash }; cx.notify(); }));
   }
 
   badge(text, t) {
@@ -403,10 +429,9 @@ export default class SourceControl extends View {
       div().w(12).flex_none().text_size(11).text_color(color).child(f.status)];
   }
 
+  // A row of the Changes list (a virtual list: no handlers here, clicks come through `on_item_click`).
   fileRow(f, t) {
-    return h_flex().id(`scm-file-${f.path}`).h(ROW).flex_none().pl(22).pr(10).gap(6).items_center().cursor_pointer().hover((s) => s.bg(t.hover))
-      .on_click(() => openDiff(this.selected, this.on, f, null, null))
-      .children(this.fileLabel(f, t));
+    return h_flex().w_full().h(ROW).flex_none().pl(22).pr(10).gap(6).items_center().cursor_pointer().children(this.fileLabel(f, t));
   }
 
   // The lane column: half lines per lane, horizontal links to the node, and the node (a ring for merges).
@@ -456,35 +481,56 @@ export default class SourceControl extends View {
 
   render(cx) {
     if (key() !== this.context) this.refresh(cx);
-    const t = theme(), repo = this.repos.find((r) => r.path === this.selected), shown = (id) => !this.collapsed[id], items = this.graphItems();
+    const t = theme(), repo = this.repos.find((r) => r.path === this.selected), shown = (id) => !this.collapsed[id], items = this.graphItems(), files = this.files;
     const enabled = Boolean(this.message.trim() && repo && !this.busy && !this.loading);
     const empty = (text) => div().h(ROW).flex_none().px(22).flex().items_center().text_size(12).text_color(t.dim).child(text);
+    // VS Code's layout: open sections share the height below the title and the three headers. Repositories and
+    // Graph keep their dragged size; Changes (else the last open section) takes the rest; collapsed ones give theirs back.
+    const available = this.height - 2 - TITLE - 3 * ROW;
+    const list = [
+      { id: "repos", open: shown("repos"), size: this.sizes.repos ?? Math.min(Math.max(this.repos.length, 1), 5) * ROW, min: ROW },
+      { id: "changes", open: shown("changes") && Boolean(repo), size: this.sizes.changes, min: COMMIT_BOX + ROW },
+      { id: "graph", open: shown("graph"), size: this.sizes.graph ?? Math.round(available * 0.4), min: 2 * ROW },
+    ];
+    const heights = layoutSections(list, available, "changes"), flex = flexSection(list, "changes")?.id;
+    const mins = Object.fromEntries(list.map((s) => [s.id, s.min]));
+    const sash = (i) => { const pair = sashPair(list, i); return pair && { pair, heights, mins }; };
+    // The flex section fills by layout (no rounding gap); the others get their computed height. Both are definite,
+    // which a scroll area needs: under a max_h alone its viewport grows with its rows and never scrolls.
+    const fit = (id, el) => id === flex ? el.flex_1().min_h(0) : el.flex_none().h(heights[id]);
     return v_flex().id("scm").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13).track_focus(this.handle)
+      .on_size_change((size, cx) => { if (size.height !== this.height) { this.height = size.height; cx.notify(); } })
+      .on_mouse_move((e, cx) => this.dragTo(e.position.y, cx))
+      .on_mouse_up("left", (_e, cx) => this.endDrag(cx))
+      .on_hover((hovered, cx) => { if (!hovered) this.endDrag(cx); })
       .on_key_down((e, cx) => {
         if (e.key === "escape" && this.typing) { this.typing = false; this.handle.focus(); cx.stop_propagation(); cx.notify(); }
       })
-      .child(h_flex().h(36).flex_none().px(14).gap(8).items_center()
+      .child(h_flex().h(TITLE).flex_none().px(14).gap(8).items_center()
         .child(div().font_semibold().child("Source Control"))
         .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim).child(this.loading && !this.repos.length ? "Loading…" : "")))
-      .child(this.section("repos", "Repositories", t, [this.badge(String(this.repos.length), t)]))
-      .when(shown("repos"), (el) => el.child(v_flex().id("scm-repos").flex_none().max_h(5 * ROW).overflow_y_scrollbar()
+      .child(this.section("repos", "Repositories", t, [this.badge(String(this.repos.length), t)], sash(0)))
+      .when(list[0].open, (el) => el.child(fit("repos", v_flex().id("scm-repos")).overflow_y_scrollbar()
         .children(this.repos.map((r) => this.repoRow(r, t)))
         .when(!this.repos.length, (e) => e.child(empty(this.error || (this.loading ? "Looking for repositories…" : "No folder"))))))
-      .child(this.section("changes", "Changes", t, repo ? [div().max_w(140).truncate().text_size(11).text_color(t.dim).child(repo.name), this.badge(String(this.files.length), t)] : []))
-      .when(shown("changes") && Boolean(repo), (el) => el
+      .child(this.section("changes", "Changes", t, repo ? [div().max_w(140).truncate().text_size(11).text_color(t.dim).child(repo.name), this.badge(String(files.length), t)] : [], sash(1)))
+      .when(list[1].open, (el) => el.child(fit("changes", v_flex())
         .child(v_flex().flex_none().px(10).pt(4).pb(6).gap(6)
           .child(div().id("scm-message").w_full().h(28).px(8).flex().items_center().rounded(4).bg(t.surface).border_1().border_color(this.typing ? t.accent : t.border).cursor_text()
             .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.input).h_full().text_size(12).text_color(t.foreground)))
           .child(h_flex().id("scm-commit").w_full().h(28).gap(6).justify_center().items_center().rounded(4).bg(enabled ? t.solid : t.raised).text_color(enabled ? t.solid_foreground : t.dim).text_size(12)
             .when(enabled, (e) => e.cursor_pointer()).on_click((_e, cx) => this.commit(cx))
             .child(this.busy ? "Committing…" : `✓ Commit${repo ? ` on ${repo.branch === "(detached)" ? repo.oid.slice(0, 7) : repo.branch}` : ""}`)))
-        .when(Boolean(this.note), (e) => e.child(div().px(10).pb(6).text_size(11).text_color(t.ansi1).child(this.note)))
-        .child(v_flex().id("scm-files").flex_none().max_h(8 * ROW).overflow_y_scrollbar()
-          .children(this.files.map((f) => this.fileRow(f, t)))
-          .when(!this.files.length, (e) => e.child(empty(this.loading ? "Loading changes…" : "No uncommitted changes"))))
-        .when(this.limited, (e) => e.child(empty("Showing the first 1,000 changed files"))))
-      .child(this.section("graph", "Graph", t, repo?.upstream && repo.ahead !== null ? [div().max_w(160).truncate().text_size(11).text_color(t.dim).child(`${repo.branch} · ${repo.upstream}`)] : []))
-      .when(shown("graph"), (el) => el.child(div().flex_1().min_h(0).relative()
+        .when(Boolean(this.note), (e) => e.child(div().flex_none().px(10).pb(6).text_size(11).text_color(t.ansi1).child(this.note)))
+        .child(files.length ? div().flex_1().min_h(0).relative()
+          .child(v_virtual_list("scm-files", files.length, ROW, (i) => files[i].path,
+            (range) => files.slice(range.start, range.end).map((f) => this.fileRow(f, t))).size_full()
+            .on_item_click((path, cx) => { const f = this.files.find((f) => f.path === path); if (f) openDiff(this.selected, this.on, f, null, null); }))
+          .child(Scrollbar.vertical("scm-files").viewport_from_layout().absolute().inset_0())
+          : empty(this.loading ? "Loading changes…" : "No uncommitted changes"))
+        .when(this.limited, (e) => e.child(empty("Showing the first 1,000 changed files")))))
+      .child(this.section("graph", "Graph", t, repo?.upstream && repo.ahead !== null ? [div().max_w(160).truncate().text_size(11).text_color(t.dim).child(`${repo.branch} · ${repo.upstream}`)] : [], sash(2)))
+      .when(list[2].open, (el) => el.child(fit("graph", div().relative())
         .child(v_virtual_list("scm-graph", items.length, ROW, (i) => items[i].key,
           (range) => items.slice(range.start, range.end).map((item) => item.file || item.note ? this.graphFileRow(item, t) : this.graphRow(item.row, t))).size_full()
           .on_item_click((id, cx) => this.graphClick(id, cx)))
