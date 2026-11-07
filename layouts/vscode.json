@@ -124,7 +124,7 @@
                   },
                   "header": {
                     "content": {
-                      "mod": "pane"
+                      "mod": "vscode-pane"
                     },
                     "height": 30,
                     "position": "top",
