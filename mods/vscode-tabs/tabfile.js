@@ -6,6 +6,11 @@ export const TAB_MENU = { width: 300, height: 332 };
 
 // vscode-explorer's paths.js FILE_LABEL: a mod can't import another mod's files.
 const FILE_LABEL = "vscode.file";
+// Its DETAILS and withDetails: remote editors' { [address]: { argv, labels } } (its details.js, from `hc get`), filled
+// into terminals() rows that have no argv (Herdr's rows for another machine's terminals may lack them).
+export const DETAILS = "vscode-explorer.terminal-details";
+export const withDetails = (terminals, details) =>
+  terminals.map(t => (Array.isArray(t.argv) || !details?.[t.address] ? t : { ...t, ...details[t.address] }));
 
 // The file tab `id` of `space` shows, as the tab menu's props: { tab, file, on, pane, argv, root }. An editor tab is a
 // terminal running the editor launcher (vsedit.sh, as vscode-explorer's paths.js editorFileOf reads it: a mod can't

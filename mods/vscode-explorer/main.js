@@ -7,11 +7,12 @@ import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, v_virtual_list, VirtualListScrollHandle } from "gpui-base";
 import { spaces, panes, focused, terminals, exec, hc, readTextFile, watchFolder, theme, window, appHome, props, shared, setShared, notify, nextCommand } from "herdr";
 import { freshRoot, encode, decode } from "./cache.js";
-import { ExplorerMenu, ExplorerDialog, TabMenu, openMenu, openInCode, refreshKey, openFile, remote, warm, REVEAL } from "./menu.js";
+import { ExplorerMenu, ExplorerDialog, TabMenu, openMenu, openInCode, refreshKey, openFile, remote, warm, REVEAL, terminalRows } from "./menu.js";
 import { WARM } from "./warm.js";
 import { createCore } from "./core.js";
-import { editorFileOf, autoRevealOf, revealPath } from "./paths.js";
+import { editorFileOf, autoRevealOf, revealPath, DETAILS } from "./paths.js";
 import { createDesktop } from "./desktop.js";
+import { createDetails } from "./details.js";
 // Herdr starts with PATH=/usr/bin:/bin, so Homebrew/user tools (node, code, codex, trash) are looked up here too.
 const userExec = (cmd, args, opts) => exec("sh", ["-c", 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; exec "$0" "$@"', cmd, ...args], opts);
 
@@ -29,6 +30,8 @@ function location() {
 const key = () => JSON.stringify(location());
 // Remote editors' inline suggestions through this desktop (desktop.js).
 const desktop = createDesktop({ hc, exec, appHome, notify });
+// Remote editors' argv and labels for terminalRows() (details.js), shared so vscode-tabs reads them too.
+const details = createDetails({ hc, publish: (d) => setShared(DETAILS, d) });
 const PER_FOLDER = 500, TOTAL = 5000, ROW = 22;
 
 // The file the focused tab shows, { file, on }: an editor terminal's (its argv or label), or a viewer tab's (it shares its file
@@ -36,7 +39,7 @@ const PER_FOLDER = 500, TOTAL = 5000, ROW = 22;
 const VIEWER_FOCUS = "vscode-viewer.focused"; // vscode-viewer's
 function activeFile(f, viewer) {
   if (f?.terminal) {
-    const term = terminals().find(t => t.address === f.terminal);
+    const term = terminalRows().find(t => t.address === f.terminal);
     if (!term) return undefined;
     const file = editorFileOf(term.argv, term.labels);
     return file && { file, on: f.terminal.includes("/") ? f.terminal.split("/")[0] : null };
@@ -146,9 +149,10 @@ export default class Files extends View {
     // The warm editors (warm.js) are this tree's: ones listed from before (a restart, a reload) are forgotten, and
     // the first pass ends their editors. Every 10s a pass reads workbench.editor.preloadEditor; render() runs one when due.
     setShared(WARM, {});
+    setShared(DETAILS, {}); // shared values persist: ones from before name terminals that may be gone
     this.warmFill(cx, 0);
     cx.timer.every(10000, cx => {
-      cx.spawn(() => desktop.sync(terminals()));
+      cx.spawn(() => desktop.sync(terminals(), panes()));
       this.warmFill(cx, 0);
       this.refresh(cx);
       if (this.known && spaces().some(s => !this.known.has(s.id))) this.preloadAll(cx);
@@ -418,6 +422,7 @@ export default class Files extends View {
     // A file operation from the menu asks for a reload.
     const asked = shared(refreshKey);
     if (asked !== this.asked) { if (this.asked !== undefined) this.refresh(cx); this.asked = asked; }
+    details(terminals(), panes());
     this.autoReveal(cx);
     this.revealAsked(cx);
     // an editor focused in this active window: this desktop answers its machine's suggestions (desktop.js)

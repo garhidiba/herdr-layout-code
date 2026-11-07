@@ -40,6 +40,17 @@ export function editorFileOf(argv, labels) {
   return typeof file === "string" && file && !file.startsWith("-") ? file : null;
 }
 
+// Whether a pane's title is an editor's (vsedit's OSC 2: "a.ts — vsedit", "● a.ts — vsedit" while unsaved, then
+// " (closing)"; vscode-tabs' editorTitleState). It names the file but not its folder: a pane tells an editor apart
+// without its terminal's argv, which Herdr's rows for another machine's terminals may lack.
+export const isEditorTitle = (title) => /^(● )?.+ — vsedit( \(closing\))?$/.test(title ?? "");
+
+// The shared key holding remote editors' { [address]: { argv, labels } } (details.js, from `hc get`), and
+// terminals() rows with them filled in where a row has no argv: every editorFileOf caller reads rows through this.
+export const DETAILS = "vscode-explorer.terminal-details";
+export const withDetails = (terminals, details) =>
+  terminals.map(t => (Array.isArray(t.argv) || !details?.[t.address] ? t : { ...t, ...details[t.address] }));
+
 // A path with repeated slashes, `.` and `..` resolved, so two spellings of one file compare equal.
 export function normalPath(p) {
   const out = [];

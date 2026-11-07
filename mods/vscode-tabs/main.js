@@ -1,7 +1,7 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
 import { spaces, panes, terminals, run, openOverlay, theme, window, shared, layout, settings, hc, exec } from "herdr";
-import { tabFileOf, dirtyTabs, TAB_MENU } from "./tabfile.js";
+import { tabFileOf, dirtyTabs, TAB_MENU, withDetails, DETAILS } from "./tabfile.js";
 import { createTabCloser, signalCommand, CLOSE_REQUEST } from "./close.js";
 
 function find(node, id) {
@@ -74,7 +74,7 @@ export default class Tabs extends View {
         // A tab showing a file gets VS Code's editor tab menu (vscode-explorer's), any other Herdr's.
         .on_mouse_down("right", (_e, cx) => {
           cx.stop_propagation();
-          const file = tabFileOf(c.id, space, panes(), terminals(), shared("vscode-viewer.focused"));
+          const file = tabFileOf(c.id, space, panes(), withDetails(terminals(), shared(DETAILS)), shared("vscode-viewer.focused"));
           openOverlay(file ? { mod: "vscode-explorer", kind: "popup", ...TAB_MENU, props: { tabMenu: { ...file, dirty: [...dirty] } } }
             : { mod: "menu", kind: "popup", width: 200, props: { tab: "tab", target: { id: c.id, space: space.id } } });
         })

@@ -2,8 +2,8 @@
 // The editor tab menu: which tabs get it (tabfile.js), and its items and actions (vscode-explorer's paths.js).
 import test from "node:test";
 import assert from "node:assert/strict";
-import { tabFileOf, editorTitleState, dirtyTabs, TAB_MENU } from "../tabfile.js";
-import { tabMenuItems, closeArgs, fileTabs, splitArgs, clipboardCommand, revealCommand, menuHeight } from "../../vscode-explorer/paths.js";
+import { tabFileOf, editorTitleState, dirtyTabs, TAB_MENU, withDetails, DETAILS } from "../tabfile.js";
+import { tabMenuItems, closeArgs, fileTabs, splitArgs, clipboardCommand, revealCommand, menuHeight, DETAILS as EXPLORER_DETAILS } from "../../vscode-explorer/paths.js";
 
 const launcher = "/Users/me/.config/herdr-app/mods/vscode-viewer/editor/vsedit.sh";
 const space = { id: "s1", machine: null, folder: "/p", tabs: [{ id: "a" }, { id: "b" }, { id: "c" }, { id: "d" }] };
@@ -46,6 +46,17 @@ test("a remote space's editor tab is on that machine", () => {
   const f = tabFileOf("a", remote, rp, rt, null);
   assert.equal(f.on, "box");
   assert.deepEqual(splitArgs(f), { direction: "right", pane: "box/p9", argv: ["exec", "sh", "/home/me/.local/share/herdr-vscode/1/vsedit.sh", "/srv/x.go", "--close-on-exit", "--os", "mac"] });
+});
+
+test("a remote editor whose terminals() row has no argv is a file tab with the explorer's details (hc get)", () => {
+  const remote = { ...space, machine: "box", folder: "/srv" };
+  const rp = [{ pane: "box/p9", tab: "a", terminal: "box/t9", cwd: "/srv", title: "x.go — vsedit" }];
+  const rt = [{ address: "box/t9", agent: "sh", cwd: "/srv", state: "live" }];
+  assert.equal(tabFileOf("a", remote, rp, rt, null), null, "the row alone");
+  const argv = ["sh", "-c", "…", "sh", "exec", "sh", "/home/me/.local/share/herdr-vscode/1/vsedit.sh", "/srv/x.go", "--close-on-exit"];
+  const f = tabFileOf("a", remote, rp, withDetails(rt, { "box/t9": { argv, labels: {} } }), null);
+  assert.equal(f.file, "/srv/x.go");
+  assert.equal(DETAILS, EXPLORER_DETAILS, "the explorer's shared key");
 });
 
 test("the menu is VS Code's tab menu, the items Herdr can do, with the OS's keys", () => {

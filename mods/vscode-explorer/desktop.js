@@ -7,7 +7,7 @@
 //   asks it and no other: of several desktops showing the same terminal, the last to focus it wins.
 // A machine reached through a command (hc machine add --via) has no ssh to tunnel: its editors get no suggestions.
 // No Herdr imports, so node tests load it.
-import { editorFileOf } from "./paths.js";
+import { editorFileOf, isEditorTitle } from "./paths.js";
 
 export const DESKTOPS = ".local/share/herdr-vscode/desktops"; // under the machine's $HOME (link.cjs, remote-vsedit.sh)
 // There: `active` = $1 (a hex id), through a temp file and a rename.
@@ -23,8 +23,12 @@ export function linkName(machine) {
   return `vscode-link-${h.toString(16).padStart(8, "0")}`;
 }
 
-// The machines with an editor open, from Herdr's terminals() rows (a remote one's address is "<machine>/t7").
-export const editorMachines = (terminals) => new Set(terminals.filter(t => t.address?.includes("/") && editorFileOf(t.argv, t.labels)).map(t => t.address.split("/")[0]));
+// The machines with an editor open (a remote terminal's address is "<machine>/t7"): from its terminals() row's argv or
+// labels, or from its pane's title (paths.js isEditorTitle), which needs neither.
+export const editorMachines = (terminals, panes = []) => new Set([
+  ...terminals.filter(t => editorFileOf(t.argv, t.labels)).map(t => t.address),
+  ...panes.filter(p => isEditorTitle(p.title)).map(p => p.terminal),
+].filter(a => a?.includes("/")).map(a => a.split("/")[0]));
 
 // One pass: the links to start ({ machine, name, target }) and to end (names), from the machines with an editor open
 // (`wanted`), `hc machine ls` rows and the live hc terminals' names. A machine reached through a command, or not
@@ -42,7 +46,7 @@ export function plan(wanted, machines, running) {
 
 const ID = /^[0-9a-f]{1,64}$/;
 // hc(args) and exec(cmd, args, {on}) as Herdr's (resolve {code, stdout, stderr}); appHome() Herdr's home; notify a toast.
-// Returns sync(terminals) (the 10s pass) and mark(machine | null) (each draw: the machine of the editor focused in an
+// Returns sync(terminals, panes) (the 10s pass) and mark(machine | null) (each draw: the machine of the editor focused in an
 // active window).
 export function createDesktop({ hc, exec, appHome, notify }) {
   let id = null, marked = null, syncing = false;
@@ -54,8 +58,8 @@ export function createDesktop({ hc, exec, appHome, notify }) {
     return id;
   }
 
-  async function sync(terminals) {
-    const wanted = editorMachines(terminals);
+  async function sync(terminals, panes) {
+    const wanted = editorMachines(terminals, panes);
     if (syncing) return;
     syncing = true;
     try {
@@ -70,7 +74,12 @@ export function createDesktop({ hc, exec, appHome, notify }) {
       await Promise.all([
         ...stop.map(name => hc(["kill", name]).catch(() => {})),
         ...start.map(l => hc(["run", "--bg", "--no-parent", "--rm", "--name", l.name, "--", "sh", "-c", LINK, "herdr-vscode", appHome(),
-          `${appHome()}/mods/vscode-viewer/editor/link.cjs`, l.target, me]).catch(() => {})),
+          `${appHome()}/mods/vscode-viewer/editor/link.cjs`, l.target, me]).then(r => {
+          // hc refusing the link is otherwise silent (each pass just tries again): said once per machine
+          if (r.code === 0 || told.has(l.name)) return;
+          told.add(l.name);
+          notify({ title: `No inline suggestions in ${l.machine}'s editor`, body: `hc run failed: ${String(r.stderr ?? "").trim().slice(0, 200) || `exit ${r.code}`}`, level: "warning" });
+        }).catch(() => {})),
       ]);
     } finally { syncing = false; }
   }

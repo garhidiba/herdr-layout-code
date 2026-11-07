@@ -64,6 +64,18 @@ test("a machine reached through a command is told once", async () => {
   assert.deepEqual(told, ["No inline suggestions in fly's editor"]);
 });
 
+test("a remote editor known only by its pane's title is linked; hc refusing the link is told once", async () => {
+  const { hc: base, calls } = fakeHc({ machines: [machine("a7z", { target: "root@192.168.50.241" })] });
+  const hc = async (args) => (args[0] === "run" ? (calls.push(args), { code: 2, stdout: "", stderr: "error: bad name\n" }) : base(args));
+  const told = [];
+  const d = createDesktop({ hc, exec: async () => ({ code: 0 }), appHome: () => "/H", notify: (n) => told.push(n.body) });
+  const row = { address: "a7z/t12", agent: "sh", cwd: "/root", state: "live" }, pane = { terminal: "a7z/t12", title: "install_beszel.sh — vsedit" };
+  await d.sync([row], [pane]);
+  await d.sync([row], [pane]);
+  assert.equal(calls.filter(c => c[0] === "run").length, 2, "each pass tries again");
+  assert.deepEqual(told, ["hc run failed: error: bad name"]);
+});
+
 test("focusing a remote editor in an active window marks this desktop active there, once per change", async () => {
   const { hc } = fakeHc();
   const execs = [];

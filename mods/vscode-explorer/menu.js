@@ -6,9 +6,12 @@ import { exec, hc, run, spaces, panes, terminals, machines, props, openOverlay, 
 import { createOpenTab } from "./launch.js";
 import { createWarmPool, TIMING } from "./warm.js";
 import { menuItems, menuHeight, openWith, baseName, parentOf, relativeTo, nameProblem, vscodeRemoteArgs, isMarkdown, editorTabOf,
-  tabMenuItems, closeArgs, fileTabs, splitArgs, clipboardCommand, revealCommand } from "./paths.js";
+  tabMenuItems, closeArgs, fileTabs, splitArgs, clipboardCommand, revealCommand, withDetails, DETAILS } from "./paths.js";
 import { createOps } from "./ops.js";
 import { createRemote, createOpenFile, keysOs, ROOT, INSTALL_COMMAND, INSTALL_REQUEST } from "./remote.js";
+
+// Herdr's terminals() rows, a remote editor's with its argv and labels (details.js): what editorFileOf reads.
+export const terminalRows = () => withDetails(terminals(), shared(DETAILS));
 
 // Each local space's warm editor, off screen (warm.js): the tree keeps them (main.js), any open hands one a file.
 export const warm = createWarmPool({ hc, run, exec, spaces, panes, terminals, machines, shared, setShared, appHome, home, readTextFile });
@@ -38,7 +41,7 @@ export const remote = createRemote({ exec, readTextFile, notify, appHome, platfo
 // Every way the Explorer opens a file: the tree's click, Open / Open With, a new file. A file open in an editor tab of
 // this space is selected there instead.
 const showOpen = (file, on) => {
-  const tab = editorTabOf(file, on, spaces().find(s => s.active), panes(), terminals());
+  const tab = editorTabOf(file, on, spaces().find(s => s.active), panes(), terminalRows());
   if (tab) run("tab.select", { id: tab });
   return Boolean(tab);
 };
@@ -181,7 +184,7 @@ export class TabMenu extends ExplorerMenu {
         const space = spaces().find(s => s.tabs.some(x => x.id === t.tab));
         const dirty = new Set(t.dirty ?? []);
         // The tab bar closes them (it outlives this popup): an unsaved editor asks Save / Don't Save / Cancel first.
-        return setShared(TAB_CLOSE, { tabs: closeArgs(action, space?.tabs ?? [], t.tab, fileTabs(space, panes(), terminals()), dirty), at: Date.now() });
+        return setShared(TAB_CLOSE, { tabs: closeArgs(action, space?.tabs ?? [], t.tab, fileTabs(space, panes(), terminalRows()), dirty), at: Date.now() });
       }
       case "copyPath": return copyText(t.file);
       case "copyRelative": return copyText(t.root ? relativeTo(t.root, t.file) : t.file);
