@@ -3,7 +3,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { tabFileOf, editorTitleState, dirtyTabs, TAB_MENU, withDetails, DETAILS } from "../tabfile.js";
-import { tabMenuItems, closeArgs, fileTabs, splitArgs, clipboardCommand, revealCommand, menuHeight, DETAILS as EXPLORER_DETAILS } from "../../vscode-explorer/paths.js";
+import { tabMenuItems, moveRows, intoOf, closeArgs, fileTabs, splitArgs, clipboardCommand, revealCommand, menuHeight, DETAILS as EXPLORER_DETAILS } from "../../vscode-explorer/paths.js";
 
 const launcher = "/Users/me/.config/herdr-app/mods/vscode-viewer/editor/vsedit.sh";
 const space = { id: "s1", machine: null, folder: "/p", tabs: [{ id: "a" }, { id: "b" }, { id: "c" }, { id: "d" }] };
@@ -82,6 +82,15 @@ test("the tab bar opens the popup at the menu's own height on every OS", () => {
   for (const os of ["mac", "win", "linux"]) for (const remote of [false, true]) for (const flag of [{}, { lone: true, alone: true }, { viewer: true }]) {
     assert.equal(menuHeight(tabMenuItems({ remote, os, ...flag })), TAB_MENU.height, `${os} remote=${remote} ${JSON.stringify(flag)}`);
   }
+});
+
+test("Move into Tab… lists the other tabs in place, right of then below, and reads the pick back", () => {
+  const named = { ...space, tabs: [{ id: "a", named: false, name: "1" }, { id: "b", named: true, name: "a.ts" }, { id: "box/c", named: true, name: "x" }] };
+  const rows = moveRows(named, "b", [{ tab: "a", title: "✳ Claude Code" }]);
+  assert.deepEqual(rows, [["Right of ✳ Claude Code", "into:right:a"], ["Right of x", "into:right:box/c"], "-",
+    ["Below ✳ Claude Code", "into:down:a"], ["Below x", "into:down:box/c"]]);
+  assert.deepEqual(intoOf("into:down:box/c"), { place: "down", into: "box/c" });
+  for (const other of ["close", "into:left:a", "into:right:", null]) assert.equal(intoOf(other), null, String(other));
 });
 
 test("the moves are disabled when there is nowhere to go, and for a viewer", () => {

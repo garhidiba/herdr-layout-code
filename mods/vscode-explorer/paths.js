@@ -192,6 +192,19 @@ export function tabMenuItems({ remote, os, lone = false, alone = false, viewer =
   return groups.flatMap((g, i) => (i ? ["-", ...g] : g));
 }
 
+// Move into Tab…'s rows, in place of the menu's: "Right of ‹tab›", then "Below ‹tab›", for each other tab of `space`
+// (a tab's name, else its first pane's title), actions "into:<place>:<tab id>" (intoOf reads them back).
+export function moveRows(space, from, panes) {
+  const others = (space?.tabs ?? []).filter(c => c.id !== from);
+  const title = (c) => (c.named ? c.name : panes.find(p => p.tab === c.id)?.title || c.name);
+  const rows = (place, word) => others.map(c => [`${word} ${title(c)}`, `into:${place}:${c.id}`]);
+  return [...rows("right", "Right of"), "-", ...rows("down", "Below")];
+}
+export const intoOf = (action) => {
+  const m = /^into:(right|down):(.+)$/.exec(action ?? "");
+  return m ? { place: m[1], into: m[2] } : null;
+};
+
 // The tabs of `space` showing files only (VS Code's editors): every pane an editor terminal or a vscode-viewer pane
 // (several, once moved together: vscode-tabs' move.js). A tab with a shell or an agent in it is never one.
 export const fileTabs = (space, panes, terminals) => {

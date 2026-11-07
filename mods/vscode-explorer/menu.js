@@ -6,7 +6,7 @@ import { exec, hc, run, spaces, panes, terminals, machines, props, openOverlay, 
 import { createOpenTab } from "./launch.js";
 import { createWarmPool, TIMING } from "./warm.js";
 import { menuItems, menuHeight, openWith, baseName, parentOf, relativeTo, nameProblem, vscodeRemoteArgs, isMarkdown, editorPaneOf,
-  tabMenuItems, closeArgs, fileTabs, splitArgs, clipboardCommand, revealCommand, withDetails, deleteTitle, extraLines, DETAILS } from "./paths.js";
+  tabMenuItems, moveRows, intoOf, closeArgs, fileTabs, splitArgs, clipboardCommand, revealCommand, withDetails, deleteTitle, extraLines, DETAILS } from "./paths.js";
 import { createOps } from "./ops.js";
 import { createRemote, createOpenFile, keysOs, ROOT, INSTALL_COMMAND, INSTALL_REQUEST } from "./remote.js";
 
@@ -147,7 +147,7 @@ export class ExplorerMenu {
   render(cx) {
     const t = theme(), rows = this.rows(), picks = rows.map((r, i) => (r === "-" || r[3] ? -1 : i)).filter(i => i >= 0);
     const move = (d) => { const k = picks.indexOf(this.at); this.at = picks[(k + d + picks.length + (k === -1 && d < 0 ? 1 : 0)) % picks.length]; };
-    return v_flex().id("explorer-menu").track_focus(this.handle).w_full().min_h(0).p(5).bg(t.popover).text_size(12.8)
+    return v_flex().id("explorer-menu").track_focus(this.handle).w_full().h_full().min_h(0).overflow_y_scrollbar().p(5).bg(t.popover).text_size(12.8)
       .on_key_down((e, cx) => {
         if (e.key === "down") move(1);
         else if (e.key === "up") move(-1);
@@ -180,12 +180,15 @@ export class TabMenu extends ExplorerMenu {
     // Reopen offers the other editor: the same one would find this tab open (openFile's showOpen) and only select it.
     if (this.withList) return openWith(!!t.on).slice(0, 2).filter(r => r[1] !== (t.argv ? "editor" : "viewer"));
     const space = spaces().find(s => s.tabs.some(x => x.id === t.tab));
+    if (this.moving) return moveRows(space, t.tab, panes());
     return tabMenuItems({ remote: !!t.on, os: os(), lone: (space?.tabs.length ?? 0) < 2, alone: panes().filter(p => p.tab === t.tab).length < 2, viewer: !t.argv });
   }
 
   choose(action, cx) {
     const t = this.target;
     if (action === "reopenWith") { this.withList = true; this.at = -1; return cx.notify(); }
+    // Move into Tab… lists the tabs in place (a popup opened from this one didn't show).
+    if (action === "moveInto") { this.moving = true; this.at = -1; return cx.notify(); }
     // Reopen: the new tab first (closing the old one first could close the space), then the old one.
     if (action === "editor" || action === "viewer") return !this.opening && (this.opening = true) && cx.spawn(async cx => {
       try { await openFile(t.file, { on: t.on, how: action, folder: t.root ?? undefined }, cx); run("tab.close", { id: t.tab }); } finally { this.close(); }
@@ -209,15 +212,11 @@ export class TabMenu extends ExplorerMenu {
         run("layout.show", { id: "panel" });
         return setShared(REVEAL, { file: t.file, on: t.on, at: Date.now() });
       case "split": return run("pane.split", splitArgs(t));
-      // vscode-tabs' move.js moves the editor's terminal; vscode-menu lists the tabs it can join (its "move" menu).
-      case "moveInto": case "moveOut": {
-        const terminal = panes().find(p => p.pane === t.pane)?.terminal, space = spaces().find(s => s.tabs.some(x => x.id === t.tab));
-        if (!terminal || !space) return;
-        if (action === "moveOut") return setShared(MOVE, { terminal, into: null, place: "tab", name: baseName(t.file), at: Date.now() });
-        // vscode-menu's rows: 31px, two per other tab, a separator (9px) and 10px padding; it scrolls past 420px.
-        return openOverlay({ mod: "vscode-menu", kind: "popup", width: 260, height: Math.min(420, 19 + 62 * (space.tabs.length - 1)),
-          props: { tab: "move", target: { terminal, from: t.tab, space: space.id } } });
-      }
+    }
+    // vscode-tabs' move.js moves the editor's terminal: into the tab picked from moveRows, or out to a new tab.
+    const terminal = panes().find(p => p.pane === t.pane)?.terminal, into = intoOf(action);
+    if (terminal && (into || action === "moveOut")) {
+      setShared(MOVE, { terminal, ...(into ?? { into: null, place: "tab", name: baseName(t.file) }), at: Date.now() });
     }
   }
 }

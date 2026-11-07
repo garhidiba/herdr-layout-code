@@ -25,7 +25,8 @@ async function checkout(folder, on) {
 
 // vscode-tabs' move.js MOVE_REQUEST: the tab bar moves a terminal between tabs ({ terminal, into, place, name?, at }).
 const MOVE = "vscode-tabs.move";
-// "Move into tab…": the "move" menu below, for terminal `terminal` now in tab `from`, when its space has another tab.
+// "Move into tab…": the "move" rows below (Menu.list shows them in place), for terminal `terminal` now in tab `from`,
+// when its space has another tab.
 function moveInto(terminal, from) {
   const space = spaces().find((s) => s.tabs.some((c) => c.id === from));
   return space && space.tabs.length > 1 ? [["Move into tab…", "move.list", { terminal, from, space: space.id }]] : [];
@@ -136,19 +137,20 @@ export default class Menu extends View {
       });
   }
 
+  // "Move into tab…" swaps this menu's rows for the tabs to move into, in place (a popup opened from a popup didn't show).
+  list() {
+    return items(this.moving ? { tab: "move", target: this.moving } : props(), this.git);
+  }
+
   choose(i, cx) {
-    const it = items(props(), this.git)[i];
+    const it = this.list()[i];
     if (!it) return;
+    if (it[1] === "move.list") { this.moving = it[2]; this.at = 0; return cx.notify(); }
     closeOverlay(props()?.overlay);
     if (it[1] === "worktree") openOverlay({ mod: "worktree", kind: "dialog", ...(it[2].action === "open" ? { width: 560, height: 480 } : { width: 440, height: 260 }), props: it[2] });
     else if (it[1] === "vscode.open") userExec("code", [it[2].folder]).catch(() => {});
     else if (it[1] === "finder.open") exec("open", [it[2].folder]).catch(() => {});
     else if (it[1] === MOVE) setShared(MOVE, { ...it[2], at: Date.now() });
-    // Rows of 31px, two per other tab, a separator (9px) and 10px padding; past 420px it scrolls.
-    else if (it[1] === "move.list") {
-      const n = spaces().find((s) => s.id === it[2].space)?.tabs.length ?? 2;
-      openOverlay({ mod: "vscode-menu", kind: "popup", width: 260, height: Math.min(420, 19 + 62 * (n - 1)), props: { tab: "move", target: it[2] } });
-    }
     // vscode-spaces reads these (its rows' state is its own).
     else if (it[1].startsWith("vscode-spaces.")) setShared("vscode-spaces.ask", { action: it[1].slice(14), id: it[2].id, at: Date.now() });
     else {
@@ -164,7 +166,7 @@ export default class Menu extends View {
 
   render(cx) {
     const t = theme();
-    const list = items(props(), this.git);
+    const list = this.list();
     return v_flex()
       .id("menu")
       .track_focus(this.handle)
