@@ -54,6 +54,8 @@ function normalize(raw = {}) {
   if (CURSOR_BLINKING.includes(raw["editor.cursorBlinking"])) v["editor.cursorBlinking"] = raw["editor.cursorBlinking"];
   if (WRAP.includes(raw["editor.wordWrap"])) v["editor.wordWrap"] = raw["editor.wordWrap"];
   if (WRAP_INDENT.includes(raw["editor.wrappingIndent"])) v["editor.wrappingIndent"] = raw["editor.wrappingIndent"];
+  // VS Code's workbench.statusBar.visible (not written into a new file): false hides the status bar (vscode-memo's).
+  v["workbench.statusBar.visible"] = raw["workbench.statusBar.visible"] !== false;
   const wc = Number(raw["editor.wordWrapColumn"]);
   if (Number.isInteger(wc)) v["editor.wordWrapColumn"] = clamp(wc, 1, 500);
   return v;

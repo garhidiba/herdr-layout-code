@@ -57,6 +57,8 @@ pub struct Settings {
     pub word_wrap_column: usize,
     /// editor.wrappingIndent: "none" | "same" | "indent" | "deepIndent"
     pub wrapping_indent: &'static str,
+    /// workbench.statusBar.visible (not written into a new file): false hides the status bar (vscode-memo's)
+    pub status_bar: bool,
 }
 
 impl Default for Settings {
@@ -81,6 +83,7 @@ impl Default for Settings {
             word_wrap: "off",
             word_wrap_column: 80,
             wrapping_indent: "same",
+            status_bar: true,
         }
     }
 }
@@ -126,6 +129,7 @@ pub fn normalize(raw: &Value) -> Settings {
     v.inline = crate::inline::normalize(raw);
     v.ignore_recommendations = flag("extensions.ignoreRecommendations", false);
     v.code_lens = flag("editor.codeLens", true);
+    v.status_bar = flag("workbench.statusBar.visible", true);
     let pick = |k: &str, of: &[&'static str], d: &'static str| raw.get(k).and_then(Value::as_str).and_then(|s| of.iter().find(|o| **o == s).copied()).unwrap_or(d);
     v.find_seed = pick("editor.find.seedSearchStringFromSelection", &["never", "always", "selection"], "always");
     v.find_in_selection = pick("editor.find.autoFindInSelection", &["never", "always", "multiline"], "never");
@@ -216,6 +220,8 @@ mod tests {
         assert_eq!(v.auto_save_delay, 3600.0);
         assert_eq!(v.tab_size, 4);
         assert!(!v.breadcrumbs);
+        assert!(v.status_bar && !normalize(&json!({ "workbench.statusBar.visible": false })).status_bar);
+        assert!(normalize(&json!({ "workbench.statusBar.visible": "no" })).status_bar);
         assert_eq!(auto_save_label(&normalize(&json!({ "files.autoSave": "afterDelay", "files.autoSaveDelay": 0.3 }))), "Auto Save: after 0.3s");
     }
 

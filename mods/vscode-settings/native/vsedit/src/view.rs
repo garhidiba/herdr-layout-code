@@ -252,7 +252,11 @@ impl Editor {
         if let Some(h) = self.ls.hover_box.as_mut() {
             h.render(&mut p, &area);
         }
-        self.render_status(&mut p);
+        if self.settings.status_bar {
+            self.render_status(&mut p);
+        } else {
+            self.status_hits.clear(); // its messages aren't shown either (the find widget counts its own matches)
+        }
         let mut cursor = self.render_prompt(&mut p);
         let area = Area { c: &self.c, rows: self.rows, cols: self.cols };
         match self.popup.as_mut() {
@@ -353,7 +357,7 @@ impl Editor {
     }
 
     fn layout_bars(&mut self) {
-        let base = (self.rows - 2 - self.panel_height()).max(1) as usize;
+        let base = (self.rows - 1 - self.below()).max(1) as usize;
         let n = self.view_count();
         let widest = self.widest(self.top, base);
         let gw = self.gutter();
@@ -1130,7 +1134,7 @@ impl Editor {
             }
             return;
         }
-        if m.y == self.rows {
+        if m.y == self.rows && self.settings.status_bar {
             if m.press() {
                 if let Some(&(_, _, a)) = self.status_hits.iter().find(|h| m.x >= h.0 && m.x < h.0 + h.1) {
                     match a {

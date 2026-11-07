@@ -300,7 +300,8 @@ const B = require("../backup.cjs");
 test("settings: defaults on first run, seconds clamped to 0.1-3600, unknown keys kept on write", () => {
   const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "vsedit-set-")), "sub", "vscode-settings.json");
   const first = S.load(file);
-  assert.deepEqual(first.values, { ...S.DEFAULTS, ...require("../inline.cjs").normalize({}) }); // the inline suggestion settings aren't written
+  // the inline suggestion settings and workbench.statusBar.visible aren't written
+  assert.deepEqual(first.values, { ...S.DEFAULTS, ...require("../inline.cjs").normalize({}), "workbench.statusBar.visible": true });
   assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), S.DEFAULTS);
   fs.writeFileSync(file, '{\n  // mine\n  "files.autoSave": "afterDelay", "files.autoSaveDelay": 0.01, "workbench.colorTheme": "x", "editor.tabSize": "big",\n}');
   const v = S.load(file).values;
@@ -883,6 +884,19 @@ test("Go to Symbol in Editor (⇧⌘O) lists the outline, names its source and j
   ed.handle({ type: "mouse", button: 0, x: 3, y: 1, release: false, motion: false });
   await new Promise(r => setTimeout(r, 10));
   assert.equal(ed.popup?.text, "@");
+});
+
+test("workbench.statusBar.visible: false gives the status bar's row to the text, and a click there is the text's", async () => {
+  assert.equal(S.normalize({})["workbench.statusBar.visible"], true);
+  assert.equal(S.normalize({ "workbench.statusBar.visible": "no" })["workbench.statusBar.visible"], true);
+  const ed = await plainEditor(Array.from({ length: 30 }, (_, i) => `line ${i}`));
+  ed.rows = 10; ed.cols = 80;
+  assert.equal(ed.height, 8); // the breadcrumbs, 8 text rows, the status bar
+  ed.settings = { ...ed.settings, ...S.normalize({ "workbench.statusBar.visible": false }) };
+  assert.equal(ed.height, 9);
+  ed.handle({ type: "mouse", button: 0, x: ed.gutter + 3, y: 10, release: false, motion: false });
+  ed.handle({ type: "mouse", button: 0, x: ed.gutter + 3, y: 10, release: true, motion: false });
+  assert.equal(ed.head.line, 8);
 });
 
 test("breadcrumbs.enabled defaults to true and only takes a boolean", () => {

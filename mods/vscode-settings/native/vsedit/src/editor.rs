@@ -495,7 +495,12 @@ impl Editor {
 
     // ----- text rows and columns (less the scrollbars of the last frame) -----
     pub fn height(&self) -> usize {
-        (self.rows - 2 - self.panel_height() - self.hbar.shown as i32).max(1) as usize
+        (self.rows - 1 - self.below() - self.hbar.shown as i32).max(1) as usize
+    }
+    /// Rows under the text: the status bar, unless workbench.statusBar.visible is false (its row is the text's then); a
+    /// results panel and the row under it (the status bar's place) while one is open.
+    pub fn below(&self) -> i32 {
+        if self.ls.panel.is_some() { self.panel_height() + 1 } else { self.settings.status_bar as i32 }
     }
     /// The results panel's rows (0 without one).
     pub fn panel_height(&self) -> i32 {
@@ -3673,6 +3678,23 @@ pub(crate) mod tests {
         let sub = ed.row_pos(ed.head()).0;
         let row = ed.rows_to(0, sub);
         assert!(row >= 0 && row < ed.height() as i64, "cursor row {row}");
+    }
+
+    #[test]
+    fn a_hidden_status_bar_gives_its_row_to_the_text_and_a_click_there_is_the_texts() {
+        let lines: Vec<String> = (0..30).map(|i| format!("line {i}")).collect();
+        let mut ed = wrapped(&lines.iter().map(String::as_str).collect::<Vec<_>>(), "off", 10, 80);
+        assert_eq!(ed.height(), 8);
+        assert!(screen(&mut ed)[9].contains("Ln 1, Col 1"));
+        ed.settings.status_bar = false;
+        assert_eq!(ed.height(), 9);
+        let rows = screen(&mut ed);
+        assert!(rows[9].contains("line 8") && !rows[9].contains("Ln 1"), "{:?}", rows[9]);
+        assert!(ed.status_hits.is_empty());
+        let x = ed.gutter() as i32 + 3;
+        ed.mouse(&crate::keys::Mouse { button: 0, x, y: 10, ..Default::default() }, None);
+        ed.mouse(&crate::keys::Mouse { button: 0, x, y: 10, release: true, ..Default::default() }, None);
+        assert_eq!(ed.head().line, 8);
     }
 
     #[test]

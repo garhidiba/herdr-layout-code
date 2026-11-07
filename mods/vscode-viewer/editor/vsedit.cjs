@@ -151,7 +151,11 @@ class Editor {
   get head() { return this.sel.head; }
   get empty() { return cmp(this.sel.anchor, this.sel.head) === 0; }
   // Text rows and columns, less the scrollbars of the last frame (the row above the status bar, the last column).
-  get height() { return Math.max(1, this.rows - 2 - (this.panel ? this.panel.height(this) : 0) - (this.hbar.shown ? 1 : 0)); }
+  get height() { return Math.max(1, this.rows - 1 - this.below - (this.hbar.shown ? 1 : 0)); }
+  // Rows under the text: the status bar, unless workbench.statusBar.visible is false (its row is the text's then); a
+  // results panel and the row under it (the status bar's place) while one is open.
+  get statusBar() { return this.settings?.["workbench.statusBar.visible"] !== false; }
+  get below() { return this.panel ? this.panel.height(this) + 1 : this.statusBar ? 1 : 0; }
   get gutter() { return Math.max(3, String(this.lines.length).length) + 3; }
   get textWidth() { return Math.max(1, this.cols - this.gutter - (this.vbar.shown ? 1 : 0)); }
   range() { return ordered(this.sel.anchor, this.sel.head); }
@@ -1829,7 +1833,7 @@ class Editor {
   // Shows the vertical bar when the file is taller than the view, the horizontal one when a line in view is wider; the
   // vertical one scrolls to the last line at the top (VS Code's scroll beyond last line), the horizontal one 5 columns past the widest line.
   layoutBars() {
-    const base = Math.max(1, this.rows - 2 - (this.panel ? this.panel.height(this) : 0)), n = this.viewCount, widest = this.widest(this.top, base);
+    const base = Math.max(1, this.rows - 1 - this.below), n = this.viewCount, widest = this.widest(this.top, base);
     let v = n > base || this.topRow > 0 || this.problems().length > 0; // problems: the overview ruler always shows, as VS Code's
     const h = widest > this.cols - this.gutter - (v ? 1 : 0) || this.left > 0;
     if (h) v ||= n > base - 1;
@@ -1859,7 +1863,7 @@ class Editor {
       if (ev.type !== "mouse" || !ev.motion || ev.button !== 3) return null;
       return this.popup instanceof O.Menu && this.popup.hover(ev, this) ? null : "";
     }
-    if (ev.type === "mouse" && ev.motion && ev.button === 3 && ev.y === this.rows) { // the inline suggestion item: today's usage
+    if (ev.type === "mouse" && ev.motion && ev.button === 3 && ev.y === this.rows && this.statusBar) { // the inline suggestion item: today's usage
       const h = this.statusHits?.find(h => h.hover && ev.x >= h.x && ev.x < h.x + h.w), text = h?.hover();
       if (text && this.message?.text !== text) { this.say(text, this.colors.barFg, 6000); return null; }
     }
@@ -1908,7 +1912,7 @@ class Editor {
       else this.dragTimer ??= setInterval(() => { if (!this.dragging || !this.dragStep()) this.stopDragScroll(); this.redraw?.(); }, 40);
       return;
     }
-    if (ev.y === this.rows) { // the status bar's items
+    if (ev.y === this.rows && this.statusBar) { // the status bar's items
       if (ev.button === 0 && !ev.motion) this.statusHits?.find(h => ev.x >= h.x && ev.x < h.x + h.w)?.run();
       return;
     }
@@ -2031,7 +2035,8 @@ class Editor {
     }
     if (this.panel) this.panel.render(P, this);
     this.hoverBox?.render(P, this);
-    this.renderStatus(P);
+    if (this.statusBar) this.renderStatus(P);
+    else this.statusHits = []; // its messages aren't shown either (the find widget counts its own matches)
     let cursor = this.renderPrompt(P);
     if (this.popup) { this.popup.cursor = null; this.popup.render(P, this); cursor = this.popup.cursor ?? "hide"; }
     P.out += "\x1b[0m" + SB.hoverMode(this, this.vbar.shown || this.hbar.shown || this.lines.length > 1); // bars and chevrons follow the pointer

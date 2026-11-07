@@ -478,6 +478,26 @@ def run_auto_save(tmp):
     print("auto save: ok")
 
 
+def run_hidden_status_bar(tmp):
+    """workbench.statusBar.visible false (vscode-memo's editor): no status bar is ever painted; the last row is text."""
+    settings = os.path.join(tmp, "nostatus", "vscode-settings.json")
+    os.makedirs(os.path.dirname(settings))
+    open(settings, "w").write('{"workbench.statusBar.visible": false, "files.autoSave": "afterDelay", "files.autoSaveDelay": 0.3, "editor.inlineSuggest.provider": "off"}')
+    file = os.path.join(tmp, "nostatus.md")
+    open(file, "w").write("".join(f"row {i}\n" for i in range(60)))
+    t = Term(file, env={"VSEDIT_SETTINGS": settings})
+    assert t.read("row 1"), "the text did not paint"
+    t.send("Z")
+    t.read("never", timeout=1.2)
+    assert open(file).read().startswith("Zrow 0\n"), "not auto-saved: " + repr(open(file).read()[:20])
+    out = screen_of(t)
+    assert "Ln 1, Col" not in out and "UTF-8" not in out and "Auto Save" not in out, "a status bar was painted"
+    assert "row 28" in out, "the last row isn't text (30 rows: the breadcrumbs, then rows 0-28)"
+    t.send(QUIT)
+    t.wait_exit()
+    print("hidden status bar: ok")
+
+
 def run_cursor_style(tmp):
     """editor.cursorStyle / editor.cursorBlinking: the start sequence carries the DECSCUSR code, a live change sends the new one."""
     settings = os.path.join(tmp, "cursor", "vscode-settings.json")
@@ -1534,7 +1554,7 @@ def main():
     engines = os.path.join(tmp, "engines.log")
     ISOLATED.update(VSEDIT_ENGINE_LOG=engines, VSEDIT_INLINE_USAGE=os.path.join(tmp, "inline-usage.json"))
     scenarios = [run_tsx, run_go, run_crlf, run_hex, run_error_page, run_drag_scroll, run_shift_click, run_minified, run_scrollbars, run_decorations,
-                 run_autoclose, run_git_gutter, run_folding, run_word_wrap, run_menu_and_cmd_save, run_save_dialog, run_close_request, run_warm, run_auto_save, run_cursor_style, run_hot_exit,
+                 run_autoclose, run_git_gutter, run_folding, run_word_wrap, run_menu_and_cmd_save, run_save_dialog, run_close_request, run_warm, run_auto_save, run_hidden_status_bar, run_cursor_style, run_hot_exit,
                  run_keybindings, run_mac_keys, run_format, run_typescript, run_find_and_status, run_symbols_and_problems, run_install_prompt, run_small_batch,
                  run_files_and_navigation, run_picker_scroll, run_medium_language, run_medium_editing, run_inline_suggest, run_references_and_lenses, run_inline_hosted]
     only = set(sys.argv[1:])
