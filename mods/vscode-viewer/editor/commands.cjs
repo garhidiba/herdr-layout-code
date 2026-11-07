@@ -97,6 +97,7 @@ const RUNS = {
   "workbench.action.openGlobalKeybindingsFile": ["openKeybindings"],
   "markdown.showPreviewToSide": ["markdownPreview", [false]],
   "markdown.showPreview": ["markdownPreview", [true]],
+  "html.openInDefaultBrowser": ["openInBrowser"],
   "workbench.action.closeActiveEditor": ["quit"],
   "undo": ["undo"],
   "redo": ["redo"],

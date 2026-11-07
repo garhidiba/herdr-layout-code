@@ -25,7 +25,7 @@ pub fn reason_of(e: &io::Error) -> String {
 }
 
 /// Starts a program without waiting; false when it isn't installed.
-fn launch(cmd: &str, args: &[&str]) -> bool {
+pub(crate) fn launch(cmd: &str, args: &[&str]) -> bool {
     let Some(bin) = which(cmd) else { return false };
     Command::new(bin).args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().is_ok()
 }

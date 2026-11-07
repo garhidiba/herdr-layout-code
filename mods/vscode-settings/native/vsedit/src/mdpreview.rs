@@ -1,15 +1,50 @@
-//! Markdown preview beside the editor (mdpreview.cjs; VS Code's Open Preview to the Side / Toggle Preview): a terminal
-//! can't draw rich Markdown, so the preview is the vscode-viewer mod (`{file, preview: true}`) in a pane right of the
-//! editor's, through herdr-app. Which viewer panes show a file: the shared value vscode-viewer.files
+//! Markdown and HTML preview beside the editor (mdpreview.cjs; VS Code's Open Preview to the Side / Toggle Preview): a
+//! terminal can't draw rich text, so the preview is the vscode-viewer mod (`{file, preview: true | "html"}`) in a pane
+//! right of the editor's, through herdr-app. Which viewer panes show a file: the shared value vscode-viewer.files
 //! (`{[pane]: {file, on}}`, saved in <herdr home>/shared.json); a pane that closed may linger there, so one counts only
 //! once `pane.focus` lands on it (`herdr-app status`'s focused_pane).
 
 use serde_json::{json, Value};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-pub const SCOPE: &str = "text.html.markdown";
+pub const MARKDOWN: &str = "text.html.markdown";
+pub const HTML: [&str; 2] = ["text.html.basic", "text.html.derivative"];
 pub const REMOTE: &str = "Preview: open from the Explorer on this computer";
+
+/// The viewer's preview prop for a language: true (Markdown), "html" (the viewer converts it: vscode-viewer/html.js).
+pub fn preview_of(scope: Option<&str>) -> Option<Value> {
+    match scope? {
+        MARKDOWN => Some(Value::Bool(true)),
+        s if HTML.contains(&s) => Some("html".into()),
+        _ => None,
+    }
+}
+
+/// $HC_TERMINAL_ID and herdr-app's path when this editor runs in Herdr on this computer (not on a remote machine, nor
+/// outside Herdr).
+fn herdr_app() -> Option<(String, PathBuf)> {
+    Some((std::env::var("HC_TERMINAL_ID").ok()?, crate::term::which("herdr-app")?))
+}
+
+/// HTML: Open in Default Browser's program and its arguments before the file, per platform.
+pub fn opener(os: &str) -> &'static [&'static str] {
+    match os {
+        "macos" => &["open"],
+        "windows" => &["cmd", "/c", "start", ""],
+        _ => &["xdg-open"],
+    }
+}
+
+/// HTML: Open in Default Browser: the platform's opener on `file`; Err(message) on a remote machine (its browser isn't
+/// this computer's) or when the opener is missing.
+pub fn open_in_browser(file: &str) -> Result<(), String> {
+    herdr_app().ok_or("Open in Browser: only for files on this computer")?;
+    let [cmd, args @ ..] = opener(std::env::consts::OS) else { unreachable!() };
+    let argv: Vec<&str> = args.iter().copied().chain([file]).collect();
+    crate::errorpage::launch(cmd, &argv).then_some(()).ok_or(format!("Open in Browser: {cmd} not found"))
+}
 
 /// The local viewer panes that show `file`, from shared.json's text (anything unreadable: none).
 pub fn viewer_panes(shared_text: &str, file: &str) -> Vec<String> {
@@ -24,7 +59,7 @@ pub fn viewer_panes(shared_text: &str, file: &str) -> Vec<String> {
 
 /// `herdr(args)` -> herdr-app's stdout. toggle: a shown preview closes (focus back to the editor), else one opens;
 /// otherwise a shown preview is focused, else one opens and the editor keeps focus. -> "closed" | "focused" | "opened".
-pub fn show_preview(file: &str, terminal: &str, toggle: bool, shared_text: &str, herdr: &dyn Fn(&[&str]) -> String) -> &'static str {
+pub fn show_preview(file: &str, preview: &Value, terminal: &str, toggle: bool, shared_text: &str, herdr: &dyn Fn(&[&str]) -> String) -> &'static str {
     let focused_pane = || serde_json::from_str::<Value>(&herdr(&["status"])).ok().and_then(|v| v.get("focused_pane")?.as_str().map(String::from));
     let editor = || herdr(&["do", "pane.focus", "--terminal", terminal]);
     for pane in viewer_panes(shared_text, file) {
@@ -40,7 +75,7 @@ pub fn show_preview(file: &str, terminal: &str, toggle: bool, shared_text: &str,
         return "closed";
     }
     editor(); // pane.split splits the focused pane
-    let split = json!({ "direction": "right", "mod": "vscode-viewer", "props": { "file": file, "preview": true } }).to_string();
+    let split = json!({ "direction": "right", "mod": "vscode-viewer", "props": { "file": file, "preview": preview } }).to_string();
     herdr(&["do", "pane.split", &split]);
     editor();
     "opened"
@@ -51,8 +86,8 @@ static BUSY: AtomicBool = AtomicBool::new(false);
 
 /// Runs show_preview on a thread with the real herdr-app; Err(message) when there is none here (a remote machine, or
 /// outside Herdr).
-pub fn spawn(file: String, toggle: bool) -> Result<(), &'static str> {
-    let (Ok(terminal), Some(bin)) = (std::env::var("HC_TERMINAL_ID"), crate::term::which("herdr-app")) else { return Err(REMOTE) };
+pub fn spawn(file: String, preview: Value, toggle: bool) -> Result<(), &'static str> {
+    let Some((terminal, bin)) = herdr_app() else { return Err(REMOTE) };
     if BUSY.swap(true, Ordering::SeqCst) {
         return Ok(());
     }
@@ -62,7 +97,7 @@ pub fn spawn(file: String, toggle: bool) -> Result<(), &'static str> {
             let out = Command::new(&bin).args(args).stdin(Stdio::null()).stderr(Stdio::null()).output();
             out.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default()
         };
-        show_preview(&file, &terminal, toggle, &shared_text, &herdr);
+        show_preview(&file, &preview, &terminal, toggle, &shared_text, &herdr);
         BUSY.store(false, Ordering::SeqCst);
     });
     Ok(())
@@ -91,7 +126,7 @@ mod tests {
             }
             r#"{"ok":true}"#.into()
         };
-        let r = show_preview("/r/x.md", "t1", toggle, shared, &herdr);
+        let r = show_preview("/r/x.md", &Value::Bool(true), "t1", toggle, shared, &herdr);
         (r, calls.into_inner())
     }
     fn shared_of(files: Value) -> String {
@@ -129,5 +164,28 @@ mod tests {
         let (r, calls) = run(&["p9"], true, &shared);
         assert_eq!(r, "closed");
         assert_eq!(calls[2..], ["do pane.close --pane p9", "do pane.focus --terminal t1"]);
+    }
+
+    #[test]
+    fn an_html_files_preview_asks_the_viewer_to_render_it_as_html() {
+        assert_eq!(preview_of(Some(MARKDOWN)), Some(json!(true)));
+        assert_eq!(preview_of(Some("text.html.basic")), Some(json!("html")));
+        assert_eq!(preview_of(Some("text.html.derivative")), Some(json!("html")));
+        assert_eq!(preview_of(Some("source.js")), None);
+        assert_eq!(preview_of(None), None);
+        let calls = RefCell::new(vec![]);
+        let herdr = |args: &[&str]| {
+            calls.borrow_mut().push(args.join(" "));
+            String::new()
+        };
+        assert_eq!(show_preview("/r/x.html", &json!("html"), "t1", false, "{}", &herdr), "opened");
+        assert_eq!(calls.borrow()[1], r#"do pane.split {"direction":"right","mod":"vscode-viewer","props":{"file":"/r/x.html","preview":"html"}}"#);
+    }
+
+    #[test]
+    fn the_browser_opener_is_the_platforms() {
+        assert_eq!(opener("macos"), ["open"]);
+        assert_eq!(opener("linux"), ["xdg-open"]);
+        assert_eq!(opener("windows"), ["cmd", "/c", "start", ""]);
     }
 }

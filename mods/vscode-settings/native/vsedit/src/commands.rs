@@ -58,6 +58,8 @@ pub enum Act {
     OpenKeybindingsJson,
     /// Markdown: Toggle Preview (true) / Open Preview to the Side (false): mdpreview.rs
     MarkdownPreview(bool),
+    /// HTML: Open in Default Browser: mdpreview.rs
+    OpenInBrowser,
     Quit,
     Undo,
     Redo,
@@ -197,6 +199,7 @@ pub fn act_of(id: &str) -> Option<Act> {
         "workbench.action.openGlobalKeybindingsFile" => OpenKeybindingsJson,
         "markdown.showPreviewToSide" => MarkdownPreview(false),
         "markdown.showPreview" => MarkdownPreview(true),
+        "html.openInDefaultBrowser" => OpenInBrowser,
         "workbench.action.closeActiveEditor" => Quit,
         "undo" => Undo,
         "redo" => Redo,

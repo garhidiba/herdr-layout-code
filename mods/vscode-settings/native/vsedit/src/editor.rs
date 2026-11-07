@@ -2169,13 +2169,23 @@ impl Editor {
             self.open_settings_json();
         }
     }
-    /// Markdown: Open Preview to the Side / Toggle Preview: the viewer mod beside this pane (mdpreview.rs); without
-    /// herdr-app here (a remote machine, or outside Herdr) the status bar says where it opens.
+    /// Markdown: Open Preview to the Side / Toggle Preview, for HTML too: the viewer mod beside this pane (mdpreview.rs);
+    /// without herdr-app here (a remote machine, or outside Herdr) the status bar says where it opens.
     pub fn markdown_preview(&mut self, toggle: bool) {
-        if self.scope.as_deref() != Some(crate::mdpreview::SCOPE) {
-            return self.warn("Preview: not a Markdown file");
+        let Some(preview) = crate::mdpreview::preview_of(self.scope.as_deref()) else {
+            return self.warn("Preview: not a Markdown or HTML file");
+        };
+        if let Err(e) = crate::mdpreview::spawn(self.file.to_string_lossy().into_owned(), preview, toggle) {
+            let w = self.c.warn.clone();
+            self.say(e, Some(&w), 5000);
         }
-        if let Err(e) = crate::mdpreview::spawn(self.file.to_string_lossy().into_owned(), toggle) {
+    }
+    /// HTML: Open in Default Browser: the platform's opener on the file, only on this computer (mdpreview.rs).
+    pub fn open_in_browser(&mut self) {
+        if !self.scope.as_deref().is_some_and(|s| crate::mdpreview::HTML.contains(&s)) {
+            return self.warn("Open in Browser: not an HTML file");
+        }
+        if let Err(e) = crate::mdpreview::open_in_browser(&self.file.to_string_lossy()) {
             let w = self.c.warn.clone();
             self.say(e, Some(&w), 5000);
         }
@@ -2420,6 +2430,7 @@ impl Editor {
             Act::OpenSettingsJson => self.open_settings_json(),
             Act::OpenKeybindingsJson => self.open_keybindings_json(),
             Act::MarkdownPreview(toggle) => self.markdown_preview(toggle),
+            Act::OpenInBrowser => self.open_in_browser(),
             Act::Navigate(dir) => self.navigate(dir),
             Act::SaveAs => self.ask_save_as(),
             Act::SaveAll => self.save_all(),
@@ -3715,20 +3726,28 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_markdown_file_has_a_preview_button_on_the_breadcrumb_row_and_other_files_say_why_not() {
+    fn markdown_and_html_files_have_a_preview_button_on_the_breadcrumb_row_and_other_files_say_why_not() {
         std::env::remove_var("HC_TERMINAL_ID"); // no herdr-app to ask, as on a remote machine
-        let mut md = editor("/tmp/x.md", &["# Hi"]);
-        (md.rows, md.cols) = (10, 80);
-        assert!(screen(&mut md)[0].trim_end().ends_with("Preview"));
-        assert_eq!(md.preview_hit, Some(80 - " Preview ".len() as i32 + 1));
-        let x = md.preview_hit.unwrap() + 2;
-        md.mouse(&crate::keys::Mouse { button: 0, x, y: 1, ..Default::default() }, None);
-        assert_eq!(md.message.as_ref().map(|m| m.text.as_str()), Some(crate::mdpreview::REMOTE));
+        let said = |ed: &Editor| ed.message.as_ref().map(|m| m.text.clone());
+        for file in ["/tmp/x.md", "/tmp/x.html"] {
+            let mut ed = editor(file, &["# Hi"]);
+            (ed.rows, ed.cols) = (10, 80);
+            assert!(screen(&mut ed)[0].trim_end().ends_with("Preview"), "{file}");
+            assert_eq!(ed.preview_hit, Some(80 - " Preview ".len() as i32 + 1));
+            let x = ed.preview_hit.unwrap() + 2;
+            ed.mouse(&crate::keys::Mouse { button: 0, x, y: 1, ..Default::default() }, None);
+            assert_eq!(said(&ed).as_deref(), Some(crate::mdpreview::REMOTE));
+        }
+        let mut html = editor("/tmp/x.html", &["<p>hi</p>"]);
+        run(&mut html, "html.openInDefaultBrowser");
+        assert_eq!(said(&html).as_deref(), Some("Open in Browser: only for files on this computer"));
         let mut txt = wrapped(&["hi"], "off", 10, 80);
         assert!(!screen(&mut txt)[0].contains("Preview"));
         assert_eq!(txt.preview_hit, None);
         run(&mut txt, "markdown.showPreview");
-        assert_eq!(txt.message.as_ref().map(|m| m.text.as_str()), Some("Preview: not a Markdown file"));
+        assert_eq!(said(&txt).as_deref(), Some("Preview: not a Markdown or HTML file"));
+        run(&mut txt, "html.openInDefaultBrowser");
+        assert_eq!(said(&txt).as_deref(), Some("Open in Browser: not an HTML file"));
     }
 
     #[test]

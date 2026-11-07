@@ -26,7 +26,7 @@ const { applyWorkspaceEdit, lastFirst } = require("./lang/edits.cjs");
 const { wordOccurrences, Fallback } = require("./lang/fallback.cjs");
 const { gitRoot, run, runAsync, which } = require("./lang/proc.cjs");
 const MD = require("./mdpreview.cjs");
-const PREVIEW = " Preview "; // the breadcrumb row's button for Markdown files
+const PREVIEW = " Preview "; // the breadcrumb row's button for Markdown and HTML files
 const T = require("./terminal.cjs");
 const HV = require("./hexview.cjs");
 const E = require("./errorpage.cjs");
@@ -1720,18 +1720,27 @@ class Editor {
     try { fs.writeFileSync(path.join(path.dirname(S.settingsFile()), ".vscode-settings-page"), JSON.stringify({ page: page ?? "settings", at: Date.now() })); } catch {}
     require("child_process").spawn(bin, ["do", "mod.open", "--name", "vscode-settings"], { stdio: "ignore", detached: true }).on("error", () => {}).unref();
   }
-  // Markdown: Open Preview to the Side (toggle false) / Toggle Preview (true): the viewer mod beside this pane
-  // (mdpreview.cjs); without herdr-app here (a remote machine, or outside Herdr) the status bar says where it opens.
+  // Markdown: Open Preview to the Side (toggle false) / Toggle Preview (true), for HTML too: the viewer mod beside this
+  // pane (mdpreview.cjs); without herdr-app here (a remote machine, or outside Herdr) the status bar says where it opens.
   markdownPreview(toggle) {
-    if (this.scope !== MD.SCOPE) return this.say("Preview: not a Markdown file", this.colors.warn);
-    const bin = process.env.HC_TERMINAL_ID && which("herdr-app");
+    const preview = MD.previewOf(this.scope);
+    if (!preview) return this.say("Preview: not a Markdown or HTML file", this.colors.warn);
+    const bin = MD.herdrApp();
     if (!bin) return this.say(MD.REMOTE, this.colors.warn, 5000);
     if (this.previewing) return;
     let sharedText = "";
     try { sharedText = fs.readFileSync(MD.sharedFile(), "utf8"); } catch {}
     this.previewing = true;
-    MD.showPreview({ file: this.file, terminal: process.env.HC_TERMINAL_ID, toggle, sharedText, herdr: (args) => runAsync(bin, args, { timeout: 3000 }).then(r => r.stdout) })
+    MD.showPreview({ file: this.file, preview, terminal: process.env.HC_TERMINAL_ID, toggle, sharedText, herdr: (args) => runAsync(bin, args, { timeout: 3000 }).then(r => r.stdout) })
       .catch(() => {}).finally(() => { this.previewing = false; });
+  }
+  // HTML: Open in Default Browser: the platform's opener on the file, only on this computer (a remote machine's file
+  // would open in that machine's browser).
+  openInBrowser() {
+    if (!MD.HTML.includes(this.scope)) return this.say("Open in Browser: not an HTML file", this.colors.warn);
+    if (!MD.herdrApp()) return this.say("Open in Browser: only for files on this computer", this.colors.warn, 5000);
+    const [cmd, ...args] = MD.opener();
+    if (!E.launch(cmd, [...args, this.file])) this.say(`Open in Browser: ${cmd} not found`, this.colors.warn);
   }
   // After each input event: record a cursor change for Cursor Undo; restart the auto-save timer when the text changed.
   afterEvent() {
@@ -1988,8 +1997,8 @@ class Editor {
 
     // breadcrumbs
     P.move(1, 1);
-    // a Markdown file's Preview button at the row's right end (Toggle Preview)
-    const crumbs = this.crumbText(), pw = this.scope === MD.SCOPE && this.cols >= 30 ? PREVIEW.length : 0;
+    // a Markdown or HTML file's Preview button at the row's right end (Toggle Preview)
+    const crumbs = this.crumbText(), pw = MD.previewOf(this.scope) && this.cols >= 30 ? PREVIEW.length : 0;
     P.text(fit(crumbs + (this.buf.dirty ? " ●" : ""), this.cols - pw), c.barFg, c.bg);
     if (this.buf.dirty) { const w = W.textWidth(crumbs + " ", 8); if (w < this.cols - pw) { P.move(1, w + 1); P.text("●", c.warn, c.bg); } }
     this.previewHit = pw ? this.cols - pw + 1 : null;

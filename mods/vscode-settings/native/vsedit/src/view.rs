@@ -20,7 +20,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 const WORD_DELAY: Duration = Duration::from_millis(250);
-/// The breadcrumb row's button for Markdown files.
+/// The breadcrumb row's button for Markdown and HTML files.
 const PREVIEW: &str = " Preview ";
 
 /// Occurrences to highlight and their colors.
@@ -126,11 +126,11 @@ impl Editor {
         let bulb = self.light_bulb_line();
         let c = &self.c;
 
-        // breadcrumbs; a Markdown file's Preview button at the row's right end (Toggle Preview)
+        // breadcrumbs; a Markdown or HTML file's Preview button at the row's right end (Toggle Preview)
         p.move_to(1, 1);
         let crumbs = self.crumb_text();
         let dirty = self.buf.dirty();
-        let pw = if self.scope.as_deref() == Some(crate::mdpreview::SCOPE) && self.cols >= 30 { tw(PREVIEW) } else { 0 };
+        let pw = if crate::mdpreview::preview_of(self.scope.as_deref()).is_some() && self.cols >= 30 { tw(PREVIEW) } else { 0 };
         p.text(&fit(&format!("{crumbs}{}", if dirty { " ●" } else { "" }), (self.cols - pw) as usize), &c.bar_fg, &c.bg);
         if dirty {
             let w = tw(&format!("{crumbs} "));

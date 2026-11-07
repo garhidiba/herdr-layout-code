@@ -88,4 +88,4 @@ function show(file, reason, crumbs) {
   });
 }
 
-module.exports = { reasonOf, show, ErrorPage };
+module.exports = { reasonOf, launch, show, ErrorPage };
