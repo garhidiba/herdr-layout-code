@@ -48,7 +48,7 @@ export function overflow(files, cap = CACHE_MAX, keep = []) {
 
 // Trims the cache folder `dir` to `cap` (overflow), keeping `keep`.
 export async function prune(exec, dir, keep, cap = CACHE_MAX) {
-  const r = await exec("sh", ["-c", 'cd "$1" && for f in *; do [ -f "$f" ] && { stat -f "%m %z %N" "$f" 2>/dev/null || stat -c "%Y %s %n" "$f"; }; done; :', "prune", dir]);
+  const r = await exec("sh", ["-c", 'cd "$1" && for f in *; do [ -f "$f" ] && { stat -c "%Y %s %n" "$f" 2>/dev/null || stat -f "%m %z %N" "$f"; }; done; :', "prune", dir]);
   const files = (r.stdout ?? "").split("\n").map(l => /^(\d+) (\d+) (.+)$/.exec(l)).filter(Boolean)
     .map(([, mtime, size, name]) => ({ name, mtime: +mtime, size: +size }));
   const gone = overflow(files, cap, keep);

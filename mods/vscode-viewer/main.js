@@ -71,7 +71,7 @@ const pathHash = (s) => { let h = 5381; for (const c of s) h = (h * 33 ^ c.charC
 const BACKUPS = "mods/vscode-viewer/.backups";
 // { mtime (s), size } of a file here or on machine `on`, or null.
 async function statOf(file, on = null) {
-  const st = await exec("sh", ["-c", `stat -f '%m %z' "$1" 2>/dev/null || stat -c '%Y %s' "$1"`, "sh", file], { on }).catch(() => null);
+  const st = await exec("sh", ["-c", `stat -c '%Y %s' "$1" 2>/dev/null || stat -f '%m %z' "$1"`, "sh", file], { on }).catch(() => null);
   const [mtime, size] = (st?.stdout ?? "").trim().split(" ").map(Number);
   return st?.code === 0 && Number.isFinite(size) ? { mtime, size } : null;
 }
