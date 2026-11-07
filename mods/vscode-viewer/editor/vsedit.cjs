@@ -2413,7 +2413,8 @@ async function main() {
     ed.rows = process.stdout.rows || 24; ed.cols = process.stdout.columns || 80;
     const { out, done } = ed.render(budget);
     // The cursor shape goes out with every frame: Herdr resets it on focus, tab switches and resizes, and a setting may have changed.
-    process.stdout.write("\x1b[?25l" + S.cursorSeq(ed.settings) + out);
+    // one synchronized update (mode 2026): the terminal shows the frame whole, never the text under a box before the box
+    process.stdout.write("\x1b[?2026h\x1b[?25l" + S.cursorSeq(ed.settings) + out + "\x1b[?2026l");
     if (!done) schedule(); // keep tokenizing toward the viewport in small slices
     clearTimeout(timer);
     if (ed.message) timer = setTimeout(schedule, Math.max(50, ed.message.until - Date.now() + 10));

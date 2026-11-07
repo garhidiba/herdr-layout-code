@@ -235,7 +235,8 @@ fn run(term: &mut Term, ed: &mut Editor) {
         (ed.rows, ed.cols) = term.size();
         let out = ed.render();
         // The cursor shape goes out with every frame: Herdr resets it on focus, tab switches and resizes, and a setting may have changed.
-        term.write(&format!("\x1b[?25l{}{out}", ed.settings.cursor_seq()));
+        // one synchronized update (mode 2026): the terminal shows the frame whole, never the text under a box before the box
+        term.write(&format!("\x1b[?2026h\x1b[?25l{}{out}\x1b[?2026l", ed.settings.cursor_seq()));
     };
     ed.offer_backup();
     ed.note_cursor(); // where Cursor Undo goes back to first

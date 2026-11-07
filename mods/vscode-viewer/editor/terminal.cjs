@@ -75,7 +75,7 @@ function session(app) {
   let scheduled = false, pending = "", ended = false;
   const log = inputLog();
   const cursor = S.cursorSeq(S.load().values); // resent with every frame: Herdr resets the shape on focus, tab switches and resizes
-  const frame = () => { scheduled = false; if (!ended) process.stdout.write("\x1b[?25l" + cursor + app.render(process.stdout.rows || 24, process.stdout.columns || 80)); };
+  const frame = () => { scheduled = false; if (!ended) process.stdout.write("\x1b[?2026h\x1b[?25l" + cursor + app.render(process.stdout.rows || 24, process.stdout.columns || 80) + "\x1b[?2026l"); }; // one synchronized update
   const draw = () => { if (!scheduled) { scheduled = true; setImmediate(frame); } };
   const onData = (chunk) => {
     log(chunk);

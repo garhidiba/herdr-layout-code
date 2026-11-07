@@ -51,7 +51,7 @@ pub fn run<A: App>(term: &mut Term, app: &mut A) -> A::Out {
         if draw {
             let (rows, cols) = term.size();
             match app.render(rows, cols) {
-                Flow::Frame(s) => term.write(&format!("\x1b[?25l{cursor}{s}")),
+                Flow::Frame(s) => term.write(&format!("\x1b[?2026h\x1b[?25l{cursor}{s}\x1b[?2026l")), // one synchronized update
                 Flow::Done(v) => {
                     end(term);
                     return v;
