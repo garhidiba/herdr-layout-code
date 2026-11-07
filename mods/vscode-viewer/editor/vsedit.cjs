@@ -667,17 +667,22 @@ class Editor {
     this.buf.edit([{ start: { line: 0, col: 0 }, end: { line: last, col: this.lines[last].length }, text }], { before });
     this.moveTo(this.buf.clamp(at));
   }
-  // The terminal title (OSC 2): the file's name and " — vsedit", "● " first while any open file is unsaved. vscode-tabs
-  // reads it (tabfile.js editorTitleState) for the tab's ● and Close Saved; main writes it only when it changes.
+  // The terminal title (OSC 2): the file's name and " — vsedit", "● " first while any open file is unsaved, " (closing)"
+  // last while the close dialog asks. vscode-tabs reads it (tabfile.js editorTitleState) for the tab's ●, Close Saved
+  // and to see its close request answered; main writes it only when it changes.
   title() {
     const dirty = this.buf.dirty || [...this.docs.values()].some(s => s.file !== this.file && s.buf.dirty);
-    return `${dirty ? "● " : ""}${path.basename(this.file).replace(/[\x00-\x1f\x7f]/g, "")} — vsedit`;
+    return `${dirty ? "● " : ""}${path.basename(this.file).replace(/[\x00-\x1f\x7f]/g, "")} — vsedit${this.closing() ? " (closing)" : ""}`;
   }
+  closing() { return !!this.popup && this.popup === this.quitDialog; }
+  // Closing from outside (vscode-tabs: the tab's ×, the tab menu), sent as SIGUSR2: Close Editor, as ⌘W, unless its
+  // dialog already asks.
+  closeRequested() { if (!this.closing()) this.quit(); }
   // Asks about each unsaved file, then exits.
   quit() {
     const st = this.allStates().find(s => s.buf.dirty);
     if (!st) return this.exit();
-    const ask = () => this.dialog(`Do you want to save the changes you made to ${path.basename(this.file)}?`, "Your changes will be lost if you don't save them.", [
+    const ask = () => this.quitDialog = this.dialog(`Do you want to save the changes you made to ${path.basename(this.file)}?`, "Your changes will be lost if you don't save them.", [
       { label: "Save", key: "s", run: () => this.saveFile().then(ok => { if (ok) this.quit(); }) },
       { label: "Don't Save", key: "d", run: () => { B.remove(this.file); this.buf.markSaved(); this.quit(); } },
       { label: "Cancel", key: "c", cancel: true, run: () => {} }]);
@@ -749,7 +754,7 @@ class Editor {
   }
 
   // ----- prompts and overlays -----
-  dialog(title, detail, buttons) { this.popup = new O.Dialog({ title, detail, buttons }); }
+  dialog(title, detail, buttons) { return (this.popup = new O.Dialog({ title, detail, buttons })); }
   closePopup() { this.popup = null; }
   // Find / Replace (⌘F / ⌥⌘F): the search seeded from the selection or (Find only) the word at the cursor
   // (editor.find.seedSearchStringFromSelection) and selected, so typing replaces it; the selection as the scope per
@@ -2433,6 +2438,8 @@ async function main() {
   const schedule = () => { if (!scheduled) { scheduled = true; setImmediate(() => draw()); } };
   ed.redraw = () => { ed.afterEvent(); schedule(); };
   ed.onExit = () => { restore(); process.exit(0); };
+  // vscode-tabs' close request (the tab's ×, the tab menu): asks about unsaved files as ⌘W does, instead of a SIGHUP.
+  if (process.platform !== "win32") process.on("SIGUSR2", () => { if (crashing) return; ed.closeRequested(); ed.redraw(); });
   Lang.setApplyEdit((ws) => { ed.applyEdit(ws); schedule(); return true; });
   Lang.setOnDiagnostics(() => schedule());
   setInterval(() => {

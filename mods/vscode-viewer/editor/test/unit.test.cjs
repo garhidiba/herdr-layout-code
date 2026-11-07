@@ -1165,6 +1165,25 @@ test("the terminal title is the file's name, with ● while any open file is uns
   assert.equal(ed.title(), "a.txt — vsedit");
 });
 
+test("a close request asks about unsaved changes once, and ends a saved editor", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vsedit-close-")), file = path.join(dir, "a.txt");
+  fs.writeFileSync(file, "1\n");
+  const ed = new Editor(file, F.load(file), await H.loadGrammar(null), H.loadTheme(), null);
+  ed.onExit = () => {};
+  ed.typed("x");
+  ed.closeRequested();
+  const dialog = ed.popup;
+  assert.equal(dialog.title, "Do you want to save the changes you made to a.txt?");
+  assert.equal(ed.title(), "● a.txt — vsedit (closing)");
+  ed.closeRequested(); // asked again while it asks: the same dialog
+  assert.equal(ed.popup, dialog);
+  ed.handle({ type: "key", name: "escape" }); // Cancel: the editor stays
+  assert.deepEqual([ed.title(), !!ed.done], ["● a.txt — vsedit", false]);
+  await ed.saveFile();
+  ed.closeRequested();
+  assert.ok(ed.done);
+});
+
 test("the new commands have VS Code's keys on each OS", () => {
   const on = (os) => { const km = K.resolve([], os); return (key) => km.byChord.get(key); };
   const mac = on("mac"), win = on("win"), linux = on("linux");

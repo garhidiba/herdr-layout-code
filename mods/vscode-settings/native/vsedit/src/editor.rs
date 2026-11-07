@@ -1830,11 +1830,23 @@ impl Editor {
         self.popup = Some(Popup::Dialog(Dialog::new(title, detail, buttons)));
     }
     /// The terminal title (OSC 2, vsedit.cjs `title`): the file's name and " — vsedit", "● " first while any open file
-    /// is unsaved. vscode-tabs reads it (tabfile.js editorTitleState) for the tab's ● and Close Saved.
+    /// is unsaved, " (closing)" last while the close dialog asks. vscode-tabs reads it (tabfile.js editorTitleState)
+    /// for the tab's ●, Close Saved and to see its close request answered.
     pub fn title(&self) -> String {
         let dirty = self.buf.dirty() || self.docs.iter().any(|d| d.buf.dirty());
         let name: String = self.name().chars().filter(|c| !c.is_control()).collect();
-        format!("{}{name} — vsedit", if dirty { "● " } else { "" })
+        format!("{}{name} — vsedit{}", if dirty { "● " } else { "" }, if self.closing() { " (closing)" } else { "" })
+    }
+    /// The close dialog (quit's Save / Don't Save / Cancel) is showing.
+    fn closing(&self) -> bool {
+        matches!(&self.popup, Some(Popup::Dialog(d)) if d.buttons.iter().any(|b| matches!(b.act, DAct::QuitSave)))
+    }
+    /// Closing from outside (vscode-tabs: the tab's ×, the tab menu), sent as SIGUSR2: Close Editor, as ⌘W, unless
+    /// its dialog already asks.
+    pub fn close_requested(&mut self) {
+        if !self.closing() {
+            self.quit();
+        }
     }
     /// Asks about each unsaved file (showing it), then exits.
     fn quit(&mut self) {
@@ -2953,6 +2965,26 @@ pub(crate) mod tests {
         assert!(ed.open(&a, None, true));
         run(&mut ed, "workbench.action.files.save");
         assert_eq!(ed.title(), "a.txt — vsedit");
+    }
+
+    #[test]
+    fn a_close_request_asks_about_unsaved_changes_once_and_ends_a_saved_editor() {
+        let dir = temp_folder("close-request");
+        let file = dir.join("a.txt");
+        fs::write(&file, "1\n").unwrap();
+        let mut ed = on_disk(&file);
+        ed.typed("x");
+        ed.close_requested();
+        let Some(Popup::Dialog(d)) = &ed.popup else { panic!("no dialog") };
+        assert_eq!(d.title, "Do you want to save the changes you made to a.txt?");
+        assert_eq!(ed.title(), "● a.txt — vsedit (closing)");
+        ed.close_requested(); // asked again while it asks: the same dialog
+        assert!(matches!(&ed.popup, Some(Popup::Dialog(d)) if d.focus == 0) && ed.exit.is_none());
+        ed.handle(&key("escape"), None); // Cancel: the editor stays
+        assert_eq!((ed.title(), ed.exit), ("● a.txt — vsedit".into(), None));
+        run(&mut ed, "workbench.action.files.save");
+        ed.close_requested();
+        assert_eq!(ed.exit, Some(0));
     }
 
     #[test]

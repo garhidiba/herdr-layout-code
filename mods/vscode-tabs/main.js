@@ -1,7 +1,8 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { spaces, panes, terminals, run, openOverlay, theme, window, shared, layout, settings } from "herdr";
+import { spaces, panes, terminals, run, openOverlay, theme, window, shared, layout, settings, hc, exec } from "herdr";
 import { tabFileOf, dirtyTabs, TAB_MENU } from "./tabfile.js";
+import { createTabCloser, signalCommand, CLOSE_REQUEST } from "./close.js";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -12,20 +13,49 @@ function find(node, id) {
   return null;
 }
 
+// Asks the editor in terminal `address` to close (close.js): its first process from hc, signalled on its machine.
+async function requestClose(address) {
+  try {
+    const pid = JSON.parse((await hc(["get", address, "--json"])).stdout).pid;
+    if (!Number.isInteger(pid)) return false;
+    const [command, args] = signalCommand(pid);
+    return (await exec(command, args, { on: address.includes("/") ? address.split("/")[0] : null })).code === 0;
+  } catch {
+    return false;
+  }
+}
+const closeTabs = createTabCloser({ run, panes, requestClose });
+
 export default class Tabs extends View {
   init() {
     this.pressed = null;
     this.hoverClose = null; // the tab whose close slot the pointer is on
+    this.closeAt = null; // the tab menu's last close request taken (close.js CLOSE_REQUEST)
+  }
+
+  closeList(list, cx) { // not close(): that is the View's own end call
+    cx.spawn(async (cx) => closeTabs(list, (ms) => cx.sleep(ms)));
+  }
+
+  // The tab menu's Close items (vscode-explorer, an overlay that closes at once) leave their tabs here: once each,
+  // dropped after 5s (shared values outlive a restart).
+  closeAsked(cx) {
+    const ask = shared(CLOSE_REQUEST);
+    if (!Array.isArray(ask?.tabs) || ask.at === this.closeAt || Date.now() - ask.at > 5000) return;
+    this.closeAt = ask.at;
+    this.closeList(ask.tabs, cx);
   }
 
   // The side panel (Explorer / Source Control) is one global state: switching spaces leaves it as it is.
 
-  render() {
+  render(cx) {
+    this.closeAsked(cx);
     const t = theme();
     const space = spaces().find(p => p.active);
     const shown = space?.tabs ?? [];
     const dirty = dirtyTabs(space, panes());
     // A tab's × on the space's last tab closes without Herdr's "Close space?": vscode-spaces keeps the space as a gray row.
+    // An unsaved editor asks first (close.js).
     const stop = (_e, cx) => cx.stop_propagation();
     const button = (id, label, action) => div().id(id).size(26).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
       .on_mouse_down("left", stop).on_click(action).child(label);
@@ -55,7 +85,7 @@ export default class Tabs extends View {
         // As VS Code's: an unsaved editor's tab shows ● where the × goes, on every tab, and × while the pointer is on it.
         .when(c.active || dirty.has(c.id), el => el.child(div().id(`close-${c.id}`).text_color(t.dim).on_mouse_down("left", stop)
           .on_hover((on, cx) => { if (on || this.hoverClose === c.id) { this.hoverClose = on ? c.id : null; cx.notify(); } })
-          .on_click((_e, cx) => { cx.stop_propagation(); run("tab.close", shown.length === 1 ? { id: c.id, confirmed: true } : { id: c.id }); })
+          .on_click((_e, cx) => { cx.stop_propagation(); this.closeList([shown.length === 1 ? { id: c.id, confirmed: true } : { id: c.id }], cx); })
           .child(dirty.has(c.id) && this.hoverClose !== c.id
             ? div().size(12).flex().items_center().justify_center().child(div().size(8).rounded(4).bg(c.active ? t.foreground : t.muted))
             : svg("mods/pane/close.svg").size(12))));

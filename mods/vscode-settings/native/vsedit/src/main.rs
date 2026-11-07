@@ -306,6 +306,10 @@ fn run(term: &mut Term, ed: &mut Editor) {
         if term::take_resized() {
             changed = true;
         }
+        if term::take_close_request() {
+            ed.close_requested();
+            changed = true;
+        }
         let lines = std::mem::take(&mut ed.buf.lines);
         changed |= ed.hl.poll(&lines);
         ed.buf.lines = lines;

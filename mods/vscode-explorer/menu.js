@@ -33,6 +33,8 @@ const CLIPBOARD = "vscode-explorer.clipboard", REFRESH = "vscode-explorer.refres
 export const refreshKey = REFRESH;
 // The tab menu's Reveal in Explorer View asks the tree: { file, on, at }.
 export const REVEAL = "vscode-explorer.reveal";
+// The tab menu's Close items ask the tab bar (vscode-tabs' close.js CLOSE_REQUEST): { tabs: [tab.close args], at }.
+const TAB_CLOSE = "vscode-tabs.close";
 
 // Herdr starts with PATH=/usr/bin:/bin; Homebrew/user tools (code, trash) live elsewhere.
 const sh = (script, ...args) => exec("sh", ["-c", 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; ' + script, "explorer", ...args]);
@@ -137,8 +139,8 @@ export class ExplorerMenu {
 }
 
 // The editor tab menu, for a { tabMenu: { tab, file, on, pane, argv, root, dirty } } overlay (vscode-tabs' tabfile.js): VS Code's
-// editor tab context menu, the items Herdr can do (paths.js tabMenuItems). Closing goes through tab.close as the tab's
-// × does: the editor keeps unsaved text as a hot-exit backup and offers it back on the next open.
+// editor tab context menu, the items Herdr can do (paths.js tabMenuItems). Closing goes through the tab bar as the tab's
+// × does: an unsaved editor asks Save / Don't Save / Cancel, one at a time.
 export class TabMenu extends ExplorerMenu {
   constructor(cx) {
     super(cx);
@@ -164,8 +166,8 @@ export class TabMenu extends ExplorerMenu {
       case "close": case "closeOthers": case "closeRight": case "closeSaved": case "closeAll": {
         const space = spaces().find(s => s.tabs.some(x => x.id === t.tab));
         const dirty = new Set(t.dirty ?? []);
-        for (const args of closeArgs(action, space?.tabs ?? [], t.tab, fileTabs(space, panes(), terminals()), dirty)) run("tab.close", args);
-        return;
+        // The tab bar closes them (it outlives this popup): an unsaved editor asks Save / Don't Save / Cancel first.
+        return setShared(TAB_CLOSE, { tabs: closeArgs(action, space?.tabs ?? [], t.tab, fileTabs(space, panes(), terminals()), dirty), at: Date.now() });
       }
       case "copyPath": return copyText(t.file);
       case "copyRelative": return copyText(t.root ? relativeTo(t.root, t.file) : t.file);

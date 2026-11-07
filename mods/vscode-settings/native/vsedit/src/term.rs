@@ -1,5 +1,5 @@
 //! The terminal session (terminal.cjs): raw mode, the alternate screen and input modes, a wake pipe that signals
-//! (SIGWINCH, SIGTERM/SIGHUP/SIGINT) and worker threads write to, Herdr right-click routing, the clipboard.
+//! (SIGWINCH, SIGTERM/SIGHUP/SIGINT, SIGUSR2) and worker threads write to, Herdr right-click routing, the clipboard.
 
 use std::io::{self, Write};
 use std::os::fd::RawFd;
@@ -19,6 +19,8 @@ static WAKE_FD: AtomicI32 = AtomicI32::new(-1);
 /// The last terminating signal received (0 for none).
 pub static SIGNAL: AtomicI32 = AtomicI32::new(0);
 static RESIZED: AtomicI32 = AtomicI32::new(0);
+/// vscode-tabs asked the editor to close (SIGUSR2: the tab's ×, the tab menu).
+static CLOSE: AtomicI32 = AtomicI32::new(0);
 
 /// Writes one byte to the wake pipe (async-signal-safe).
 pub fn wake() {
@@ -37,6 +39,8 @@ pub fn wake_to(fd: RawFd) {
 extern "C" fn on_signal(sig: libc::c_int) {
     if sig == libc::SIGWINCH {
         RESIZED.store(1, Ordering::Relaxed);
+    } else if sig == libc::SIGUSR2 {
+        CLOSE.store(1, Ordering::Relaxed);
     } else {
         SIGNAL.store(sig, Ordering::Relaxed);
     }
@@ -45,6 +49,10 @@ extern "C" fn on_signal(sig: libc::c_int) {
 
 pub fn take_resized() -> bool {
     RESIZED.swap(0, Ordering::Relaxed) != 0
+}
+
+pub fn take_close_request() -> bool {
+    CLOSE.swap(0, Ordering::Relaxed) != 0
 }
 
 pub struct Term {
@@ -72,7 +80,7 @@ impl Term {
                 libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
             }
             WAKE_FD.store(fds[1], Ordering::Relaxed);
-            for sig in [libc::SIGWINCH, libc::SIGTERM, libc::SIGHUP, libc::SIGINT] {
+            for sig in [libc::SIGWINCH, libc::SIGTERM, libc::SIGHUP, libc::SIGINT, libc::SIGUSR2] {
                 libc::signal(sig, on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t);
             }
             libc::signal(libc::SIGPIPE, libc::SIG_IGN);

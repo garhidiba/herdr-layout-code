@@ -137,6 +137,7 @@ test("copy and reveal use the computer's own clipboard and file manager", () => 
 test("an editor's title says whether it has unsaved changes; any other program's says nothing", () => {
   assert.equal(editorTitleState("a.ts — vsedit"), "clean");
   assert.equal(editorTitleState("● a.ts — vsedit"), "dirty");
+  assert.equal(editorTitleState("● a.ts — vsedit (closing)"), "closing");
   for (const other of ["● a.ts", "✳ Claude Code", "zsh", "", null, undefined]) assert.equal(editorTitleState(other), null, String(other));
 });
 
@@ -146,8 +147,9 @@ test("the dirty tabs are the ones whose editor's title has the ●, in this spac
     { pane: "p2", tab: "b", terminal: "t2", title: "● a.ts — vsedit" },
     { pane: "p3", tab: "c", terminal: null, mod: "vscode-viewer", title: "● x — vsedit" },
     { pane: "p4", tab: "e", terminal: "t5", title: "b.ts — vsedit" },
+    { pane: "p5", tab: "d", terminal: "t4", title: "● d.ts — vsedit (closing)" },
     { pane: "p9", tab: "elsewhere", terminal: "t9", title: "● c.ts — vsedit" },
   ];
-  assert.deepEqual([...dirtyTabs({ ...space, tabs: mixed }, titled)], ["b"]);
+  assert.deepEqual([...dirtyTabs({ ...space, tabs: mixed }, titled)], ["b", "d"]);
   assert.deepEqual([...dirtyTabs(null, titled)], []);
 });

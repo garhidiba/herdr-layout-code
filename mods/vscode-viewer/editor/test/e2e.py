@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """End-to-end: runs vsedit.cjs in a 100x30 pseudo-terminal, types, saves, quits, and checks colors against tokenize.cjs;
-scrollbars (editor and hex viewer), the context menu, Kitty ⌘ keys, user keybindings, tsserver definition/references/rename, gofmt, the save dialog, auto save and hot exit;
+scrollbars (editor and hex viewer), the context menu, Kitty ⌘ keys, user keybindings, tsserver definition/references/rename, gofmt, the save dialog, the close request (SIGUSR2), auto save and hot exit;
 find widget toggles, status bar items, symbol breadcrumbs, Go to Symbol and diagnostics; Expand Line Selection, Go to Bracket,
 Toggle Block Comment, Save As, Join Lines and Save All; Go to File with several files, Go Back / Forward and the settings JSON;
 through tsserver Show Hover (keys and mouse), Quick Fix, Expand / Shrink Selection, Format Selection and Go to Symbol in
@@ -398,6 +398,34 @@ def run_save_dialog(tmp):
     assert t.wait_exit() == 0
     assert open(file).read() == "XYabc\n", open(file).read()
     print("save dialog: ok")
+
+
+def run_close_request(tmp):
+    """SIGUSR2 (vscode-tabs closing the tab): unsaved changes ask Save / Don't Save / Cancel, the title says it asks;
+    Cancel keeps the editor, Don't Save ends it without a backup; a saved editor ends at once."""
+    file = os.path.join(tmp, "close.txt")
+    open(file, "w").write("abc\n")
+    t = Term(file)
+    assert t.read("Ln 1, Col 1")
+    t.send("X")
+    assert t.read("\x1b]2;● close.txt — vsedit\x07", timeout=2)
+    os.kill(t.pid, signal.SIGUSR2)
+    assert t.read("Do you want to save the changes you made to close.txt?", timeout=2), "no dialog for the close request"
+    assert t.read("\x1b]2;● close.txt — vsedit (closing)\x07", timeout=2), "the title does not say the dialog asks"
+    t.out = b""
+    t.send("\x1b[27u")                            # Esc = Cancel
+    assert t.read("\x1b]2;● close.txt — vsedit\x07", timeout=2), "the title still says closing after Cancel"
+    os.kill(t.pid, signal.SIGUSR2)
+    assert t.read("Do you want to save", timeout=2)
+    t.send("d")                                   # Don't Save
+    assert t.wait_exit() == 0
+    backups = ISOLATED["VSEDIT_BACKUPS"]
+    assert open(file).read() == "abc\n" and (not os.path.isdir(backups) or os.listdir(backups) == []), "Don't Save kept something"
+    t = Term(file)
+    assert t.read("\x1b]2;close.txt — vsedit\x07")
+    os.kill(t.pid, signal.SIGUSR2)
+    assert t.wait_exit() == 0, "a saved editor should end on a close request"
+    print("close request: ok")
 
 
 def run_auto_save(tmp):
@@ -1443,7 +1471,7 @@ def main():
     engines = os.path.join(tmp, "engines.log")
     ISOLATED.update(VSEDIT_ENGINE_LOG=engines, VSEDIT_INLINE_USAGE=os.path.join(tmp, "inline-usage.json"))
     scenarios = [run_tsx, run_go, run_crlf, run_hex, run_error_page, run_drag_scroll, run_shift_click, run_minified, run_scrollbars, run_decorations,
-                 run_autoclose, run_git_gutter, run_folding, run_word_wrap, run_menu_and_cmd_save, run_save_dialog, run_auto_save, run_cursor_style, run_hot_exit,
+                 run_autoclose, run_git_gutter, run_folding, run_word_wrap, run_menu_and_cmd_save, run_save_dialog, run_close_request, run_auto_save, run_cursor_style, run_hot_exit,
                  run_keybindings, run_mac_keys, run_format, run_typescript, run_find_and_status, run_symbols_and_problems, run_install_prompt, run_small_batch,
                  run_files_and_navigation, run_medium_language, run_medium_editing, run_inline_suggest, run_references_and_lenses, run_inline_hosted]
     only = set(sys.argv[1:])

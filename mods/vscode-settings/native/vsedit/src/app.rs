@@ -66,6 +66,11 @@ pub fn run<A: App>(term: &mut Term, app: &mut A) -> A::Out {
             term.restore();
             exit(128 + sig);
         }
+        if term::take_close_request() {
+            end(term); // nothing unsaved here: the hex viewer, the binary prompt, the error page
+            term.restore();
+            exit(0);
+        }
         let deadline = [app.deadline(), escape_at].into_iter().flatten().min();
         let Some(chunk) = term.read(deadline.map(|d| d.saturating_duration_since(Instant::now()))) else {
             end(term);
