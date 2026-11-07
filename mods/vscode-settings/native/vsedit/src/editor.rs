@@ -3195,6 +3195,102 @@ pub(crate) mod tests {
         while ed.inline.busy && ed.wait_jobs(5000) {}
     }
 
+    // ---------- a remote editor: suggestions from the desktop typing in it (inline::desktop) ----------
+    const TOKEN: &str = "abababababababababababababababababababababababab";
+    /// A desktop's proxy as the tunnel shows it there: logs each request's head and body, answers `reply` as NDJSON.
+    fn fake_desktop(reply: &'static str) -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{Read, Write};
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = server.local_addr().unwrap().port();
+        let log = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+        let seen = log.clone();
+        std::thread::spawn(move || {
+            for mut s in server.incoming().flatten() {
+                let mut req = String::new();
+                let mut buf = vec![0; 65536];
+                while !req.contains("\r\n\r\n") || !req.trim_end().ends_with('}') {
+                    match s.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(k) => req += &String::from_utf8_lossy(&buf[..k]),
+                    }
+                }
+                seen.lock().unwrap().push(req);
+                let body = format!("{}\n{}\n", json!({ "response": reply }), json!({ "response": "", "done": true }));
+                let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nConnection: close\r\n\r\n{body}");
+            }
+        });
+        (port, log)
+    }
+    /// VSEDIT_DESKTOPS (this machine is a remote one) for this test while it lives; `active` and the announcements in a
+    /// new folder.
+    struct Desktops(PathBuf);
+    impl Desktops {
+        fn new(active: Option<&str>, announced: &[(&str, u16)]) -> Desktops {
+            let dir = scratch().join(format!("desktops-{}", rand_id()));
+            fs::create_dir_all(&dir).unwrap();
+            if let Some(id) = active {
+                fs::write(dir.join("active"), format!("{id}\n")).unwrap();
+            }
+            for (id, port) in announced {
+                fs::write(dir.join(format!("{id}.json")), json!({ "port": port, "token": TOKEN }).to_string()).unwrap();
+            }
+            crate::inline::TEST_DESKTOPS.with(|d| *d.borrow_mut() = Some(dir.clone()));
+            Desktops(dir)
+        }
+    }
+    impl Drop for Desktops {
+        fn drop(&mut self) {
+            crate::inline::TEST_DESKTOPS.with(|d| *d.borrow_mut() = None);
+        }
+    }
+
+    #[test]
+    fn a_remote_editor_with_no_desktop_sends_nothing_and_says_so_once() {
+        let _one = inline_lock();
+        let (url, count) = fake_ollama("x");
+        let _d = Desktops::new(None, &[]);
+        let mut ed = inline_editor(&["let a = 1;", ""], json!({ "editor.inlineSuggest.endpoint": url }));
+        type_in(&mut ed, "c");
+        assert!(ed.inline_deadline().is_none(), "nothing scheduled");
+        assert_eq!(ed.message.as_ref().map(|m| m.text.as_str()), Some(crate::inline::NO_DESKTOP));
+        ed.message = None;
+        type_in(&mut ed, "o");
+        ed.inline_trigger();
+        assert!(ed.message.is_none(), "said once a session");
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 0, "the settings' 127.0.0.1 is the desktop's, not this machine's");
+        assert_eq!(ed.inline_status().as_deref(), Some("Desktop: no desktop"));
+    }
+
+    #[test]
+    fn a_remote_editor_asks_the_active_desktops_proxy_with_its_token() {
+        let _one = inline_lock();
+        let (url, count) = fake_ollama("wrong");
+        let (port, log) = fake_desktop(" a + b;");
+        let (other, other_log) = fake_desktop("other desktop");
+        let d = Desktops::new(Some("d1"), &[("d1", port), ("d2", other)]);
+        let mut ed = inline_editor(&["function add(a, b) {", "  "], json!({ "editor.inlineSuggest.endpoint": url }));
+        type_in(&mut ed, "return");
+        ask(&mut ed);
+        assert_eq!(ed.ghost_view().map(|g| g.2), Some(vec![" a + b;".to_string()]));
+        let req = log.lock().unwrap()[0].clone();
+        assert!(req.starts_with("POST /fim "), "{req}");
+        assert!(req.contains(&format!("Authorization: Bearer {TOKEN}")), "{req}");
+        let body: Value = serde_json::from_str(&req[req.find("\r\n\r\n").unwrap() + 4..]).unwrap();
+        assert_eq!(body["prefix"], "function add(a, b) {\n  return");
+        assert_eq!(body["file"], "/tmp/inline.js");
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(other_log.lock().unwrap().is_empty(), "only the active desktop is asked");
+        assert_eq!(ed.inline_status().as_deref(), Some("Desktop"));
+        // its tunnel gone: quietly off, no error counted
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        fs::write(d.0.join("d1.json"), json!({ "port": closed, "token": TOKEN }).to_string()).unwrap();
+        type_in(&mut ed, ";");
+        ask(&mut ed);
+        assert!(ed.inline.no_desktop);
+        assert_eq!(ed.inline_status().as_deref(), Some("Desktop: no desktop"));
+        assert_eq!(ed.message.as_ref().map(|m| m.text.as_str()), Some(crate::inline::NO_DESKTOP));
+    }
+
     #[test]
     fn inline_suggestions_ask_once_after_typing_show_accept_and_take_a_word() {
         let _one = inline_lock();

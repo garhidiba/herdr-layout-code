@@ -43,6 +43,9 @@ pub struct InlineState {
     /// The event being handled edited by typing (asks again once typing pauses).
     pub editing: bool,
     cfg: Option<(inline::InlineSettings, Config)>,
+    /// A remote editor found no desktop to ask (inline::desktop); told: said so this session.
+    pub no_desktop: bool,
+    told_desktop: bool,
 }
 
 /// Whether a provider can run here (the default of editor.inlineSuggest.enabled): Ollama installed, LM Studio (chosen
@@ -56,7 +59,9 @@ impl Editor {
     pub fn inline_cfg(&mut self) -> Config {
         let s = &self.settings.inline;
         if self.inline.cfg.as_ref().is_none_or(|c| &c.0 != s) {
-            self.inline.cfg = Some((s.clone(), inline::config(s, usable)));
+            let cfg = inline::config(s, usable);
+            let cfg = if inline::desktops_dir().is_some() { inline::via_desktop(cfg, s.enabled) } else { cfg };
+            self.inline.cfg = Some((s.clone(), cfg));
         }
         self.inline.cfg.as_ref().unwrap().1.clone()
     }
@@ -84,6 +89,9 @@ impl Editor {
         if let Some(p) = self.health(cfg).paused.clone() {
             return Some(format!("{} is paused: {p} (click its status bar item to resume)", cfg.label));
         }
+        if cfg.provider == "desktop" && Self::active_desktop().is_none() {
+            return Some(self.inline_no_desktop());
+        }
         if self.inline.models.get(&cfg.key).is_some_and(|i| i.is_some_and(|i| i.missing)) {
             return Some(inline::missing_text(cfg));
         }
@@ -107,6 +115,17 @@ impl Editor {
             return Some(format!("{}: today's limit of {} requests is reached (editor.inlineSuggest.dailyRequestLimit)", cfg.label, cfg.limit));
         }
         None
+    }
+    fn active_desktop() -> Option<(u16, String)> {
+        inline::desktop(&inline::desktops_dir()?)
+    }
+    /// A remote editor with no desktop to ask: suggestions quietly off, said once a session (inline::NO_DESKTOP, returned).
+    fn inline_no_desktop(&mut self) -> String {
+        self.inline.no_desktop = true;
+        if !std::mem::replace(&mut self.inline.told_desktop, true) {
+            self.say(inline::NO_DESKTOP, None, 8000);
+        }
+        inline::NO_DESKTOP.into()
     }
     /// The provider's API key (Err: none; true when the secrets file is readable by others). A hosted one is looked up
     /// again at most every 10 s while there is none; a local server's (optional) after a failed request.
@@ -170,12 +189,21 @@ impl Editor {
     }
     /// Asks the provider for the cursor's position (manual: Trigger Inline Suggestion, which says why it can't).
     pub fn inline_request(&mut self, manual: bool) {
-        let cfg = self.inline_cfg();
+        let mut cfg = self.inline_cfg();
         if let Some(why) = self.inline_blocked(&cfg, manual) {
-            if manual && why != "ui" {
+            if manual && why != "ui" && why != inline::NO_DESKTOP {
                 self.warn(why);
             }
             return;
+        }
+        // a remote editor asks the active desktop's tunnel (inline_blocked found it)
+        let desk = if cfg.provider == "desktop" { Self::active_desktop() } else { None };
+        if cfg.provider == "desktop" && desk.is_none() {
+            return;
+        }
+        self.inline.no_desktop = false;
+        if let Some((port, _)) = &desk {
+            cfg.endpoint = format!("http://127.0.0.1:{port}");
         }
         let (at, file, version) = (self.head(), self.file.clone(), self.buf.version);
         let key = format!("{}\0{version}\0{}\0{}\0{}\0{}", file.display(), at.line, at.col, cfg.key, cfg.multiline);
@@ -183,7 +211,10 @@ impl Editor {
             let items = items.clone();
             return self.inline_show(items, at, version);
         }
-        let api_key = self.inline_api_key(&cfg).unwrap_or_default();
+        let api_key = match desk {
+            Some((_, token)) => token,
+            None => self.inline_api_key(&cfg).unwrap_or_default(),
+        };
         let ctx = inline::Context { prose: inline::prose_file(&file), file: file.to_string_lossy().into_owned(), ..inline::context_at(&self.buf.lines, at.line, at.col, cfg.prefix_chars, cfg.suffix_chars) };
         self.inline_cancel();
         let cancel = Arc::new(Cancel::default());
@@ -228,6 +259,10 @@ impl Editor {
                 }
                 ed.inline.cancel = None;
                 ed.inline.busy = false;
+                if r.as_ref().err().is_some_and(|e| e == inline::NO_DESKTOP) {
+                    ed.inline_no_desktop();
+                    return;
+                }
                 let (texts, error) = match r {
                     Ok(t) => (t, None),
                     Err(e) => (vec![], Some(e)),
@@ -395,6 +430,8 @@ impl Editor {
             ": paused"
         } else if Self::limited(&cfg) {
             ": limit"
+        } else if self.inline.no_desktop {
+            ": no desktop"
         } else if self.inline.busy {
             " …"
         } else if self.inline.error.is_some() {
@@ -412,6 +449,9 @@ impl Editor {
         let cfg = self.inline_cfg();
         let h = self.health(&cfg);
         let mut notes: Vec<String> = h.paused.clone().map(|p| format!("{} paused: {p}", cfg.label)).or(h.note.clone()).into_iter().collect();
+        if self.inline.no_desktop {
+            notes.insert(0, inline::NO_DESKTOP.into());
+        }
         let info = self.inline.models.get(&cfg.key).copied();
         if info.is_some_and(|i| i.is_some_and(|i| i.missing)) {
             notes.push(inline::missing_text(&cfg));

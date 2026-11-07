@@ -5,12 +5,14 @@
 # --os: the keys of the computer the keyboard is on (Herdr's), not this machine's. --settings / --keybindings: the
 # local vscode-settings.json / vscode-keybindings.json, written to <root>/ before the editor starts (the local files
 # win: a change made here from the editor's palette lasts until the next launch). Backups (hot exit) stay in
-# <root>/backups. Everything it writes is under <root>. There is no JavaScript editor here to fall back to: when the
+# <root>/backups. Inline suggestions come from the desktop typing in the editor (VSEDIT_DESKTOPS: <root>/desktops, where
+# that desktop's tunnel is announced; vscode-viewer/editor/link.cjs). Everything it writes is under <root>. There is no JavaScript editor here to fall back to: when the
 # Rust editor can't start, it says why and waits for Enter.
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(dirname "$here")
 HERDR_APP_HOME=$root VSEDIT_SETTINGS=$root/vscode-settings.json VSEDIT_KEYBINDINGS=$root/vscode-keybindings.json VSEDIT_BACKUPS=$root/backups
-export HERDR_APP_HOME VSEDIT_SETTINGS VSEDIT_KEYBINDINGS VSEDIT_BACKUPS
+VSEDIT_DESKTOPS=$root/desktops
+export HERDR_APP_HOME VSEDIT_SETTINGS VSEDIT_KEYBINDINGS VSEDIT_BACKUPS VSEDIT_DESKTOPS
 # language servers and formatters the user installed (hc's and Herdr's shells may leave these out)
 PATH="$PATH:$HOME/.local/bin:$HOME/.cargo/bin"; export PATH
 

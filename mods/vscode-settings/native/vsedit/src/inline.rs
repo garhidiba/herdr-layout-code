@@ -219,6 +219,58 @@ pub fn config(s: &InlineSettings, usable: impl Fn(&Config) -> bool) -> Config {
     cfg
 }
 
+// ---------- a remote editor's suggestions come from the desktop typing in it (VS Code Remote's way) ----------
+// On a remote machine (VSEDIT_DESKTOPS: the bundle root's desktops/, remote-vsedit.sh) the editor never asks a provider
+// itself: the desktop whose window last focused a remote editor there marks itself `active`, and its tunnel (link.cjs)
+// is announced as <id>.json {port, token}. Its provider, model and key are used, the key never leaving that desktop.
+// None (no tunnel, another desktop's gone): suggestions are quietly off, said once.
+
+pub const NO_DESKTOP: &str = "Inline suggestions are off here: they come from the Herdr desktop you type on, and none is connected to this machine";
+
+pub fn desktops_dir() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(d) = TEST_DESKTOPS.with(|d| d.borrow().clone()) {
+        return Some(d);
+    }
+    std::env::var_os("VSEDIT_DESKTOPS").filter(|d| !d.is_empty()).map(PathBuf::from)
+}
+#[cfg(test)]
+thread_local! {
+    /// A test's VSEDIT_DESKTOPS, for its thread only (the environment is the whole test process's).
+    pub static TEST_DESKTOPS: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The active desktop's tunnel: (port, token).
+pub fn desktop(dir: &Path) -> Option<(u16, String)> {
+    let id = std::fs::read_to_string(dir.join("active")).ok()?;
+    let id = id.trim();
+    if id.is_empty() || id.len() > 64 || !id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        return None;
+    }
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(dir.join(format!("{id}.json"))).ok()?).ok()?;
+    let port = u16::try_from(v["port"].as_u64()?).ok().filter(|p| *p > 0)?;
+    let token = v["token"].as_str().filter(|t| (16..=128).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))?;
+    Some((port, token.to_string()))
+}
+
+/// A remote editor's config: the desktop's proxy instead of the provider (its address comes per request from desktop()).
+/// On unless the provider is off or suggestions were turned off (`enabled`: the editor.inlineSuggest.enabled setting).
+pub fn via_desktop(cfg: Config, enabled: Option<bool>) -> Config {
+    Config {
+        enabled: cfg.provider != "off" && enabled != Some(false),
+        provider: "desktop".into(),
+        label: "Desktop",
+        model: String::new(),
+        endpoint: String::new(),
+        custom_endpoint: false,
+        hosted: false,
+        limit: 0,
+        price: None,
+        key: "desktop".into(),
+        ..cfg
+    }
+}
+
 // ---------- which files and positions ----------
 
 /// A glob (`*`, `?`, `**` across folders) against `s`, case-insensitive.
@@ -661,6 +713,11 @@ pub fn cache_key(file: &str) -> String {
 /// The HTTP request for a suggestion (stream: Ollama's NDJSON lines or the hosted APIs' SSE events, read by
 /// post_stream); `key`: the provider's API key (optional for a local server: "" sends none).
 pub fn request(cfg: &Config, ctx: &Context, stream: bool, key: &str) -> Request {
+    // the desktop's proxy (key: its token) builds the provider's request itself
+    if cfg.provider == "desktop" {
+        let body = json!({ "prefix": ctx.prefix, "suffix": ctx.suffix, "nextLine": ctx.next_line, "file": ctx.file, "stream": stream });
+        return Request { url: format!("{}/fim", cfg.endpoint), headers: headers(key), body };
+    }
     if cfg.hosted {
         let mut body = json!({ "model": cfg.model, "prompt": ctx.prefix, "suffix": ctx.suffix, "max_tokens": cfg.max_tokens, "stream": stream });
         if !cfg.multiline && !ctx.next_line {
@@ -963,6 +1020,10 @@ pub fn post_stream(req: &Request, cancel: &Cancel, mut on_text: impl FnMut(&str)
 
 /// A failed request -> the status bar's words.
 pub fn failure(cfg: &Config, e: &str) -> String {
+    // the desktop's tunnel gone (its own errors come back as replies)
+    if cfg.provider == "desktop" {
+        return NO_DESKTOP.into();
+    }
     if e == "connection refused" {
         return match cfg.provider.as_str() {
             "ollama" => format!("Ollama is not running at {} (start it: ollama serve)", cfg.endpoint),
@@ -1494,5 +1555,44 @@ mod tests {
         assert_eq!(reply(&cfg, status, &v), Ok(vec![" 1".to_string()]));
         assert_eq!(seen.join().unwrap(), vec![None, Some("Bearer lm-fake".to_string())]);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_active_desktops_announcement_is_its_tunnel_anything_else_is_no_desktop() {
+        let token = "ab".repeat(24);
+        let dir = std::env::temp_dir().join(format!("vsedit-desktops-{}", std::process::id()));
+        let at = |active: Option<&str>, announced: Value| {
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            if let Some(a) = active {
+                std::fs::write(dir.join("active"), format!("{a}\n")).unwrap();
+            }
+            std::fs::write(dir.join("d1.json"), announced.to_string()).unwrap();
+            desktop(&dir)
+        };
+        assert_eq!(at(Some("d1"), json!({ "port": 4100, "token": token })), Some((4100, token.clone())));
+        assert_eq!(at(None, json!({ "port": 4100, "token": token })), None, "no desktop marked active");
+        assert_eq!(at(Some("d2"), json!({ "port": 4100, "token": token })), None, "the active desktop's tunnel is gone");
+        assert_eq!(at(Some("../d1"), json!({ "port": 4100, "token": token })), None);
+        assert_eq!(at(Some("d1"), json!({ "port": 70000, "token": token })), None);
+        assert_eq!(at(Some("d1"), json!({ "port": 4100, "token": "short" })), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_remote_editor_asks_the_desktops_proxy_never_its_own_provider_address() {
+        let codestral = normalize(&json!({ "editor.inlineSuggest.provider": "codestral" }));
+        let cfg = via_desktop(config(&codestral, |_| false), codestral.enabled);
+        assert_eq!((cfg.provider.as_str(), cfg.hosted, cfg.limit, cfg.enabled), ("desktop", false, 0, true));
+        let ctx = Context { prefix: "a".into(), suffix: "b".into(), next_line: true, file: "/x.js".into(), ..Context::default() };
+        let req = request(&Config { endpoint: "http://127.0.0.1:4100".into(), ..cfg.clone() }, &ctx, true, "tok");
+        assert_eq!(req.url, "http://127.0.0.1:4100/fim");
+        assert!(req.headers.contains(&("Authorization".into(), "Bearer tok".into())));
+        assert_eq!(req.body, json!({ "prefix": "a", "suffix": "b", "nextLine": true, "file": "/x.js", "stream": true }));
+        assert_eq!(failure(&cfg, "connection refused"), NO_DESKTOP, "the tunnel gone");
+        let off = normalize(&json!({ "editor.inlineSuggest.provider": "off" }));
+        assert!(!via_desktop(config(&off, |_| true), off.enabled).enabled);
+        let turned_off = normalize(&json!({ "editor.inlineSuggest.enabled": false }));
+        assert!(!via_desktop(config(&turned_off, |_| true), turned_off.enabled).enabled);
     }
 }
