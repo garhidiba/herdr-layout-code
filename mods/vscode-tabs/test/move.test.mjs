@@ -2,7 +2,7 @@
 // Moving a terminal between tabs (move.js): park, then keep beside another tab's pane or as a new tab.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createMover } from "../move.js";
+import { createMover, fileByName } from "../move.js";
 
 // A fake Herdr: park takes the pane away, keep gives it one (beside the focused pane, or in a new tab); `parked` /
 // `kept` false: that step never shows; `empty` true: a tab whose last pane is parked stays, empty.
@@ -165,4 +165,13 @@ test("a park or keep that never shows stops there (Herdr toasts why)", async () 
   const k = harness({ kept: false });
   assert.equal(await k.move({ terminal: "t2", into: "a", place: "right" }), false);
   assert.equal(k.calls.at(-1)[0], "terminal.keep");
+});
+
+test("a viewer nobody recorded is found by its tab's name when exactly one known file has that name", () => {
+  const known = [{ file: "/p/icon.png", on: null }, { file: "/p/a/logo.png", on: null }, { file: "/q/logo.png", on: null }, null];
+  assert.deepEqual(fileByName("icon.png", known), { file: "/p/icon.png", on: null });
+  assert.deepEqual(fileByName("icon.png", [...known, { file: "/p/icon.png", on: null }]), { file: "/p/icon.png", on: null }, "the same file twice");
+  assert.equal(fileByName("logo.png", known), null, "two files of that name");
+  assert.equal(fileByName("none.png", known), null);
+  assert.equal(fileByName(undefined, known), null);
 });

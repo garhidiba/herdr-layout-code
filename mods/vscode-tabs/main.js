@@ -3,7 +3,7 @@ import { h_flex } from "gpui-base";
 import { spaces, panes, terminals, run, openOverlay, closeOverlay, props, theme, window, shared, setShared, layout, settings, hc, exec, notify } from "herdr";
 import { tabFileOf, dirtyTabs, TAB_MENU, withDetails, DETAILS } from "./tabfile.js";
 import { createTabCloser, signalCommand, CLOSE_REQUEST } from "./close.js";
-import { createMover, withViewer, MOVE_REQUEST, VIEWER_FILES } from "./move.js";
+import { createMover, withViewer, fileByName, MOVE_REQUEST, VIEWER_FILES } from "./move.js";
 import { find, dragStarted, panesRect, paneRects, dropTarget, zoneRect, dragSource } from "./drag.js";
 // vscode-pane's { [pane]: bounds }: where each shown pane's header is, for dropping onto one pane.
 const PANE_BOUNDS = "vscode-pane.bounds";
@@ -20,10 +20,12 @@ async function requestClose(address) {
   }
 }
 const closeTabs = createTabCloser({ run, panes, requestClose });
-// A viewer's file: as its opener recorded it, else as the viewer shared it when it was last focused.
+// A viewer's file: as its opener (or the viewer, once clicked) recorded it, else as the viewer shared it when it was last
+// focused, else the one known file named as its tab is (move.js fileByName).
 const viewerOf = (pane) => {
-  const focusedViewer = shared("vscode-viewer.focused");
-  return shared(VIEWER_FILES)?.[pane] ?? (focusedViewer?.pane === pane ? focusedViewer : null);
+  const focusedViewer = shared("vscode-viewer.focused"), files = shared(VIEWER_FILES) ?? {};
+  const tab = panes().find(p => p.pane === pane)?.tab, name = spaces().flatMap(s => s.tabs).find(t => t.id === tab)?.name;
+  return files[pane] ?? (focusedViewer?.pane === pane ? focusedViewer : null) ?? fileByName(name, [...Object.values(files), focusedViewer]);
 };
 const movePane = createMover({ run, panes, spaces, viewerOf,
   remember: (pane, file) => setShared(VIEWER_FILES, withViewer(shared(VIEWER_FILES), new Set(panes().map(p => p.pane)), pane, file)),

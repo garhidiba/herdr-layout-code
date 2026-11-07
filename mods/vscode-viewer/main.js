@@ -123,13 +123,17 @@ export default class Viewer extends View {
     this.code = null; this.dirty = false; this.conflict = false; this.wrap = false;
     this.error = null; this.table = null; this.language = "Plain Text"; this.facts = null;
     this.kind = kindOf(this.file ?? ""); this.preview = this.kind === "markdown"; this.img = null;
-    this.autoSave = { mode: "off", delay: 1 }; this.autoToken = 0; this.hadFocus = false; this.restore = null;
+    this.autoSave = { mode: "off", delay: 1 }; this.autoToken = 0; this.hadFocus = false; this.restore = null; this.pane = null; this.clicked = 0;
     this.load(cx);
     cx.timer.every(3000, cx => this.load(cx));
     cx.spawn(async cx => { for (;;) { const c = await nextCommand(); if (c === "save") await this.save(cx); } });
     // onFocusChange: save when this tab stops being the focused pane.
     cx.timer.every(500, cx => {
-      const mine = props().pane ?? (panes().filter(p => p.mod === "vscode-viewer").length === 1 ? panes().find(p => p.mod === "vscode-viewer").pane : null);
+      // Its own pane: Herdr gives a tab's mod no props().pane, so a click inside it (render: on_mouse_down) focuses its
+      // pane and the focused pane is it, read once the focus has settled; else the only viewer pane there is.
+      const f = focused()?.pane;
+      if (!this.pane && Date.now() - this.clicked < 2000 && panes().some(p => p.pane === f && p.mod === "vscode-viewer")) this.pane = f;
+      const mine = props().pane ?? this.pane ?? (panes().filter(p => p.mod === "vscode-viewer").length === 1 ? panes().find(p => p.mod === "vscode-viewer").pane : null);
       const now = !!mine && focused()?.pane === mine;
       if (this.hadFocus && !now && this.autoSave.mode === "onFocusChange") this.save(cx);
       // The Explorer reveals the focused tab's file (its autoReveal).
@@ -302,6 +306,7 @@ export default class Viewer extends View {
       .when(Boolean(this.icon), el => el.child(image(`mods/vscode-explorer/icons/${this.icon}.svg`).w(15).h(15).flex_none()))
       .child(div().flex_none().text_color(t.foreground).child(name));
     return v_flex().id("viewer").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
+      .on_mouse_down("left", () => { this.clicked = Date.now(); }) // tells the focus timer which pane is its own
       .child(h_flex().h(30).flex_none().pl(16).pr(10).gap(6).items_center()
         .child(crumbs)
         .when(this.dirty, el => el.child(div().size(8).rounded(4).bg("#e5c07b").flex_none()))

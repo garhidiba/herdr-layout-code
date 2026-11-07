@@ -21,6 +21,13 @@ const WAIT_MS = 3000, STEP_MS = 25;
 export const withViewer = (files, live, pane, { file, on = null }) =>
   ({ ...Object.fromEntries(Object.entries(files ?? {}).filter(([k]) => live.has(k))), [pane]: { file, on } });
 
+// The one { file, on } among `known` (files viewers showed) whose file name is `name` (a viewer tab is named after
+// its file when it opens), or null when none or several match: a last resort for a viewer nobody recorded.
+export function fileByName(name, known) {
+  const hits = new Map((known ?? []).filter(k => k?.file && k.file.slice(k.file.lastIndexOf("/") + 1) === name).map(k => [`${k.on ?? ""}:${k.file}`, k]));
+  return name && hits.size === 1 ? [...hits.values()][0] : null;
+}
+
 // The name a pane's new tab gets: an editor's file (its title "● a.ts — vsedit"), a viewer's file name; else none.
 export function tabName(p, viewer) {
   if (viewer?.file) return viewer.file.slice(viewer.file.lastIndexOf("/") + 1);

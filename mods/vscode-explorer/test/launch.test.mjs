@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { directRun, createOpenTab } from "../launch.js";
 import { openArgs } from "../paths.js";
+import { createOpenFile } from "../remote.js";
 
 const editor = { name: "a.ts", folder: "/p", argv: ["exec", "node", "/h/vsedit.cjs", "/p/a.ts", "--close-on-exit"] };
 const where = { space: "sp1", tab: "tb1" };
@@ -215,6 +216,18 @@ test("a viewer the Explorer opens is remembered by its new pane's id, so it can 
   await openTab(viewer, { sleep: async () => { shown = true; } });
   assert.deepEqual(calls, [["tab.new", viewer]]);
   assert.deepEqual(remembered, [["p2", { file: "/p/a.png", on: null }]]);
+});
+
+test("the tree's click on an image (openFile, then openTab) remembers the viewer pane Herdr shows a few frames later", async () => {
+  const remembered = [], rows = [{ pane: "p1", tab: "t1", terminal: "x1", mod: undefined }];
+  let frames = 0;
+  const run = (n, a) => { if (n === "tab.new") setTimeout(() => rows.push({ pane: "p9", tab: "t9", terminal: null, mod: a.mod }), 0); };
+  const openTab = createOpenTab({ hc: async () => ok, run, panes: () => rows, remember: (pane, file) => remembered.push([pane, file]),
+    spaces: () => [{ id: "sp1", machine: null, active: true, tabs: [] }], wait: 1000, step: 25 });
+  const openFile = createOpenFile({ openTab, remote: {}, appHome: () => "/h" });
+  await openFile("/p/logo.png", { on: null, folder: "/p", place: "tab" }, { sleep: (ms) => { frames++; return new Promise(r => setTimeout(r, 1)); } });
+  assert.ok(frames >= 1, "it waited for Herdr");
+  assert.deepEqual(remembered, [["p9", { file: "/p/logo.png", on: null }]]);
 });
 
 test("extra labels go on the terminal with Herdr's", () => {
