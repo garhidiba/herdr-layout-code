@@ -223,11 +223,26 @@ function blockCut(text, { prefix, suffix }, final = true) {
   }
   return { text: lines.slice(0, n).join("\n"), done: false };
 }
+// The suggestion up to the loop a small model can fall into: before the first block of 1-8 lines (not all blank) written
+// again right after itself (the first copy stays, lines compared without trailing spaces), and less a last line that is
+// the line the text after the cursor goes on with, indent and all (a FIM model writes it again). The text itself when
+// nothing is cut.
+function cutRepeats(text, suffix) {
+  const lines = text.split("\n"), key = lines.map(l => l.trimEnd()), n = lines.length;
+  const repeats = (i, p) => key.slice(i, i + p).some(Boolean) && key.slice(i, i + p).every((l, j) => l === key[i + p + j]);
+  let end = n;
+  for (let i = 0; i < n && end === n; i++) for (let p = 1; p <= 8 && i + 2 * p <= n; p++) if (repeats(i, p)) { end = i + p; break; }
+  const next = suffix.split("\n").map(l => l.trimEnd()).find(Boolean);
+  let last = end - 1;
+  while (last > 0 && !key[last]) last--;
+  if (last > 0 && key[last] === next) end = last;
+  return end === n ? text : lines.slice(0, end).join("\n");
+}
 // A provider's raw text -> { text (null when nothing is left), anomaly: null | "fim" (template tokens: pause now) |
 // "prose" (sentences, not code) | "fence" (a Markdown fence alone) | "echo" (the text before or after the cursor
 // repeated) | "empty" }. Cuts what follows a FIM token, Markdown fences (a leading one with its language), a repeat of
-// the text after the cursor, and the end of a block (blockCut) or, in one-line mode, the first line break — after the
-// next line's text when nextLine. Prose files (`prose`) keep sentences and fences.
+// the text after the cursor, a loop (cutRepeats), and the end of a block (blockCut) or, in one-line mode, the first line
+// break — after the next line's text when nextLine. Prose files (`prose`) keep sentences and fences.
 function clean(raw, { prefix, suffix, multiline, nextLine = false, prose = false }) {
   let text = String(raw ?? "").replace(/\r\n?/g, "\n"), anomaly = null;
   const fim = firstToken(text);
@@ -252,7 +267,7 @@ function clean(raw, { prefix, suffix, multiline, nextLine = false, prose = false
     while (j < after.length && k + j < lines.length && lines[k + j].trim() === after[j]) n += after[j++].length;
     if (j && (n >= 4 || k + j === lines.length && j === after.length)) { text = lines.slice(0, k).join("\n"); if (!text.trim()) anomaly ??= "echo"; break; }
   }
-  text = trimLineSuffix(text.trimEnd(), suffix.split("\n")[0]);
+  text = trimLineSuffix(cutRepeats(text, suffix).trimEnd(), suffix.split("\n")[0]);
   if (text.trim() && suffix.trimStart().startsWith(text.trim())) return { text: null, anomaly: "echo" }; // only the text after the cursor
   if (!text.trim()) return { text: null, anomaly: anomaly ?? "empty" };
   return { text, anomaly };
@@ -291,6 +306,9 @@ const TEMPLATES = [
 ];
 const template = (model) => TEMPLATES.find(t => t.re.test(model)) ?? null;
 const fimPrompt = (t, prefix, suffix) => t.spm ? t.pre + suffix + t.mid + prefix + t.end : t.pre + prefix + t.mid + suffix + t.end;
+// Keeps a local model from looping on the same lines (Ollama's options; LM Studio takes repeat_penalty): over the last
+// 128 tokens, about 8 lines (the hosted FIM APIs take no such field).
+const REPEAT_PENALTY = { repeat_penalty: 1.1, repeat_last_n: 128 };
 const JSON_HEADERS = { "Content-Type": "application/json" };
 // A request's headers: a Bearer key only when there is one.
 const headers = (key = "") => key ? { ...JSON_HEADERS, Authorization: `Bearer ${key}` } : JSON_HEADERS;
@@ -316,14 +334,14 @@ function request(cfg, ctx, stream = false, key = "") {
   if (cfg.provider === "ollama") {
     const prompt = t ? { prompt: fimPrompt(t, ctx.prefix, ctx.suffix), raw: true } : { prompt: ctx.prefix, suffix: ctx.suffix };
     return { url: `${cfg.endpoint}/api/generate`, headers: headers(key),
-      body: { model: cfg.model, ...prompt, stream, keep_alive: cfg.keepAlive, options: { num_predict: cfg.maxTokens, temperature: 0.2, ...(stop.length ? { stop } : {}) } } };
+      body: { model: cfg.model, ...prompt, stream, keep_alive: cfg.keepAlive, options: { num_predict: cfg.maxTokens, temperature: 0.2, ...REPEAT_PENALTY, ...(stop.length ? { stop } : {}) } } };
   }
   // LM Studio's OpenAI-compatible /v1/completions applies no prompt template, so the FIM prompt goes as is; its docs
   // name no `suffix`, sent only for a model without a known template.
   if (cfg.provider === "lmstudio") {
     const prompt = t ? { prompt: fimPrompt(t, ctx.prefix, ctx.suffix) } : { prompt: ctx.prefix, suffix: ctx.suffix };
     return { url: `${cfg.endpoint}/v1/completions`, headers: headers(key),
-      body: { model: cfg.model, ...prompt, max_tokens: cfg.maxTokens, temperature: 0.2, stream, ...(stop.length ? { stop } : {}) } };
+      body: { model: cfg.model, ...prompt, max_tokens: cfg.maxTokens, temperature: 0.2, repeat_penalty: REPEAT_PENALTY.repeat_penalty, stream, ...(stop.length ? { stop } : {}) } };
   }
   throw new Error(`Unknown inline suggestion provider: ${cfg.provider}`);
 }
@@ -546,7 +564,7 @@ function proxy({ token, values = () => require("./settings.cjs").load().values }
 }
 
 module.exports = { PROVIDERS, MODELS, DEFAULTS, EXCLUDE, MAX_FILE_CHARS, NO_DESKTOP, desktop, desktopsDir, viaDesktop, proxy, normalize, config, globRe, denied, atSuggestable, quietEnd, contextAt,
-  typeThrough, nextWordLength, nextLineLength, trimLineSuffix, proseFile, blockCut, clean, Health, template, request, warmup, show, modelInfo,
+  typeThrough, nextWordLength, nextLineLength, trimLineSuffix, proseFile, blockCut, cutRepeats, clean, Health, template, request, warmup, show, modelInfo,
   chatModel, missingText, chatHint, reply, failure, post, postStream, HOSTED, apiKey, keyHelp, maskKey, saveKey, removeKey, cacheKey, cost,
   usageFile, today, usageOf, recordUsage, percentile, usageText };
 

@@ -1559,13 +1559,14 @@ class Editor {
     this.redraw();
     const t0 = Date.now();
     let texts = [], error = null;
-    // the reply streams in: its complete lines show as they come; reading stops where the block ends (or at prose)
+    // the reply streams in: its complete lines show as they come; reading stops where the block ends, at a loop (or at
+    // prose)
     const partial = (text) => {
       if (gen !== this.inline.gen) return true;
-      const r = I.clean(text.slice(0, text.lastIndexOf("\n") + 1), ctx);
+      const lines = text.slice(0, text.lastIndexOf("\n") + 1), r = I.clean(lines, ctx);
       if (r.anomaly === "prose") return true;
       if (r.text && r.text !== this.inline.ghost?.items[0]) { this.inlineShow([r.text], at, version); this.redraw(); }
-      return cfg.multiline && I.blockCut(text, ctx, false).done;
+      return cfg.multiline && (I.blockCut(text, ctx, false).done || I.cutRepeats(lines, ctx.suffix) !== lines);
     };
     try { const { status, json } = await I.postStream(I.request(cfg, ctx, true, desk ? desk.token : this.inlineKeyOf(cfg)), ac.signal, partial); texts = I.reply(cfg, status, json); }
     catch (e) { error = I.failure(cfg, e); if (error === null) return; } // aborted: a newer request or an edit

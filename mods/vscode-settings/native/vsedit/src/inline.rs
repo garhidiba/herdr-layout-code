@@ -509,11 +509,30 @@ pub fn block_cut(text: &str, ctx: &Context, last: bool) -> (String, bool) {
     (lines[..n].join("\n"), false)
 }
 
+/// The suggestion up to the loop a small model can fall into: before the first block of 1-8 lines (not all blank) written
+/// again right after itself (the first copy stays, lines compared without trailing spaces), and less a last line that is
+/// the line the text after the cursor goes on with, indent and all (a FIM model writes it again). The text itself when
+/// nothing is cut.
+pub fn cut_repeats(text: &str, suffix: &str) -> String {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let key: Vec<&str> = lines.iter().map(|l| l.trim_end()).collect();
+    let n = lines.len();
+    let repeats = |i: usize, p: usize| key[i..i + p].iter().any(|l| !l.is_empty()) && key[i..i + p] == key[i + p..i + 2 * p];
+    let mut end = (0..n).find_map(|i| (1..=8).take_while(|p| i + 2 * p <= n).find(|&p| repeats(i, p)).map(|p| i + p)).unwrap_or(n);
+    let next = suffix.split('\n').map(str::trim_end).find(|l| !l.is_empty());
+    if let Some(last) = (1..end).rev().find(|&k| !key[k].is_empty()) {
+        if Some(key[last]) == next {
+            end = last;
+        }
+    }
+    if end == n { text.to_string() } else { lines[..end].join("\n") }
+}
+
 /// A provider's raw text -> (text, anomaly): None when nothing is left; anomaly "fim" (template tokens: pause now),
 /// "prose" (sentences, not code), "fence" (a Markdown fence alone), "echo" (the text before or after the cursor repeated)
 /// or "empty". Cuts what follows a FIM token, Markdown fences (a leading one with its language), a repeat of the text
-/// after the cursor, and the end of a block (block_cut) or, in one-line mode, the first line break — after the next
-/// line's text when `next_line`. Prose files keep sentences and fences.
+/// after the cursor, a loop (cut_repeats), and the end of a block (block_cut) or, in one-line mode, the first line
+/// break — after the next line's text when `next_line`. Prose files keep sentences and fences.
 pub fn clean(raw: &str, ctx: &Context, multiline: bool) -> (Option<String>, Option<&'static str>) {
     let (prefix, suffix) = (ctx.prefix.as_str(), ctx.suffix.as_str());
     let mut text = raw.replace("\r\n", "\n").replace('\r', "\n");
@@ -571,7 +590,7 @@ pub fn clean(raw: &str, ctx: &Context, multiline: bool) -> (Option<String>, Opti
             break;
         }
     }
-    let text = trim_line_suffix(text.trim_end(), suffix.split('\n').next().unwrap_or(""));
+    let text = trim_line_suffix(cut_repeats(&text, suffix).trim_end(), suffix.split('\n').next().unwrap_or(""));
     if !text.trim().is_empty() && suffix.trim_start().starts_with(text.trim()) {
         return (None, Some("echo")); // only the text after the cursor
     }
@@ -705,6 +724,11 @@ fn headers(key: &str) -> Vec<(String, String)> {
     h
 }
 
+/// Keeps a local model from looping on the same lines (Ollama's options; LM Studio takes repeat_penalty): over the last
+/// 128 tokens, about 8 lines (the hosted FIM APIs take no such field).
+const REPEAT_PENALTY: f64 = 1.1;
+const REPEAT_LAST_N: u64 = 128;
+
 /// A short stable id of a file (FNV-1a), Codestral's prompt_cache_key: the same file reuses the provider's prompt cache.
 pub fn cache_key(file: &str) -> String {
     format!("vsedit-{:08x}", file.bytes().fold(0x811c9dc5u32, |h, b| (h ^ b as u32).wrapping_mul(0x01000193)))
@@ -736,7 +760,7 @@ pub fn request(cfg: &Config, ctx: &Context, stream: bool, key: &str) -> Request 
     // LM Studio's OpenAI-compatible /v1/completions applies no prompt template, so the FIM prompt goes as is; its docs
     // name no `suffix`, sent only for a model without a known template.
     if cfg.provider == "lmstudio" {
-        let mut body = json!({ "model": cfg.model, "max_tokens": cfg.max_tokens, "temperature": 0.2, "stream": stream });
+        let mut body = json!({ "model": cfg.model, "max_tokens": cfg.max_tokens, "temperature": 0.2, "repeat_penalty": REPEAT_PENALTY, "stream": stream });
         match t {
             Some(t) => body["prompt"] = json!(fim_prompt(t, &ctx.prefix, &ctx.suffix)),
             None => {
@@ -749,7 +773,7 @@ pub fn request(cfg: &Config, ctx: &Context, stream: bool, key: &str) -> Request 
         }
         return Request { url: format!("{}/v1/completions", cfg.endpoint), headers: headers(key), body };
     }
-    let mut options = json!({ "num_predict": cfg.max_tokens, "temperature": 0.2 });
+    let mut options = json!({ "num_predict": cfg.max_tokens, "temperature": 0.2, "repeat_penalty": REPEAT_PENALTY, "repeat_last_n": REPEAT_LAST_N });
     if !stop.is_empty() {
         options["stop"] = json!(stop);
     }
@@ -1326,6 +1350,29 @@ mod tests {
     }
 
     #[test]
+    fn a_looping_reply_stops_before_its_first_repeated_block_and_similar_lines_stay() {
+        // the reported case: a Gitea env block, then two lines alternating until max tokens
+        let pair = "      GITEA__auth__LOGIN_URL: \"/login\"\n      GITEA__auth__LOGIN_REDIRECT_URL: \"/user/profile\"";
+        let head = "\n      GITEA__server__SSH_PORT: \"2222\"\n      GITEA__server__DOMAIN_SANITIZED: \"true\"\n\n      # ===== 로그인 =====\n";
+        let raw = format!("{head}{}\n      GITEA__auth", vec![pair; 8].join("\n"));
+        let want = format!("{head}{pair}");
+        assert_eq!(cut_repeats(&raw, "\n    volumes:"), want);
+        let prefix = "services:\n  gitea:\n    environment:\n      GITEA__server__HTTP_PORT: \"3000\"";
+        assert_eq!(clean(&raw, &cx(prefix, "\n    volumes:"), true), (Some(want), None));
+        // one line again, a 3-line block again (trailing spaces ignored); the first copy stays
+        assert_eq!(cut_repeats("a()\nb()\nb()\nb()", ""), "a()\nb()");
+        assert_eq!(cut_repeats("x: 1\ny: 2\n\nz: 3\nx: 1\ny: 2  \n\nz: 3\nx: 1", ""), "x: 1\ny: 2\n\nz: 3");
+        // similar but different lines, a block that comes back later, and blank lines alone stay
+        for t in ["a: 1\nb: 2\nc: 3", "x = 1\ny = 2\nx = 1", "a\n\n\nb", "if a:\n    go()\nif b:\n    go()"] {
+            assert_eq!(cut_repeats(t, ""), t);
+        }
+        // a last line the document already has next goes, the only line stays (the echo check owns it)
+        assert_eq!(cut_repeats("  a: 1\n  b: 2\n", "\n\n  b: 2\nc: 3"), "  a: 1");
+        assert_eq!(cut_repeats("b: 2", "\nb: 2"), "b: 2");
+        assert_eq!(cut_repeats("if (a) {\n    go();\n  }", "\n}"), "if (a) {\n    go();\n  }", "an inner brace, not the outer one");
+    }
+
+    #[test]
     fn defaults_are_ollama_qwen_base_on_localhost_in_blocks_without_a_daily_limit() {
         let cfg = config(&normalize(&json!({})), |_| true);
         assert_eq!((cfg.provider.as_str(), cfg.model.as_str(), cfg.endpoint.as_str(), cfg.enabled, cfg.limit, cfg.max_tokens, cfg.debounce, cfg.manual, cfg.multiline), ("ollama", "qwen2.5-coder:1.5b-base", "http://127.0.0.1:11434", true, 0, 256, 250, false, true));
@@ -1339,6 +1386,7 @@ mod tests {
         let one = Config { multiline: false, ..cfg.clone() };
         assert!(!request(&one, &Context { next_line: true, ..cx("", "") }, false, "").body["options"]["stop"].as_array().unwrap().contains(&json!("\n")));
         assert_eq!(warmup(&cfg, "").unwrap().body["options"]["num_predict"], json!(1));
+        assert_eq!((&r.body["options"]["repeat_penalty"], &r.body["options"]["repeat_last_n"]), (&json!(1.1), &json!(128)), "a looping model is held back");
     }
 
     #[test]
@@ -1410,6 +1458,7 @@ mod tests {
             assert_eq!((r.url.as_str(), &r.body["model"], &r.body["prompt"], &r.body["suffix"], &r.body["max_tokens"], &r.body["stream"]), (url, &json!(model), &json!("a("), &json!(")"), &json!(256), &json!(true)), "{p}");
             assert!(r.body["stop"].is_null() && r.headers.contains(&("Authorization".into(), "Bearer sk-test".into())), "{p}");
             assert_eq!(r.body["prompt_cache_key"].is_string(), p == "codestral", "{p}");
+            assert!(r.body.get("repeat_penalty").is_none(), "no field a hosted FIM API may refuse: {p}");
             assert_eq!((cfg.limit, cfg.hosted), (2000, true), "{p}");
         }
         assert_eq!(request(&cfg_of("mercury", json!({ "editor.inlineSuggest.multiline": false })), &cx("", ""), false, "k").body["stop"], json!(["\n"]));
@@ -1487,6 +1536,7 @@ mod tests {
         assert_eq!(r.body["prompt"], "<|fim_prefix|>a = <|fim_suffix|>\nb<|fim_middle|>");
         assert_eq!((&r.body["model"], &r.body["max_tokens"], &r.body["stream"]), (&json!(LMSTUDIO_MODEL), &json!(256), &json!(true)));
         assert!(r.body.get("suffix").is_none() && r.body["stop"].as_array().unwrap().last() == Some(&json!("\n")));
+        assert_eq!(r.body["repeat_penalty"], json!(1.1));
         let plain = request(&Config { model: "llama-3.2-1b".into(), ..cfg.clone() }, &cx("a = ", "\nb"), false, "");
         assert_eq!((&plain.body["prompt"], &plain.body["suffix"], &plain.body["stop"]), (&json!("a = "), &json!("\nb"), &json!(["\n"])));
         assert_eq!(failure(&cfg, "connection refused"), "LM Studio is not running at http://127.0.0.1:1234 (start its server: the Developer tab, or lms server start)");

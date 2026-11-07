@@ -169,6 +169,26 @@ test("the model probe: missing (ollama pull), a chat template, or unknown", () =
   assert.equal(I.show(cfg).url, "http://127.0.0.1:11434/api/show");
 });
 
+test("a looping reply stops before its first repeated block of lines; similar lines and the next line's twin are judged apart", () => {
+  // the reported case: a Gitea env block, then two lines alternating until max tokens
+  const loop = ['GITEA__auth__LOGIN_URL: "/login"', 'GITEA__auth__LOGIN_REDIRECT_URL: "/user/profile"'];
+  const head = '\n      GITEA__server__SSH_PORT: "2222"\n      GITEA__server__DOMAIN_SANITIZED: "true"\n\n      # ===== 로그인 =====\n';
+  const raw = head + Array(8).fill(loop.map(l => "      " + l).join("\n")).join("\n") + "\n      GITEA__auth";
+  const want = head + loop.map(l => "      " + l).join("\n");
+  assert.equal(I.cutRepeats(raw, "\n    volumes:"), want);
+  assert.deepEqual(I.clean(raw, { prefix: 'services:\n  gitea:\n    environment:\n      GITEA__server__HTTP_PORT: "3000"', suffix: "\n    volumes:", multiline: true }),
+    { text: want, anomaly: null });
+  // one line again, a 3-line block again (trailing spaces ignored); the first copy stays
+  assert.equal(I.cutRepeats("a()\nb()\nb()\nb()", ""), "a()\nb()");
+  assert.equal(I.cutRepeats("x: 1\ny: 2\n\nz: 3\nx: 1\ny: 2  \n\nz: 3\nx: 1", ""), "x: 1\ny: 2\n\nz: 3");
+  // similar but different lines, a block that comes back later, and blank lines alone stay
+  for (const t of ["a: 1\nb: 2\nc: 3", "x = 1\ny = 2\nx = 1", "a\n\n\nb", "if a:\n    go()\nif b:\n    go()"]) assert.equal(I.cutRepeats(t, ""), t);
+  // a last line the document already has next goes, the only line stays (the echo check owns it)
+  assert.equal(I.cutRepeats("  a: 1\n  b: 2\n", "\n\n  b: 2\nc: 3"), "  a: 1");
+  assert.equal(I.cutRepeats("b: 2", "\nb: 2"), "b: 2");
+  assert.equal(I.cutRepeats("if (a) {\n    go();\n  }", "\n}"), "if (a) {\n    go();\n  }", "an inner brace, not the outer one");
+});
+
 test("defaults: Ollama with qwen2.5-coder:1.5b-base on 127.0.0.1, blocks, on when Ollama can run, no daily limit", () => {
   const cfg = I.config(S.normalize({}), () => true);
   assert.deepEqual([cfg.provider, cfg.model, cfg.endpoint, cfg.enabled, cfg.limit, cfg.maxTokens, cfg.debounce, cfg.trigger, cfg.keepAlive, cfg.prefixChars, cfg.suffixChars, cfg.multiline],
@@ -181,6 +201,7 @@ test("defaults: Ollama with qwen2.5-coder:1.5b-base on 127.0.0.1, blocks, on whe
   assert.ok(!body.options.stop.includes("\n"));
   assert.ok(!I.request({ ...cfg, multiline: false }, { prefix: "", suffix: "", nextLine: true }).body.options.stop.includes("\n"));
   assert.equal(I.warmup(cfg).body.options.num_predict, 1);
+  assert.deepEqual([body.options.repeat_penalty, body.options.repeat_last_n], [1.1, 128], "a looping model is held back");
 });
 
 test("usage: requests, characters and latencies per day and provider; percentiles", () => {
@@ -452,6 +473,7 @@ test("hosted providers: one FIM request shape, their URLs and models, a Bearer k
     const cfg = cfgOf(p), r = I.request(cfg, { prefix: "a(", suffix: ")", file: "/p/x.ts" }, true, "sk-test");
     assert.deepEqual([r.url, r.body.model, r.body.prompt, r.body.suffix, r.body.max_tokens, r.body.stream, r.body.stop, r.headers.Authorization],
       [url, model, "a(", ")", 256, true, undefined, "Bearer sk-test"], p);
+    assert.ok(!("repeat_penalty" in r.body), "no field a hosted FIM API may refuse");
     assert.equal("prompt_cache_key" in r.body, p === "codestral", p);
     assert.deepEqual([cfg.limit, cfg.hosted], [2000, true], "2,000 requests a day unless set");
   }
@@ -617,6 +639,7 @@ test("LM Studio's request: /v1/completions with the raw FIM prompt and its stops
   assert.deepEqual(r.headers, { "Content-Type": "application/json" });
   assert.equal(r.body.prompt, "<|fim_prefix|>a = <|fim_suffix|>\nb<|fim_middle|>");
   assert.deepEqual([r.body.model, r.body.max_tokens, r.body.stream, "suffix" in r.body, r.body.stop.at(-1)], ["qwen2.5-coder-1.5b", 256, true, false, "\n"]);
+  assert.equal(r.body.repeat_penalty, 1.1);
   const plain = I.request({ ...cfg, model: "llama-3.2-1b" }, ctx);
   assert.deepEqual([plain.body.prompt, plain.body.suffix, plain.body.stop], ["a = ", "\nb", ["\n"]]);
   assert.equal(I.failure(cfg, { cause: { code: "ECONNREFUSED" } }), "LM Studio is not running at http://127.0.0.1:1234 (start its server: the Developer tab, or lms server start)");

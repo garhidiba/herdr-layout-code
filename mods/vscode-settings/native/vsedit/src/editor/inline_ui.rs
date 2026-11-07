@@ -225,12 +225,13 @@ impl Editor {
         let t0 = Instant::now();
         let work_cfg = cfg.clone();
         let req = inline::request(&work_cfg, &ctx, true, &api_key);
-        // the reply streams in: its complete lines show as they come (a job each); reading stops where the block ends
-        // (or at prose)
+        // the reply streams in: its complete lines show as they come (a job each); reading stops where the block ends, at
+        // a loop (or at prose)
         let (tx, part_ctx) = (self.ls.jobs.0.clone(), ctx.clone());
         let mut shown = String::new();
         let partial = move |text: &str| {
-            let (r, why) = inline::clean(&text[..text.rfind('\n').map_or(0, |i| i + 1)], &part_ctx, work_cfg.multiline);
+            let lines = &text[..text.rfind('\n').map_or(0, |i| i + 1)];
+            let (r, why) = inline::clean(lines, &part_ctx, work_cfg.multiline);
             if why == Some("prose") {
                 return true;
             }
@@ -243,7 +244,7 @@ impl Editor {
                 }));
                 term::wake();
             }
-            work_cfg.multiline && inline::block_cut(text, &part_ctx, false).1
+            work_cfg.multiline && (inline::block_cut(text, &part_ctx, false).1 || inline::cut_repeats(lines, &part_ctx.suffix) != lines)
         };
         let work_cfg = cfg.clone();
         self.spawn(
