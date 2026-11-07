@@ -2,7 +2,7 @@
 
 // vscode-explorer's tab menu popup (its menu.js TabMenu): rows of 26px, separators of 9px, 10px padding, as its
 // paths.js menuHeight gives for tabMenuItems (a fixed set of rows; the test checks it).
-export const TAB_MENU = { width: 300, height: 332 };
+export const TAB_MENU = { width: 300, height: 393 };
 
 // vscode-explorer's paths.js FILE_LABEL: a mod can't import another mod's files.
 const FILE_LABEL = "vscode.file";
@@ -17,13 +17,14 @@ export const withDetails = (terminals, details) =>
 // import another mod's files), its file the argument after it and `argv` the launcher's arguments; a viewer tab is the
 // vscode-viewer pane that shared itself as focused (`viewer`, its { pane, file, on }). null for any other tab, which
 // keeps Herdr's menu. `root` (Copy Relative Path, Reopen's folder): the editor's folder, which is the Explorer root it
-// was opened from, else the space's first terminal's folder, else the space folder.
+// was opened from, else the space's first terminal's folder, else the space folder. A tab holding more panes (move.js)
+// gives its focused editor, else its first one.
 // A warm editor (vscode-explorer's warm.js: started as `vsedit.sh --warm <key>`, handed its file later) carries the
 // file as its terminal's FILE_LABEL (paths.js); `argv` is then the launcher's as if it had started with the file.
 export function tabFileOf(id, space, panes, terminals, viewer) {
   const tabs = new Set((space?.tabs ?? []).map(t => t.id)), on = space?.machine ?? null;
   const spaceRoot = panes.find(p => tabs.has(p.tab) && p.terminal && p.cwd)?.cwd || space?.folder || null;
-  const mine = panes.filter(p => p.tab === id);
+  const mine = panes.filter(p => p.tab === id).sort((a, b) => Number(Boolean(b.focused)) - Number(Boolean(a.focused)));
   for (const p of mine) {
     const term = p.terminal ? terminals.find(t => t.address === p.terminal) : null, argv = term?.argv;
     const i = Array.isArray(argv) ? argv.findIndex(a => /(^|[\\/])vsedit\.sh$/.test(a)) : -1, labelled = term?.labels?.[FILE_LABEL];

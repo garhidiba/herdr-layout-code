@@ -3,6 +3,7 @@ import { h_flex } from "gpui-base";
 import { spaces, panes, terminals, run, openOverlay, theme, window, shared, layout, settings, hc, exec } from "herdr";
 import { tabFileOf, dirtyTabs, TAB_MENU, withDetails, DETAILS } from "./tabfile.js";
 import { createTabCloser, signalCommand, CLOSE_REQUEST } from "./close.js";
+import { createMover, MOVE_REQUEST } from "./move.js";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -25,12 +26,14 @@ async function requestClose(address) {
   }
 }
 const closeTabs = createTabCloser({ run, panes, requestClose });
+const moveTerminal = createMover({ run, panes, spaces });
 
 export default class Tabs extends View {
   init() {
     this.pressed = null;
     this.hoverClose = null; // the tab whose close slot the pointer is on
     this.closeAt = null; // the tab menu's last close request taken (close.js CLOSE_REQUEST)
+    this.moveAt = null; // the menus' last move request taken (move.js MOVE_REQUEST)
   }
 
   closeList(list, cx) { // not close(): that is the View's own end call
@@ -46,10 +49,19 @@ export default class Tabs extends View {
     this.closeList(ask.tabs, cx);
   }
 
+  // The menus' Move into Tab / Move to New Tab (vscode-explorer's tab menu, vscode-menu) leave a move here, the same way.
+  moveAsked(cx) {
+    const ask = shared(MOVE_REQUEST);
+    if (typeof ask?.terminal !== "string" || ask.at === this.moveAt || Date.now() - ask.at > 5000) return;
+    this.moveAt = ask.at;
+    cx.spawn(async (cx) => moveTerminal(ask, (ms) => cx.sleep(ms)));
+  }
+
   // The side panel (Explorer / Source Control) is one global state: switching spaces leaves it as it is.
 
   render(cx) {
     this.closeAsked(cx);
+    this.moveAsked(cx);
     const t = theme();
     const space = spaces().find(p => p.active);
     const shown = space?.tabs ?? [];

@@ -23,6 +23,14 @@ async function checkout(folder, on) {
   return common.stdout.trim() === `${top.stdout.trim()}/.git` ? "main" : "linked";
 }
 
+// vscode-tabs' move.js MOVE_REQUEST: the tab bar moves a terminal between tabs ({ terminal, into, place, name?, at }).
+const MOVE = "vscode-tabs.move";
+// "Move into tab…": the "move" menu below, for terminal `terminal` now in tab `from`, when its space has another tab.
+function moveInto(terminal, from) {
+  const space = spaces().find((s) => s.tabs.some((c) => c.id === from));
+  return space && space.tabs.length > 1 ? [["Move into tab…", "move.list", { terminal, from, space: space.id }]] : [];
+}
+
 function items(p, git) {
   p = p ?? {};
   const tg = p.target ?? {};
@@ -34,7 +42,7 @@ function items(p, git) {
       const parent = term?.parent && all.find((t) => t.address === term.parent);
       // Once they go to the program, Shift+right-click still opens this menu.
       const toProgram = term?.labels?.["herdr.right-click"] === "program";
-      const cwd = panes().find((x) => x.pane === tg.pane)?.cwd;
+      const pane = panes().find((x) => x.pane === tg.pane), cwd = pane?.cwd;
       return [
         ["Split right", "pane.split", { direction: "right", pane: tg.pane }],
         ["Split down", "pane.split", { direction: "down", pane: tg.pane }],
@@ -47,16 +55,33 @@ function items(p, git) {
             ]
           : []),
         ...(parent ? [[`Send back to ${parent.name || parent.address}`, "terminal.park", { terminal: term.address }]] : []),
+        // Any terminal can join another tab (vscode-tabs' move.js); one sharing its tab (an editor moved in) can get a
+        // tab of its own again, named after an editor's file. Sub-agents go back under their parent instead.
+        ...(term && !parent ? moveInto(term.address, pane?.tab) : []),
+        ...(term && !parent && panes().filter((x) => x.tab === pane?.tab).length > 1
+          ? [["Move to new tab", MOVE, { terminal: term.address, into: null, place: "tab", name: /^(?:● )?(.+) — vsedit/.exec(pane.title ?? "")?.[1] ?? null }]]
+          : []),
         ...(cwd && !String(tg.pane).includes("/") ? [["Open in VS Code", "vscode.open", { folder: cwd }], ["Open in Finder", "finder.open", { folder: cwd }]] : []),
         ["Close pane", "pane.close", { pane: tg.pane }],
       ];
     }
-    case "tab":
+    case "tab": {
+      // A tab of one terminal can join another tab as a pane (several panes would lose their layout).
+      const mine = panes().filter((x) => x.tab === tg.id);
       return [
         ["Rename", "tab.rename", { id: tg.id }],
         ["New tab", "tab.new", { space: tg.space }],
+        ...(mine.length === 1 && mine[0].terminal ? moveInto(mine[0].terminal, tg.id) : []),
         ["Close", "tab.close", { id: tg.id }],
       ];
+    }
+    // The tabs a terminal can join (vscode-tabs' move.js): right of, then below, each other tab of its space.
+    case "move": {
+      const others = (spaces().find((s) => s.id === tg.space)?.tabs ?? []).filter((c) => c.id !== tg.from);
+      const title = (c) => (c.named ? c.name : panes().find((x) => x.tab === c.id)?.title || c.name);
+      const rows = (place, word) => others.map((c, i) => [`${word} ${title(c)}`, MOVE, { terminal: tg.terminal, into: c.id, place }, place === "down" && i === 0]);
+      return [...rows("right", "Right of"), ...rows("down", "Below")];
+    }
     case "space":
       return [
         ["Rename", "space.rename", { id: tg.id }],
@@ -83,7 +108,7 @@ function items(p, git) {
 }
 
 function menuIcon(command) {
-  const name = command.endsWith(".close") || command.endsWith(".forget") ? "x" : command.endsWith(".rename") ? "square-pen" : command.endsWith(".new") ? "plus" : command === "worktree" ? "git-branch" : command === "app.help" ? "terminal" : command === "app.theme" ? "settings" : command === "pane.split" ? "panel-right" : command === "pane.zoom" ? "square" : "terminal";
+  const name = command.endsWith(".close") || command.endsWith(".forget") ? "x" : command.endsWith(".rename") ? "square-pen" : command.endsWith(".new") ? "plus" : command === "worktree" ? "git-branch" : command === "app.help" ? "terminal" : command === "app.theme" ? "settings" : command === "pane.split" || command === MOVE || command === "move.list" ? "panel-right" : command === "pane.zoom" ? "square" : "terminal";
   return `mods/workspace-chrome/${name}.svg`;
 }
 
@@ -118,6 +143,12 @@ export default class Menu extends View {
     if (it[1] === "worktree") openOverlay({ mod: "worktree", kind: "dialog", ...(it[2].action === "open" ? { width: 560, height: 480 } : { width: 440, height: 260 }), props: it[2] });
     else if (it[1] === "vscode.open") userExec("code", [it[2].folder]).catch(() => {});
     else if (it[1] === "finder.open") exec("open", [it[2].folder]).catch(() => {});
+    else if (it[1] === MOVE) setShared(MOVE, { ...it[2], at: Date.now() });
+    // Rows of 31px, two per other tab, a separator (9px) and 10px padding; past 420px it scrolls.
+    else if (it[1] === "move.list") {
+      const n = spaces().find((s) => s.id === it[2].space)?.tabs.length ?? 2;
+      openOverlay({ mod: "vscode-menu", kind: "popup", width: 260, height: Math.min(420, 19 + 62 * (n - 1)), props: { tab: "move", target: it[2] } });
+    }
     // vscode-spaces reads these (its rows' state is its own).
     else if (it[1].startsWith("vscode-spaces.")) setShared("vscode-spaces.ask", { action: it[1].slice(14), id: it[2].id, at: Date.now() });
     else {
@@ -138,7 +169,9 @@ export default class Menu extends View {
       .id("menu")
       .track_focus(this.handle)
       .w_full()
+      .h_full()
       .min_h(0)
+      .overflow_y_scrollbar()
       .p(5)
       .bg(t.popover)
       .text_size(12.8)
@@ -153,7 +186,7 @@ export default class Menu extends View {
       .children(
         list.map((it, i) =>
           v_flex()
-            .when(i > 0 && (it[1].endsWith(".close") || it[1] === "app.help" || (it[1] === "app.theme" && list[i - 1][1] !== "app.theme")), el => el.child(div().mx(7).my(4).h(1).bg(t.border)))
+            .when(i > 0 && (it[3] === true || it[1].endsWith(".close") || it[1] === "app.help" || (it[1] === "app.theme" && list[i - 1][1] !== "app.theme")), el => el.child(div().mx(7).my(4).h(1).bg(t.border)))
             .child(h_flex()
             .id(`mi-${i}`)
             .h(31)

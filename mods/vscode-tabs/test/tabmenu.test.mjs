@@ -61,7 +61,7 @@ test("a remote editor whose terminals() row has no argv is a file tab with the e
 
 test("the menu is VS Code's tab menu, the items Herdr can do, with the OS's keys", () => {
   assert.deepEqual(labels(tabMenuItems({ remote: false, os: "mac" })), ["Close", "Close Others", "Close to the Right", "Close Saved", "Close All", "Copy Path",
-    "Copy Relative Path", "Reopen Editor With…", "Reveal in Finder", "Reveal in Explorer View", "Split Right"]);
+    "Copy Relative Path", "Reopen Editor With…", "Reveal in Finder", "Reveal in Explorer View", "Split Right", "Move into Tab…", "Move to New Tab"]);
   const hint = (os, action) => tabMenuItems({ remote: false, os }).find(r => r[1] === action)[2] ?? "";
   assert.deepEqual(["mac", "win", "linux"].map(os => hint(os, "close")), ["⌘W", "Ctrl+F4", "Ctrl+W"]);
   assert.deepEqual(["mac", "win", "linux"].map(os => hint(os, "closeOthers")), ["⌥⌘T", "", ""]);
@@ -75,13 +75,30 @@ test("a remote file's Reveal in Finder is disabled, every other item stays", () 
   const rows = tabMenuItems({ remote: true, os: "mac" });
   assert.deepEqual(rows.filter(r => r !== "-" && r[3]).map(r => r[1]), ["reveal"]);
   assert.ok(tabMenuItems({ remote: false, os: "mac" }).every(r => r === "-" || !r[3]));
-  assert.equal(labels(rows).length, 11);
+  assert.equal(labels(rows).length, 13);
 });
 
 test("the tab bar opens the popup at the menu's own height on every OS", () => {
-  for (const os of ["mac", "win", "linux"]) for (const remote of [false, true]) {
-    assert.equal(menuHeight(tabMenuItems({ remote, os })), TAB_MENU.height, `${os} remote=${remote}`);
+  for (const os of ["mac", "win", "linux"]) for (const remote of [false, true]) for (const flag of [{}, { lone: true, alone: true }, { viewer: true }]) {
+    assert.equal(menuHeight(tabMenuItems({ remote, os, ...flag })), TAB_MENU.height, `${os} remote=${remote} ${JSON.stringify(flag)}`);
   }
+});
+
+test("the moves are disabled when there is nowhere to go, and for a viewer", () => {
+  const off = (flags) => tabMenuItems({ remote: false, os: "mac", ...flags }).filter(r => r !== "-" && r[3]).map(r => r[1]);
+  assert.deepEqual(off({}), []);
+  assert.deepEqual(off({ lone: true }), ["moveInto"]);
+  assert.deepEqual(off({ alone: true }), ["moveOut"]);
+  assert.deepEqual(off({ viewer: true }), ["moveInto", "moveOut"]);
+});
+
+test("a tab holding several panes: its focused editor gets the menu, and it is a file tab only with no shell in it", () => {
+  const shared = [...panes, { pane: "p5", tab: "b", terminal: "t5", cwd: "/p", focused: true }, { pane: "p6", tab: "a", terminal: "t6", cwd: "/p" }];
+  const rows = [...terminals, { address: "t5", argv: ["sh", launcher, "/p/b.ts", "--close-on-exit"] }, { address: "t6", argv: ["sh", launcher, "/p/c.ts", "--close-on-exit"] }];
+  assert.equal(tabFileOf("b", space, shared, rows, null).file, "/p/b.ts", "the focused one");
+  assert.equal(tabFileOf("a", space, shared, rows, null).file, "/p/c.ts", "a shell's tab with an editor moved in");
+  assert.deepEqual([...fileTabs(space, shared, rows)].sort(), ["b", "c"], "two editors: a file tab; shell + editor: not one");
+  assert.deepEqual([...dirtyTabs(space, [{ pane: "p6", tab: "a", terminal: "t6", title: "● c.ts — vsedit" }])], ["a"]);
 });
 
 test("a warm editor (handed its file later) is a file tab once its label names the file, not while it waits", () => {

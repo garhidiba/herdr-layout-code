@@ -1,7 +1,7 @@
 // node --test mods/vscode-explorer/test/paths.test.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
-import { openArgs, wantsEditor, isMarkdown, relativeTo, within, copyName, freeName, nameProblem, menuItems, menuHeight, parentOf, openWith, vscodeRemoteArgs, editorFileOf, autoRevealOf, revealPath, normalPath, editorTabOf, deleteTitle, extraLines } from "../paths.js";
+import { openArgs, wantsEditor, isMarkdown, relativeTo, within, copyName, freeName, nameProblem, menuItems, menuHeight, parentOf, openWith, vscodeRemoteArgs, editorFileOf, autoRevealOf, revealPath, normalPath, editorTabOf, editorPaneOf, deleteTitle, extraLines } from "../paths.js";
 
 test("a dialog grows by the lines a long file name wraps onto, and not for a short one", () => {
   assert.equal(deleteTitle("/p/Invoice-44K7PLUN-0001 copy 2.pdf"), "Are you sure you want to delete 'Invoice-44K7PLUN-0001 copy 2.pdf'?");
@@ -175,4 +175,8 @@ test("a file open in an editor tab of the space is found there, on its machine o
   assert.equal(editorTabOf("/p/other.go", null, space, panes, terminals), null); // another space's tab
   assert.equal(editorTabOf("/p/services/chatService.go", null, space, panes, terminals), null);
   assert.equal(editorTabOf("/p/a.go", null, null, panes, terminals), null);
+  // moved beside a shell (vscode-tabs' move.js): found in that tab, as its own pane
+  const shared = [...panes, { pane: "p6", tab: "tb1", terminal: "t6" }], more = [...terminals, editor("t6", "/p/b.go")];
+  assert.deepEqual(editorPaneOf("/p/b.go", null, space, shared, more), { pane: "p6", tab: "tb1", terminal: "t6" });
+  assert.equal(editorTabOf("/p/b.go", null, space, shared, more), "tb1");
 });

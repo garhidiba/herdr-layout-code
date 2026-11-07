@@ -64,13 +64,15 @@ export function normalPath(p) {
 
 // The tab of `space` (a spaces() row) whose editor shows `file` on machine `on` (null: this computer), as VS Code
 // goes to a file's open editor instead of opening it again; null when none. `panes` and `terminals` are Herdr's.
-export function editorTabOf(file, on, space, panes, terminals) {
+// editorPaneOf: the editor's panes() row itself (it may share its tab with other panes: vscode-tabs' move.js).
+export function editorPaneOf(file, on, space, panes, terminals) {
   const tabs = new Set((space?.tabs ?? []).map(t => t.id)), want = normalPath(file);
   const term = new Map(terminals.map(t => [t.address, t]));
   const machine = (address) => (address.includes("/") ? address.split("/")[0] : null);
   const shows = (address) => { const f = editorFileOf(term.get(address)?.argv, term.get(address)?.labels); return f !== null && normalPath(f) === want; };
-  return panes.find(p => p.terminal && tabs.has(p.tab) && machine(p.terminal) === (on ?? null) && shows(p.terminal))?.tab ?? null;
+  return panes.find(p => p.terminal && tabs.has(p.tab) && machine(p.terminal) === (on ?? null) && shows(p.terminal)) ?? null;
 }
+export const editorTabOf = (...args) => editorPaneOf(...args)?.tab ?? null;
 
 // vscode-settings.json's keys (comments and trailing commas allowed, as vscode-settings' loose()); {} when unreadable.
 export function settingsOf(text) {
@@ -173,8 +175,10 @@ const REVEAL_LABEL = { mac: "Reveal in Finder", win: "Reveal in File Explorer", 
 
 // VS Code's editor tab menu, the items Herdr can do. Rows as menuItems' plus a 4th field: disabled. A remote file's
 // reveal is disabled (the file manager only sees this computer), not hidden, so the menu's height never changes
-// (vscode-tabs opens the popup at a fixed size, its TAB_MENU, which its test checks against this).
-export function tabMenuItems({ remote, os }) {
+// (vscode-tabs opens the popup at a fixed size, its TAB_MENU, which its test checks against this). The moves
+// (vscode-tabs' move.js) are disabled the same way: Move into Tab with no other tab in the space (`lone`), Move to New
+// Tab while the editor has its tab to itself (`alone`), both for a viewer (`viewer`: a mod pane, which Herdr can't move).
+export function tabMenuItems({ remote, os, lone = false, alone = false, viewer = false }) {
   const key = (id) => TAB_KEYS[id][os] ?? "";
   const groups = [
     [["Close", "close", key("close")], ["Close Others", "closeOthers", key("closeOthers")], ["Close to the Right", "closeRight"],
@@ -183,16 +187,19 @@ export function tabMenuItems({ remote, os }) {
     [["Reopen Editor With…", "reopenWith"]],
     [[REVEAL_LABEL[os], "reveal", key("reveal"), remote], ["Reveal in Explorer View", "revealExplorer"]],
     [["Split Right", "split", key("split")]],
+    [["Move into Tab…", "moveInto", "", lone || viewer], ["Move to New Tab", "moveOut", "", alone || viewer]],
   ];
   return groups.flatMap((g, i) => (i ? ["-", ...g] : g));
 }
 
-// The tabs of `space` showing a file (VS Code's editors): an editor terminal's or a vscode-viewer pane's. Shells and
-// agents are never among them.
+// The tabs of `space` showing files only (VS Code's editors): every pane an editor terminal or a vscode-viewer pane
+// (several, once moved together: vscode-tabs' move.js). A tab with a shell or an agent in it is never one.
 export const fileTabs = (space, panes, terminals) => {
   const term = new Map(terminals.map(t => [t.address, t])), tabs = new Set((space?.tabs ?? []).map(t => t.id));
   const shows = (address) => editorFileOf(term.get(address)?.argv, term.get(address)?.labels) !== null;
-  return new Set(panes.filter(p => tabs.has(p.tab) && (p.mod === "vscode-viewer" || (p.terminal && shows(p.terminal)))).map(p => p.tab));
+  const isFile = (p) => p.mod === "vscode-viewer" || Boolean(p.terminal && shows(p.terminal));
+  const mine = panes.filter(p => tabs.has(p.tab));
+  return new Set(mine.filter(isFile).map(p => p.tab).filter(tab => mine.every(p => p.tab !== tab || isFile(p))));
 };
 
 // tab.close args for a close item on tab `id`, in tab bar order (`tabs`: its space's; `files`: fileTabs; `dirty`: the

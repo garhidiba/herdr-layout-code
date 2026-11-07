@@ -5,7 +5,7 @@ import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { exec, hc, run, spaces, panes, terminals, machines, props, openOverlay, closeOverlay, theme, shared, setShared, appHome, home, readTextFile, writeTextFile, notify, window } from "herdr";
 import { createOpenTab } from "./launch.js";
 import { createWarmPool, TIMING } from "./warm.js";
-import { menuItems, menuHeight, openWith, baseName, parentOf, relativeTo, nameProblem, vscodeRemoteArgs, isMarkdown, editorTabOf,
+import { menuItems, menuHeight, openWith, baseName, parentOf, relativeTo, nameProblem, vscodeRemoteArgs, isMarkdown, editorPaneOf,
   tabMenuItems, closeArgs, fileTabs, splitArgs, clipboardCommand, revealCommand, withDetails, deleteTitle, extraLines, DETAILS } from "./paths.js";
 import { createOps } from "./ops.js";
 import { createRemote, createOpenFile, keysOs, ROOT, INSTALL_COMMAND, INSTALL_REQUEST } from "./remote.js";
@@ -41,9 +41,9 @@ export const remote = createRemote({ exec, readTextFile, notify, appHome, platfo
 // Every way the Explorer opens a file: the tree's click, Open / Open With, a new file. A file open in an editor tab of
 // this space is selected there instead.
 const showOpen = (file, on) => {
-  const tab = editorTabOf(file, on, spaces().find(s => s.active), panes(), terminalRows());
-  if (tab) run("tab.select", { id: tab });
-  return Boolean(tab);
+  const pane = editorPaneOf(file, on, spaces().find(s => s.active), panes(), terminalRows());
+  if (pane) { run("tab.select", { id: pane.tab }); run("pane.focus", { pane: pane.pane }); } // it may share its tab
+  return Boolean(pane);
 };
 export const openFile = createOpenFile({ openTab, remote, appHome, showOpen });
 const CLIPBOARD = "vscode-explorer.clipboard", REFRESH = "vscode-explorer.refresh";
@@ -52,6 +52,8 @@ export const refreshKey = REFRESH;
 export const REVEAL = "vscode-explorer.reveal";
 // The tab menu's Close items ask the tab bar (vscode-tabs' close.js CLOSE_REQUEST): { tabs: [tab.close args], at }.
 const TAB_CLOSE = "vscode-tabs.close";
+// Move into Tab / Move to New Tab ask the tab bar too (vscode-tabs' move.js MOVE_REQUEST).
+const MOVE = "vscode-tabs.move";
 
 // Herdr starts with PATH=/usr/bin:/bin; Homebrew/user tools (code, trash) live elsewhere.
 const sh = (script, ...args) => exec("sh", ["-c", 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; ' + script, "explorer", ...args]);
@@ -175,8 +177,9 @@ export class TabMenu extends ExplorerMenu {
   rows() {
     const t = this.target;
     // Reopen offers the other editor: the same one would find this tab open (openFile's showOpen) and only select it.
-    return this.withList ? openWith(!!t.on).slice(0, 2).filter(r => r[1] !== (t.argv ? "editor" : "viewer"))
-      : tabMenuItems({ remote: !!t.on, os: os() });
+    if (this.withList) return openWith(!!t.on).slice(0, 2).filter(r => r[1] !== (t.argv ? "editor" : "viewer"));
+    const space = spaces().find(s => s.tabs.some(x => x.id === t.tab));
+    return tabMenuItems({ remote: !!t.on, os: os(), lone: (space?.tabs.length ?? 0) < 2, alone: panes().filter(p => p.tab === t.tab).length < 2, viewer: !t.argv });
   }
 
   choose(action, cx) {
@@ -205,6 +208,15 @@ export class TabMenu extends ExplorerMenu {
         run("layout.show", { id: "panel" });
         return setShared(REVEAL, { file: t.file, on: t.on, at: Date.now() });
       case "split": return run("pane.split", splitArgs(t));
+      // vscode-tabs' move.js moves the editor's terminal; vscode-menu lists the tabs it can join (its "move" menu).
+      case "moveInto": case "moveOut": {
+        const terminal = panes().find(p => p.pane === t.pane)?.terminal, space = spaces().find(s => s.tabs.some(x => x.id === t.tab));
+        if (!terminal || !space) return;
+        if (action === "moveOut") return setShared(MOVE, { terminal, into: null, place: "tab", name: baseName(t.file), at: Date.now() });
+        // vscode-menu's rows: 31px, two per other tab, a separator (9px) and 10px padding; it scrolls past 420px.
+        return openOverlay({ mod: "vscode-menu", kind: "popup", width: 260, height: Math.min(420, 19 + 62 * (space.tabs.length - 1)),
+          props: { tab: "move", target: { terminal, from: t.tab, space: space.id } } });
+      }
     }
   }
 }
