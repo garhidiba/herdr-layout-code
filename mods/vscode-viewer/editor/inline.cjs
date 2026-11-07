@@ -7,10 +7,10 @@ const os = require("os");
 const path = require("path");
 const { spawnSync } = require("child_process");
 
-const PROVIDERS = ["ollama", "codestral", "deepseek", "mercury", "off"];
-const LABELS = { ollama: "Ollama", codestral: "Codestral", deepseek: "DeepSeek", mercury: "Mercury", off: "Inline Suggestions" };
-const MODELS = { ollama: "qwen2.5-coder:1.5b-base", codestral: "codestral-latest", deepseek: "deepseek-flash", mercury: "mercury-edit-2" };
-const ENDPOINTS = { ollama: "http://127.0.0.1:11434", codestral: "https://api.mistral.ai/v1/fim/completions",
+const PROVIDERS = ["ollama", "lmstudio", "codestral", "deepseek", "mercury", "off"];
+const LABELS = { ollama: "Ollama", lmstudio: "LM Studio", codestral: "Codestral", deepseek: "DeepSeek", mercury: "Mercury", off: "Inline Suggestions" };
+const MODELS = { ollama: "qwen2.5-coder:1.5b-base", lmstudio: "qwen2.5-coder-1.5b", codestral: "codestral-latest", deepseek: "deepseek-flash", mercury: "mercury-edit-2" };
+const ENDPOINTS = { ollama: "http://127.0.0.1:11434", lmstudio: "http://127.0.0.1:1234", codestral: "https://api.mistral.ai/v1/fim/completions",
   deepseek: "https://api.deepseek.com/beta/completions", mercury: "https://api.inceptionlabs.ai/v1/fim/completions" };
 // Hosted FIM APIs, one adapter (POST {model, prompt, suffix, max_tokens, stop, stream} with a Bearer key): the key's
 // environment variable and the price in USD per million input / output tokens (editor.inlineSuggest.price overrides).
@@ -27,9 +27,10 @@ const EXCLUDE = [".env", ".env.*", "*.env", ".envrc", "*.pem", "*.key", "*.p12",
 const P = "editor.inlineSuggest.";
 const DEFAULTS = {
   [P + "enabled"]: null,           // null: on when the provider can run here (Ollama installed, …)
-  [P + "provider"]: "ollama",      // "ollama" | "codestral" | "deepseek" | "mercury" | "off"
+  [P + "provider"]: "ollama",      // "ollama" | "lmstudio" | "codestral" | "deepseek" | "mercury" | "off"
   [P + "model"]: "",               // "": the provider's default (Ollama: qwen2.5-coder:1.5b-base)
   [P + "endpoint"]: "",            // "": the provider's default (ENDPOINTS: Ollama's server, the hosted APIs' FIM URL)
+  // editor.inlineSuggest.<provider>.model / .endpoint: that provider's own, over the two above (the Settings dialog's)
   [P + "trigger"]: "auto",         // "auto" (after typing pauses) | "manual" (Trigger Inline Suggestion only)
   [P + "multiline"]: true,         // true: a block (cut where it ends: blockCut); false: one line ("\n" stops the reply)
   [P + "debounce"]: 250,           // ms typing must pause before a request
@@ -51,6 +52,7 @@ function normalize(raw = {}) {
   if (typeof get("enabled") === "boolean") v[P + "enabled"] = get("enabled");
   if (PROVIDERS.includes(get("provider"))) v[P + "provider"] = get("provider");
   for (const k of ["model", "endpoint", "keepAlive"]) if (typeof get(k) === "string") v[P + k] = get(k).trim();
+  for (const k of ["model", "endpoint"]) { const own = get(`${v[P + "provider"]}.${k}`); if (typeof own === "string" && own.trim()) v[P + k] = own.trim(); }
   if (["auto", "manual"].includes(get("trigger"))) v[P + "trigger"] = get("trigger");
   if (typeof get("multiline") === "boolean") v[P + "multiline"] = get("multiline");
   for (const [k, [lo, hi]] of Object.entries(NUMBERS)) {
@@ -67,8 +69,10 @@ function normalize(raw = {}) {
 function config(values, usable = () => true) {
   const v = (k) => values[P + k];
   const provider = v("provider");
+  // LM Studio's address as its Developer tab shows it ends in /v1: the requests add their own
+  const endpoint = (v("endpoint") || ENDPOINTS[provider] || "").replace(/\/+$/, "");
   const cfg = {
-    provider, label: LABELS[provider], model: v("model") || MODELS[provider] || "", endpoint: (v("endpoint") || ENDPOINTS[provider] || "").replace(/\/+$/, ""),
+    provider, label: LABELS[provider], model: v("model") || MODELS[provider] || "", endpoint: provider === "lmstudio" ? endpoint.replace(/\/v1$/, "") : endpoint,
     customEndpoint: !!v("endpoint"), trigger: v("trigger"), multiline: v("multiline"), debounce: v("debounce"), maxTokens: v("maxTokens"),
     prefixChars: v("prefixChars"), suffixChars: v("suffixChars"), stopAfter: v("stopAfter"), keepAlive: v("keepAlive") || "30m",
     exclude: [...EXCLUDE, ...v("exclude")],
@@ -276,11 +280,18 @@ function request(cfg, ctx, stream = false, key = "") {
       body: { model: cfg.model, prompt: ctx.prefix, suffix: ctx.suffix, max_tokens: cfg.maxTokens, stream, ...(stop.length ? { stop } : {}),
         ...(cfg.provider === "codestral" && ctx.file ? { prompt_cache_key: cacheKey(ctx.file) } : {}) } };
   }
+  const t = template(cfg.model), stop = [...(t?.stop ?? []), ...(cfg.multiline || ctx.nextLine ? [] : ["\n"])];
   if (cfg.provider === "ollama") {
-    const t = template(cfg.model), stop = [...(t?.stop ?? []), ...(cfg.multiline || ctx.nextLine ? [] : ["\n"])];
     const prompt = t ? { prompt: fimPrompt(t, ctx.prefix, ctx.suffix), raw: true } : { prompt: ctx.prefix, suffix: ctx.suffix };
     return { url: `${cfg.endpoint}/api/generate`, headers: JSON_HEADERS,
       body: { model: cfg.model, ...prompt, stream, keep_alive: cfg.keepAlive, options: { num_predict: cfg.maxTokens, temperature: 0.2, ...(stop.length ? { stop } : {}) } } };
+  }
+  // LM Studio's OpenAI-compatible /v1/completions applies no prompt template, so the FIM prompt goes as is; its docs
+  // name no `suffix`, sent only for a model without a known template.
+  if (cfg.provider === "lmstudio") {
+    const prompt = t ? { prompt: fimPrompt(t, ctx.prefix, ctx.suffix) } : { prompt: ctx.prefix, suffix: ctx.suffix };
+    return { url: `${cfg.endpoint}/v1/completions`, headers: JSON_HEADERS,
+      body: { model: cfg.model, ...prompt, max_tokens: cfg.maxTokens, temperature: 0.2, stream, ...(stop.length ? { stop } : {}) } };
   }
   throw new Error(`Unknown inline suggestion provider: ${cfg.provider}`);
 }
@@ -300,7 +311,9 @@ function modelInfo(status, json) {
 }
 // Whether to recommend a base model: the template says chat, or (Ollama said nothing) the name has no "base".
 const chatModel = (cfg, info) => info === undefined ? false : info ? info.chat : !/base/i.test(cfg.model);
-const missingText = (cfg) => `${cfg.label}: model ${cfg.model} not found (run: ollama pull ${cfg.model})`;
+// How to get a missing model, per local provider.
+const GET_MODEL = { ollama: (m) => `run: ollama pull ${m}`, lmstudio: (m) => `download and load it in LM Studio, or run: lms get ${m}` };
+const missingText = (cfg) => `${cfg.label}: model ${cfg.model} not found (${(GET_MODEL[cfg.provider] ?? GET_MODEL.ollama)(cfg.model)})`;
 const chatHint = (cfg) => `${cfg.model} is a chat model and often answers in prose; a base model completes code (ollama pull ${MODELS.ollama}, then set editor.inlineSuggest.model)`;
 // The text of one reply or streamed event: Ollama's `response`, a completion's `choices[0].text`, a chat-shaped one's
 // `delta.content` / `message.content` (Mistral's FIM).
@@ -312,17 +325,20 @@ const errorText = (j) => { const e = j?.error?.message ?? j?.error ?? (j?.object
 function reply(cfg, status, json) {
   const err = errorText(json);
   if (status >= 400 || err) {
-    if (cfg.provider === "ollama" && /not found/i.test(err ?? "")) throw new Error(missingText(cfg));
+    if (GET_MODEL[cfg.provider] && /not found|invalid model/i.test(err ?? "")) throw new Error(missingText(cfg));
     if (cfg.hosted && (status === 401 || status === 403)) throw new Error(`${cfg.label}: the API key was refused (HTTP ${status}); ${keyHelp(cfg.provider)}`);
     throw new Error(`${cfg.label}: ${err ? err.slice(0, 160) : `HTTP ${status}`}`);
   }
   return [replyText(json) ?? ""];
 }
+// Nothing answers at the provider's address.
+const START = { ollama: "start it: ollama serve", lmstudio: "start its server: the Developer tab, or lms server start" };
+const notRunning = (cfg) => START[cfg.provider] ? `${cfg.label} is not running at ${cfg.endpoint} (${START[cfg.provider]})` : `${cfg.label}: nothing answers at ${cfg.endpoint}`;
 // A failed connection -> the status bar's words.
 function failure(cfg, e) {
   if (e?.name === "AbortError") return null;
   const code = e?.cause?.code ?? e?.code;
-  if (code === "ECONNREFUSED") return cfg.provider === "ollama" ? `Ollama is not running at ${cfg.endpoint} (start it: ollama serve)` : `${cfg.label}: nothing answers at ${cfg.endpoint}`;
+  if (["ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH"].includes(code)) return notRunning(cfg);
   return e?.message?.startsWith(cfg.label) || e?.message?.startsWith("Ollama") ? e.message : `${cfg.label}: ${e?.message ?? e}`;
 }
 
@@ -448,17 +464,44 @@ module.exports = { PROVIDERS, MODELS, DEFAULTS, EXCLUDE, MAX_FILE_CHARS, normali
 // ---------- the Settings dialog's helper: node inline.cjs <command> <provider> … (a key is never an argument) ----------
 // --key P: {from, masked} | {from: null, help}; --save-key P <file>: stores the key the file holds, deletes the file;
 // --remove-key P; --test P [model] [endpoint]: one short FIM request, {ok, ms} | {ok: false, error};
-// --models P [endpoint]: {models, recommended} (Ollama's pulled models from /api/tags, base ones recommended).
+// --models P [endpoint]: {models, recommended, pulled} (a local server's models, the FIM ones recommended; pulled: null
+// when the server didn't answer).
 const CATALOG = { codestral: ["codestral-latest", "codestral-2508"], deepseek: ["deepseek-flash"], mercury: ["mercury-edit-2"] };
+// Local servers: where they list their models, the names in that reply, the models recommended without asking, and
+// which listed ones to recommend (a FIM template, and not a chat / instruct model).
+const LOCAL = {
+  ollama: { list: "/api/tags", names: (j) => j?.models?.map(m => m.name), recommended: [MODELS.ollama], fim: (m) => /base/i.test(m) },
+  lmstudio: { list: "/v1/models", names: (j) => j?.data?.map(m => m.id).filter(m => !/embed/i.test(m)),
+    recommended: [MODELS.lmstudio, "qwen2.5-coder-7b", "deepseek-coder-6.7b-base", "starcoder2-3b"], fim: (m) => !/instruct|chat/i.test(m) },
+};
+const FIM_HELP = "pick a Qwen2.5-Coder, DeepSeek Coder, StarCoder or Codestral base model";
+// One short completion: {ok, ms} | {ok: false, error: nothing answers / model not found / FIM not supported / …}.
+async function testRequest(cfg, key = "") {
+  const unsupported = (why) => ({ ok: false, error: `${cfg.label}: FIM not supported: ${why} (${FIM_HELP})` });
+  const ctx = { prefix: "def add(a, b):\n    return", suffix: "\n", file: "test.py" }, t0 = Date.now();
+  try {
+    const { status, json } = await post(request(cfg, ctx, false, key));
+    if (clean(reply(cfg, status, json)[0], { ...ctx, multiline: false }).anomaly === "fim") return unsupported("the reply had template tokens");
+    // LM Studio answers a model without a FIM template too, from the text before the cursor alone
+    if (cfg.provider === "lmstudio" && !template(cfg.model)) return unsupported(`${cfg.model} has no fill-in-the-middle template here`);
+    return { ok: true, ms: Date.now() - t0 };
+  } catch (e) {
+    const error = failure(cfg, e);
+    return /does not support insert/i.test(error) ? unsupported(`${cfg.model} does not support insert`) : { ok: false, error };
+  }
+}
 async function cli([cmd, provider, ...args]) {
   if (!PROVIDERS.includes(provider) || provider === "off") throw new Error(`unknown provider: ${provider}`);
   const cfg = config(normalize({ [P + "provider"]: provider, [P + "model"]: args[0] ?? "", [P + "endpoint"]: (cmd === "--models" ? args[0] : args[1]) ?? "", [P + "multiline"]: false, [P + "maxTokens"]: 16 }));
   if (cmd === "--models") {
-    if (provider !== "ollama") return { models: CATALOG[provider], recommended: [MODELS[provider]] };
-    const { json } = await post({ url: `${cfg.endpoint}/api/tags`, method: "GET", headers: {} }).catch(() => ({ json: null }));
-    const pulled = (json?.models ?? []).map(m => m.name).filter(Boolean);
-    return { models: [...new Set([MODELS.ollama, ...pulled])], recommended: [...new Set([MODELS.ollama, ...pulled.filter(m => /base/i.test(m) && template(m))])], pulled };
+    const local = LOCAL[provider];
+    if (!local) return { models: CATALOG[provider], recommended: [MODELS[provider]] };
+    const { json } = await post({ url: `${cfg.endpoint}${local.list}`, method: "GET", headers: {} }).catch(() => ({ json: null }));
+    const listed = local.names(json), pulled = Array.isArray(listed) ? listed.filter(m => typeof m === "string" && m) : null; // null: the server is off
+    const recommended = [...new Set([...local.recommended, ...(pulled ?? []).filter(m => local.fim(m) && template(m))])];
+    return { models: [...new Set([...recommended, ...(pulled ?? [])])], recommended, pulled };
   }
+  if (cmd === "--test" && LOCAL[provider]) return testRequest(cfg);
   if (!cfg.hosted) throw new Error(`${cfg.label} needs no API key`);
   if (cmd === "--key") { const k = apiKey(provider); return k.key ? { from: k.from, masked: maskKey(k.key) } : { from: null, help: keyHelp(provider), loose: k.loose }; }
   if (cmd === "--save-key") {
@@ -470,13 +513,7 @@ async function cli([cmd, provider, ...args]) {
   if (cmd === "--remove-key") { removeKey(provider); return { removed: true }; }
   if (cmd === "--test") {
     const k = apiKey(provider);
-    if (!k.key) return { ok: false, error: keyHelp(provider) };
-    const t0 = Date.now();
-    try {
-      const { status, json } = await post(request(cfg, { prefix: "def add(a, b):\n    return", suffix: "\n", file: "test.py" }, false, k.key));
-      reply(cfg, status, json);
-      return { ok: true, ms: Date.now() - t0 };
-    } catch (e) { return { ok: false, error: failure(cfg, e) }; }
+    return k.key ? testRequest(cfg, k.key) : { ok: false, error: keyHelp(provider) };
   }
   throw new Error(`unknown command: ${cmd}`);
 }

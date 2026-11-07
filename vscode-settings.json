@@ -25,20 +25,25 @@
   "editor.hover.enabled": true,
   // Inline suggestions (gray ghost text at the cursor, Tab accepts, Esc hides, ⌘→ / Ctrl+→ takes a word, Accept Next Line
   // a line; Alt+\ asks now).
-  // Absent "enabled": on when the provider can run here (Ollama installed). The status bar item turns them on/off; the
+  // Absent "enabled": on when the provider can run here (Ollama installed, LM Studio chosen). The status bar item turns them on/off; the
   // pointer on it shows today's requests, approximate tokens (characters ÷ 4) and latency (p50/p95).
   // "editor.inlineSuggest.enabled": true,
-  // "ollama" (local: brew install ollama; ollama pull qwen2.5-coder:1.5b-base) | "codestral" (Mistral) | "deepseek" |
+  // "ollama" (local: brew install ollama; ollama pull qwen2.5-coder:1.5b-base) | "lmstudio" (local: LM Studio's server,
+  // a base / coder model with a FIM template, e.g. qwen2.5-coder-1.5b) | "codestral" (Mistral) | "deepseek" |
   // "mercury" (Inception) | "off". The paid ones read their API key from the macOS keychain (Settings › Inline
   // Suggestions, or: security add-generic-password -U -s herdr-vscode-<provider> -a herdr -w <key>), else
   // <herdr home>/vscode-secrets.json ({"<provider>": "<key>"}, chmod 600), else MISTRAL_API_KEY / DEEPSEEK_API_KEY /
   // INCEPTION_API_KEY. Never put a key in this file.
   "editor.inlineSuggest.provider": "ollama",
-  // "" = the provider's default (Ollama: "qwen2.5-coder:1.5b-base" at "http://127.0.0.1:11434"; Codestral:
+  // "" = the provider's default (Ollama: "qwen2.5-coder:1.5b-base" at "http://127.0.0.1:11434"; LM Studio:
+  // "qwen2.5-coder-1.5b" at "http://127.0.0.1:1234"; Codestral:
   // "codestral-latest"; DeepSeek: "deepseek-flash"; Mercury: "mercury-edit-2" at their FIM URLs). For Ollama use a base (FIM) model:
   // a chat / instruct one answers in prose (the status bar says "chat model"); qwen2.5-coder:7b-base is better and slower.
   "editor.inlineSuggest.model": "",
   "editor.inlineSuggest.endpoint": "",
+  // Each provider's own model and server address win over the two above (Settings writes these), e.g. an Ollama on
+  // another machine: "editor.inlineSuggest.ollama.endpoint": "http://192.168.0.10:11434",
+  // "editor.inlineSuggest.lmstudio.model": "qwen2.5-coder-7b".
   // "auto" (after typing pauses debounce ms) | "manual" (Trigger Inline Suggestion, Alt+\ / ⌥\, only).
   "editor.inlineSuggest.trigger": "auto",
   "editor.inlineSuggest.debounce": 250,

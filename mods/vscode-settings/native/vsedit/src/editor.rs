@@ -3294,6 +3294,64 @@ pub(crate) mod tests {
         assert!(ed.inline_usage().contains("today 0 requests (limit 2000)"));
     }
 
+    /// A fake LM Studio on 127.0.0.1: /v1/completions answers `reply` as SSE `choices[].text`; each request's first
+    /// line and JSON body.
+    fn fake_lmstudio(reply: &'static str) -> (String, std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>>) {
+        use std::io::{Read, Write};
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://127.0.0.1:{}", server.local_addr().unwrap().port());
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+        let got = seen.clone();
+        std::thread::spawn(move || {
+            for mut s in server.incoming().flatten() {
+                let mut req = String::new();
+                let mut buf = vec![0; 65536];
+                while !req.contains("\r\n\r\n") || !req.trim_end().ends_with('}') {
+                    match s.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(k) => req += &String::from_utf8_lossy(&buf[..k]),
+                    }
+                }
+                let line = req.lines().next().unwrap_or("").to_string();
+                let body = req.split_once("\r\n\r\n").and_then(|(_, b)| serde_json::from_str(b).ok()).unwrap_or(Value::Null);
+                got.lock().unwrap().push((line, body));
+                let mut out = String::new();
+                for piece in reply.split_inclusive('\n') {
+                    out += &format!("data: {}\n\n", json!({ "choices": [{ "text": piece }] }));
+                }
+                out += "data: [DONE]\n\n";
+                let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{out}", out.len());
+            }
+        });
+        (url, seen)
+    }
+
+    #[test]
+    fn lm_studio_inline_suggestions_use_its_own_address_and_model_not_ollamas() {
+        let _one = inline_lock();
+        let (url, seen) = fake_lmstudio(" a + b;");
+        let mut ed = inline_editor(
+            &["function add(a, b) {", "  "],
+            json!({
+                "editor.inlineSuggest.provider": "lmstudio",
+                "editor.inlineSuggest.lmstudio.endpoint": format!("{url}/v1"),
+                "editor.inlineSuggest.lmstudio.model": "qwen2.5-coder-7b",
+                "editor.inlineSuggest.ollama.endpoint": "http://127.0.0.1:9",
+                "editor.inlineSuggest.ollama.model": "starcoder2:3b",
+            }),
+        );
+        assert_eq!(ed.inline_status().as_deref(), Some("LM Studio"), "on without an Ollama install");
+        type_in(&mut ed, "return");
+        ask(&mut ed);
+        assert_eq!(ed.ghost_view().map(|g| g.2), Some(vec![" a + b;".to_string()]));
+        let seen = seen.lock().unwrap();
+        let (line, body) = &seen[0];
+        assert_eq!(line, "POST /v1/completions HTTP/1.1");
+        assert_eq!(body["model"], "qwen2.5-coder-7b");
+        assert_eq!(body["prompt"], "<|fim_prefix|>function add(a, b) {\n  return<|fim_suffix|><|fim_middle|>");
+        assert!(body.get("suffix").is_none() && body.get("raw").is_none() && body["stream"] == true);
+    }
+
     #[test]
     fn columns_count_characters_and_tab_stops() {
         assert_eq!(visible_column("\t한x", 4, 4), 5);

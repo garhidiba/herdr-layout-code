@@ -592,3 +592,99 @@ test("the Settings dialog's helper: a masked key, saving from a file it deletes,
   assert.deepEqual(out("--models", "mercury").recommended, ["mercury-edit-2"]);
   assert.match(cli("--key", "ollama").stdout, /needs no API key/);
 });
+
+// ---------- local servers: their own address and model, LM Studio ----------
+test("each provider keeps its own server address and model; the shared keys apply only where a provider has none", () => {
+  const raw = { "editor.inlineSuggest.ollama.endpoint": "http://192.168.1.20:11434/", "editor.inlineSuggest.ollama.model": "starcoder2:3b",
+    "editor.inlineSuggest.lmstudio.endpoint": "http://127.0.0.1:4321/v1", "editor.inlineSuggest.lmstudio.model": "qwen2.5-coder-7b" };
+  const of = (provider, extra = {}) => I.config(I.normalize({ ...raw, "editor.inlineSuggest.provider": provider, ...extra }));
+  assert.deepEqual([of("ollama").endpoint, of("ollama").model], ["http://192.168.1.20:11434", "starcoder2:3b"]);
+  assert.deepEqual([of("lmstudio").endpoint, of("lmstudio").model], ["http://127.0.0.1:4321", "qwen2.5-coder-7b"], "LM Studio's /v1 is the requests' own");
+  assert.deepEqual([of("lmstudio", { "editor.inlineSuggest.lmstudio.model": " " }).model, of("lmstudio").label], ["qwen2.5-coder-1.5b", "LM Studio"]);
+  const codestral = of("codestral");
+  assert.deepEqual([codestral.endpoint, codestral.model], ["https://api.mistral.ai/v1/fim/completions", "codestral-latest"], "nothing crosses to another provider");
+  assert.equal(of("codestral", { "editor.inlineSuggest.endpoint": "http://127.0.0.1:9/fim" }).endpoint, "http://127.0.0.1:9/fim");
+  assert.equal(of("ollama", { "editor.inlineSuggest.model": "shared" }).model, "starcoder2:3b", "the provider's own model wins");
+  assert.deepEqual([I.config(I.normalize({ "editor.inlineSuggest.provider": "lmstudio" })).endpoint, of("ollama").customEndpoint], ["http://127.0.0.1:1234", true]);
+});
+
+test("LM Studio's request: /v1/completions with the raw FIM prompt and its stops; a model without a template sends `suffix`", () => {
+  const ctx = { prefix: "a = ", suffix: "\nb", nextLine: false };
+  const cfg = I.config(I.normalize({ "editor.inlineSuggest.provider": "lmstudio", "editor.inlineSuggest.multiline": false }));
+  const r = I.request(cfg, ctx, true);
+  assert.equal(r.url, "http://127.0.0.1:1234/v1/completions");
+  assert.deepEqual(r.headers, { "Content-Type": "application/json" });
+  assert.equal(r.body.prompt, "<|fim_prefix|>a = <|fim_suffix|>\nb<|fim_middle|>");
+  assert.deepEqual([r.body.model, r.body.max_tokens, r.body.stream, "suffix" in r.body, r.body.stop.at(-1)], ["qwen2.5-coder-1.5b", 256, true, false, "\n"]);
+  const plain = I.request({ ...cfg, model: "llama-3.2-1b" }, ctx);
+  assert.deepEqual([plain.body.prompt, plain.body.suffix, plain.body.stop], ["a = ", "\nb", ["\n"]]);
+  assert.equal(I.failure(cfg, { cause: { code: "ECONNREFUSED" } }), "LM Studio is not running at http://127.0.0.1:1234 (start its server: the Developer tab, or lms server start)");
+  assert.throws(() => I.reply(cfg, 404, { error: { message: "Model 'x' not found" } }), /LM Studio: model qwen2.5-coder-1.5b not found \(download and load it in LM Studio, or run: lms get qwen2.5-coder-1.5b\)/);
+});
+
+// A fake LM Studio: GET /v1/models lists `models`; POST /v1/completions answers SSE `choices[].text` (or `error`).
+async function lmStub(models, answer) {
+  const s = { bodies: [], urls: [] };
+  s.server = http.createServer((req, res) => {
+    let data = "";
+    req.on("data", d => { data += d; });
+    req.on("end", () => {
+      s.urls.push(`${req.method} ${req.url}`);
+      if (req.url === "/v1/models") return res.end(JSON.stringify({ object: "list", data: models.map(id => ({ id, object: "model" })) }));
+      if (req.url !== "/v1/completions") { res.statusCode = 404; return res.end("{}"); }
+      const body = JSON.parse(data), a = answer(body);
+      s.bodies.push(body);
+      if (a.error) { res.statusCode = a.status ?? 400; return res.end(JSON.stringify({ error: { message: a.error } })); }
+      if (!body.stream) return res.end(JSON.stringify({ choices: [{ text: a.text }] }));
+      res.setHeader("Content-Type", "text/event-stream");
+      for (const piece of a.text.match(/[^\n]*\n?/g).filter(Boolean)) res.write(`data: ${JSON.stringify({ choices: [{ text: piece }] })}\n\n`);
+      res.end("data: [DONE]\n\n");
+    });
+  });
+  await new Promise(r => s.server.listen(0, "127.0.0.1", r));
+  s.endpoint = `http://127.0.0.1:${s.server.address().port}`;
+  return s;
+}
+
+test("the editor with LM Studio: its own address and model reach the request, Ollama's don't", async () => {
+  const s = await lmStub([], () => ({ text: " a + b;" }));
+  const ed = await editorWith("", ["function add(a, b) {", "  "], { "editor.inlineSuggest.provider": "lmstudio",
+    "editor.inlineSuggest.lmstudio.endpoint": `${s.endpoint}/v1`, "editor.inlineSuggest.lmstudio.model": "qwen2.5-coder-7b",
+    "editor.inlineSuggest.ollama.endpoint": "http://127.0.0.1:9", "editor.inlineSuggest.ollama.model": "starcoder2:3b" });
+  type(ed, "return");
+  assert.ok(await waitFor(() => ghost(ed) === " a + b;"), "no suggestion");
+  assert.deepEqual(s.urls, ["POST /v1/completions"]);
+  assert.equal(s.bodies[0].model, "qwen2.5-coder-7b");
+  assert.equal(prefixOf(s.bodies[0]), "function add(a, b) {\n  return");
+  assert.equal(ed.inlineStatus().text, "LM Studio");
+  s.server.close();
+});
+
+test("the Settings dialog's helper for local servers: their models (none when off), and a Test that says why it failed", async () => {
+  const run = (...args) => new Promise(r => require("child_process").execFile(process.execPath, [path.join(__dirname, "..", "inline.cjs"), ...args], { env: process.env }, (_e, o) => r(JSON.parse(o))));
+  const s = await lmStub(["qwen2.5-coder-14b", "qwen2.5-coder-7b-instruct", "text-embedding-nomic-embed-text-v1.5", "llama-3.2-1b"],
+    (b) => b.model === "missing" ? { status: 404, error: "Model 'missing' not found" } : b.model === "deepseek-coder-1.3b-base" ? { text: "<｜fim▁hole｜>x" } : { text: " a + b" });
+  const closed = http.createServer();
+  await new Promise(r => closed.listen(0, "127.0.0.1", r));
+  const dead = `http://127.0.0.1:${closed.address().port}`; // nothing answers there
+  closed.close();
+  const listed = await run("--models", "lmstudio", s.endpoint);
+  assert.deepEqual(listed.pulled, ["qwen2.5-coder-14b", "qwen2.5-coder-7b-instruct", "llama-3.2-1b"], "embedding models aren't listed");
+  assert.deepEqual(listed.recommended, ["qwen2.5-coder-1.5b", "qwen2.5-coder-7b", "deepseek-coder-6.7b-base", "starcoder2-3b", "qwen2.5-coder-14b"]);
+  assert.deepEqual(listed.models.slice(-2), ["qwen2.5-coder-7b-instruct", "llama-3.2-1b"]);
+  const off = await run("--models", "lmstudio", dead);
+  assert.deepEqual([off.pulled, off.models], [null, off.recommended], "a server that is off: only the recommended, none marked not pulled");
+  assert.equal((await run("--models", "ollama", dead)).pulled, null);
+  const ok = await run("--test", "lmstudio", "qwen2.5-coder-14b", s.endpoint);
+  assert.equal(ok.ok, true);
+  assert.deepEqual([s.bodies[0].model, s.bodies[0].max_tokens, s.bodies[0].stream], ["qwen2.5-coder-14b", 16, false]);
+  assert.match((await run("--test", "lmstudio", "missing", s.endpoint)).error, /^LM Studio: model missing not found/);
+  assert.match((await run("--test", "lmstudio", "llama-3.2-1b", s.endpoint)).error, /^LM Studio: FIM not supported: llama-3.2-1b has no fill-in-the-middle template/);
+  assert.match((await run("--test", "lmstudio", "deepseek-coder-1.3b-base", s.endpoint)).error, /^LM Studio: FIM not supported: the reply had template tokens/);
+  assert.ok((await run("--test", "lmstudio", "", dead)).error.startsWith(`LM Studio is not running at ${dead} (`));
+  assert.ok((await run("--test", "ollama", "", dead)).error.startsWith(`Ollama is not running at ${dead} (`));
+  s.server.close();
+  const o = await stub(() => ({ status: 400, error: "starcoder2:3b does not support insert" }));
+  assert.match((await run("--test", "ollama", "starcoder2:3b", o.endpoint)).error, /^Ollama: FIM not supported: starcoder2:3b does not support insert/);
+  o.server.close();
+});

@@ -45,10 +45,11 @@ pub struct InlineState {
     cfg: Option<(inline::InlineSettings, Config)>,
 }
 
-/// Whether a provider can run here (the default of editor.inlineSuggest.enabled): Ollama installed, or an endpoint set.
+/// Whether a provider can run here (the default of editor.inlineSuggest.enabled): Ollama installed, LM Studio (chosen
+/// only by hand), or an endpoint set.
 fn usable(cfg: &Config) -> bool {
     static OLLAMA: OnceLock<bool> = OnceLock::new();
-    cfg.custom_endpoint || (cfg.provider == "ollama" && *OLLAMA.get_or_init(|| term::which("ollama").is_some()))
+    cfg.custom_endpoint || cfg.provider == "lmstudio" || (cfg.provider == "ollama" && *OLLAMA.get_or_init(|| term::which("ollama").is_some()))
 }
 
 impl Editor {
@@ -375,7 +376,7 @@ impl Editor {
         }
         let paused = self.health(&cfg).paused.is_some();
         let info = self.inline.models.get(&cfg.key).copied();
-        let pull = format!(": ollama pull {}", cfg.model);
+        let pull = if cfg.provider == "ollama" { format!(": ollama pull {}", cfg.model) } else { ": model not found".into() };
         let no_key = cfg.enabled && cfg.hosted && self.inline_api_key(&cfg).is_err();
         let state = if !cfg.enabled {
             ": off"

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
-pub const PROVIDERS: &[&str] = &["ollama", "codestral", "deepseek", "mercury", "off"];
+pub const PROVIDERS: &[&str] = &["ollama", "lmstudio", "codestral", "deepseek", "mercury", "off"];
 /// Hosted FIM APIs, one adapter (POST {model, prompt, suffix, max_tokens, stop, stream} with a Bearer key): label, model,
 /// URL, the key's environment variable, USD per million input / output tokens (editor.inlineSuggest.price overrides).
 pub struct Hosted {
@@ -32,6 +32,8 @@ fn hosted(provider: &str) -> Option<&'static Hosted> {
 }
 /// Ollama's default model: a base (FIM) model; 1.5B answers in ~0.1–0.6 s here, 7B in 0.3–2.5 s (DESIGN.md).
 pub const OLLAMA_MODEL: &str = "qwen2.5-coder:1.5b-base";
+/// LM Studio's default model: the same base model under LM Studio's name.
+pub const LMSTUDIO_MODEL: &str = "qwen2.5-coder-1.5b";
 /// No suggestions in bigger files (characters).
 pub const MAX_FILE_CHARS: usize = 1_000_000;
 const TIMEOUT_S: u32 = 20;
@@ -101,8 +103,11 @@ pub fn normalize(raw: &Value) -> InlineSettings {
         v.provider = p.into();
     }
     let text = |k: &str| get(k).as_str().map(|s| s.trim().to_string());
-    v.model = text("model").unwrap_or_default();
-    v.endpoint = text("endpoint").unwrap_or_default();
+    // editor.inlineSuggest.<provider>.model / .endpoint: that provider's own, over the shared ones
+    let provider = v.provider.clone();
+    let own = |k: &str| text(&format!("{provider}.{k}")).filter(|s| !s.is_empty()).or_else(|| text(k)).unwrap_or_default();
+    v.model = own("model");
+    v.endpoint = own("endpoint");
     if let Some(k) = text("keepAlive").filter(|k| !k.is_empty()) {
         v.keep_alive = k;
     }
@@ -169,11 +174,14 @@ pub fn config(s: &InlineSettings, usable: impl Fn(&Config) -> bool) -> Config {
     let h = hosted(p);
     let (label, model, endpoint) = match (p, h) {
         ("ollama", _) => ("Ollama", OLLAMA_MODEL, "http://127.0.0.1:11434"),
+        ("lmstudio", _) => ("LM Studio", LMSTUDIO_MODEL, "http://127.0.0.1:1234"),
         (_, Some(h)) => (h.label, h.model, h.url),
         _ => ("Inline Suggestions", "", ""),
     };
     let model = if s.model.is_empty() { model.to_string() } else { s.model.clone() };
-    let endpoint = if s.endpoint.is_empty() { endpoint } else { &s.endpoint }.trim_end_matches('/').to_string();
+    let endpoint = if s.endpoint.is_empty() { endpoint } else { &s.endpoint }.trim_end_matches('/');
+    // LM Studio's address as its Developer tab shows it ends in /v1: the requests add their own
+    let endpoint = if p == "lmstudio" { endpoint.strip_suffix("/v1").unwrap_or(endpoint) } else { endpoint }.to_string();
     let mut cfg = Config {
         provider: p.into(),
         label,
@@ -653,6 +661,22 @@ pub fn request(cfg: &Config, ctx: &Context, stream: bool, key: &str) -> Request 
     if !cfg.multiline && !ctx.next_line {
         stop.push("\n");
     }
+    // LM Studio's OpenAI-compatible /v1/completions applies no prompt template, so the FIM prompt goes as is; its docs
+    // name no `suffix`, sent only for a model without a known template.
+    if cfg.provider == "lmstudio" {
+        let mut body = json!({ "model": cfg.model, "max_tokens": cfg.max_tokens, "temperature": 0.2, "stream": stream });
+        match t {
+            Some(t) => body["prompt"] = json!(fim_prompt(t, &ctx.prefix, &ctx.suffix)),
+            None => {
+                body["prompt"] = json!(ctx.prefix);
+                body["suffix"] = json!(ctx.suffix);
+            }
+        }
+        if !stop.is_empty() {
+            body["stop"] = json!(stop);
+        }
+        return Request { url: format!("{}/v1/completions", cfg.endpoint), headers: json_headers(), body };
+    }
     let mut options = json!({ "num_predict": cfg.max_tokens, "temperature": 0.2 });
     if !stop.is_empty() {
         options["stop"] = json!(stop);
@@ -711,8 +735,18 @@ pub fn chat_model(cfg: &Config, info: Option<&Option<ModelInfo>>) -> bool {
     }
 }
 
+/// Whether the provider is a local server (Ollama, LM Studio), and how to get a missing model there.
+fn get_model(provider: &str, model: &str) -> Option<String> {
+    match provider {
+        "ollama" => Some(format!("run: ollama pull {model}")),
+        "lmstudio" => Some(format!("download and load it in LM Studio, or run: lms get {model}")),
+        _ => None,
+    }
+}
+
 pub fn missing_text(cfg: &Config) -> String {
-    format!("{}: model {} not found (run: ollama pull {})", cfg.label, cfg.model, cfg.model)
+    let get = get_model(&cfg.provider, &cfg.model).unwrap_or_else(|| format!("run: ollama pull {}", cfg.model));
+    format!("{}: model {} not found ({get})", cfg.label, cfg.model)
 }
 
 pub fn chat_hint(cfg: &Config) -> String {
@@ -744,7 +778,8 @@ fn error_text(j: &Value) -> Option<String> {
 pub fn reply(cfg: &Config, status: u16, json: &Value) -> Result<Vec<String>, String> {
     let err = error_text(json);
     if status >= 400 || err.is_some() {
-        if cfg.provider == "ollama" && err.as_ref().is_some_and(|e| e.to_lowercase().contains("not found")) {
+        let lower = err.as_deref().unwrap_or("").to_lowercase();
+        if get_model(&cfg.provider, "").is_some() && (lower.contains("not found") || lower.contains("invalid model")) {
             return Err(missing_text(cfg));
         }
         if cfg.hosted && (status == 401 || status == 403) {
@@ -906,7 +941,11 @@ pub fn post_stream(req: &Request, cancel: &Cancel, mut on_text: impl FnMut(&str)
 /// A failed request -> the status bar's words.
 pub fn failure(cfg: &Config, e: &str) -> String {
     if e == "connection refused" {
-        return if cfg.provider == "ollama" { format!("Ollama is not running at {} (start it: ollama serve)", cfg.endpoint) } else { format!("{}: nothing answers at {}", cfg.label, cfg.endpoint) };
+        return match cfg.provider.as_str() {
+            "ollama" => format!("Ollama is not running at {} (start it: ollama serve)", cfg.endpoint),
+            "lmstudio" => format!("LM Studio is not running at {} (start its server: the Developer tab, or lms server start)", cfg.endpoint),
+            _ => format!("{}: nothing answers at {}", cfg.label, cfg.endpoint),
+        };
     }
     format!("{}: {e}", cfg.label)
 }
@@ -1328,5 +1367,48 @@ mod tests {
         assert_eq!(api_key("codestral"), Ok(("kc-key".into(), "keychain")));
         assert!(key_help("mercury").contains("security add-generic-password -U -s herdr-vscode-mercury -a herdr -w <key>") && key_help("mercury").contains("INCEPTION_API_KEY"));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn each_provider_keeps_its_own_server_address_and_model() {
+        let raw = json!({
+            "editor.inlineSuggest.ollama.endpoint": "http://192.168.1.20:11434/", "editor.inlineSuggest.ollama.model": "starcoder2:3b",
+            "editor.inlineSuggest.lmstudio.endpoint": "http://127.0.0.1:4321/v1", "editor.inlineSuggest.lmstudio.model": "qwen2.5-coder-7b",
+        });
+        let of = |p: &str, extra: Value| {
+            let mut r = raw.clone();
+            r["editor.inlineSuggest.provider"] = json!(p);
+            r.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            config(&normalize(&r), |_| true)
+        };
+        let ollama = of("ollama", json!({}));
+        assert_eq!((ollama.endpoint.as_str(), ollama.model.as_str(), ollama.custom_endpoint), ("http://192.168.1.20:11434", "starcoder2:3b", true));
+        let lm = of("lmstudio", json!({}));
+        assert_eq!((lm.endpoint.as_str(), lm.model.as_str(), lm.label), ("http://127.0.0.1:4321", "qwen2.5-coder-7b", "LM Studio"), "LM Studio's /v1 is the requests' own");
+        assert_eq!(of("lmstudio", json!({ "editor.inlineSuggest.lmstudio.model": " " })).model, LMSTUDIO_MODEL);
+        let codestral = of("codestral", json!({}));
+        assert_eq!((codestral.endpoint.as_str(), codestral.model.as_str()), ("https://api.mistral.ai/v1/fim/completions", "codestral-latest"), "nothing crosses to another provider");
+        assert_eq!(of("ollama", json!({ "editor.inlineSuggest.model": "shared" })).model, "starcoder2:3b", "the provider's own model wins");
+        assert_eq!(of("codestral", json!({ "editor.inlineSuggest.model": "codestral-2508" })).model, "codestral-2508", "the shared one where a provider has none");
+        assert_eq!(config(&normalize(&json!({ "editor.inlineSuggest.provider": "lmstudio" })), |_| true).endpoint, "http://127.0.0.1:1234");
+    }
+
+    #[test]
+    fn lm_studio_request_is_a_raw_fim_completion_and_its_errors_say_what_to_do() {
+        let cfg = config(&normalize(&json!({ "editor.inlineSuggest.provider": "lmstudio", "editor.inlineSuggest.multiline": false })), |_| true);
+        let r = request(&cfg, &cx("a = ", "\nb"), true, "");
+        assert_eq!(r.url, "http://127.0.0.1:1234/v1/completions");
+        assert_eq!(r.headers, vec![("Content-Type".to_string(), "application/json".to_string())]);
+        assert_eq!(r.body["prompt"], "<|fim_prefix|>a = <|fim_suffix|>\nb<|fim_middle|>");
+        assert_eq!((&r.body["model"], &r.body["max_tokens"], &r.body["stream"]), (&json!(LMSTUDIO_MODEL), &json!(256), &json!(true)));
+        assert!(r.body.get("suffix").is_none() && r.body["stop"].as_array().unwrap().last() == Some(&json!("\n")));
+        let plain = request(&Config { model: "llama-3.2-1b".into(), ..cfg.clone() }, &cx("a = ", "\nb"), false, "");
+        assert_eq!((&plain.body["prompt"], &plain.body["suffix"], &plain.body["stop"]), (&json!("a = "), &json!("\nb"), &json!(["\n"])));
+        assert_eq!(failure(&cfg, "connection refused"), "LM Studio is not running at http://127.0.0.1:1234 (start its server: the Developer tab, or lms server start)");
+        assert_eq!(
+            reply(&cfg, 404, &json!({ "error": { "message": "Model 'x' not found" } })),
+            Err("LM Studio: model qwen2.5-coder-1.5b not found (download and load it in LM Studio, or run: lms get qwen2.5-coder-1.5b)".into())
+        );
+        assert!(warmup(&cfg).is_none() && show(&cfg).is_none());
     }
 }

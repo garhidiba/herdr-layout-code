@@ -1625,7 +1625,7 @@ class Editor {
     const h = this.inlineHealth(cfg), paused = h.paused, limited = cfg.enabled && cfg.limit && I.usageOf(cfg.key).requests >= cfg.limit;
     const info = this.inline.models.get(cfg.key), missing = info?.missing, chat = I.chatModel(cfg, info);
     const noKey = cfg.enabled && cfg.hosted && !this.inlineKeyOf(cfg);
-    const state = !cfg.enabled ? ": off" : missing ? `: ollama pull ${cfg.model}` : noKey ? ": no API key" : paused ? ": paused" : limited ? ": limit" :
+    const state = !cfg.enabled ? ": off" : missing ? (cfg.provider === "ollama" ? `: ollama pull ${cfg.model}` : ": model not found") : noKey ? ": no API key" : paused ? ": paused" : limited ? ": limit" :
       this.inline.busy ? " …" : this.inline.error ? ": error" : chat ? ": chat model" : "";
     const notes = [paused ? `${cfg.label} paused: ${paused}` : h.note, missing && I.missingText(cfg), chat && I.chatHint(cfg),
       noKey && I.keyHelp(cfg.provider) + (this.inline.keys.get(cfg.provider)?.loose ? ` (vscode-secrets.json is readable by others: chmod 600 it)` : "")].filter(Boolean);

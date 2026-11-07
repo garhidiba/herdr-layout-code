@@ -495,8 +495,11 @@ palette, Go to Definition and Go to Symbol through the fallback, Expand / Shrink
   `prefixChars`, so the prompt's start doesn't move while typing; `suffixChars` after it), typing through a suggestion,
   Accept Next Word / Line, reply cleaning (FIM tokens, Markdown fences, prose, repeated prefix / suffix, the end of a
   block (`blockCut` / `block_cut`), one-line mode with the next-line case), the trigger rule (`quietEnd`), the pause rule
-  (`Health`), the FIM templates per model family, the Ollama request (raw FIM, streamed) and reply, the model probe
-  (`/api/show`), and the usage file. Unit tests on both sides check the same cases.
+  (`Health`), the FIM templates per model family, the Ollama request (raw FIM, streamed) and reply, LM Studio's request
+  (`/v1/completions`, which applies no prompt template, so the same raw FIM prompt; `suffix` only for a model without a
+  template: LM Studio's docs name none), each provider's own model and address
+  (`editor.inlineSuggest.<provider>.model` / `.endpoint`, over the shared keys), the model probe (`/api/show`, Ollama
+  only), and the usage file. Unit tests on both sides check the same cases.
 - **Streaming:** JS reads the NDJSON body chunk by chunk; Rust reads curl's unbuffered stdout line by line on the request
   thread and sends each grown suggestion as a job (`ls.jobs`). Both stop reading (abort / kill curl) when the block ends
   or the text turns into prose.
