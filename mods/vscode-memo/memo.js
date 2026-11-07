@@ -5,7 +5,8 @@
 // Each space's memo, under its folder.
 export const MEMO = ".herdr/memo.md";
 
-// The panel's default and smallest size.
+// The button's size; the panel's default and smallest size.
+export const BUTTON = 40;
 export const PANEL = { width: 440, height: 340 };
 export const MIN = { width: 260, height: 160 };
 
@@ -46,7 +47,19 @@ export function dragRect(r, edge, dx, dy, min = { width: 0, height: 0 }) {
   return { x, y, width, height };
 }
 
-const inside = (r, p) => !!r && p.x >= r.x && p.x < r.x + r.width && p.y >= r.y && p.y < r.y + r.height;
+// The button's spot is kept as its distance from the window's right and bottom edges, so it stays in its corner as
+// the window resizes. First: 16 px in from the right, 16 px above the status bar (layouts/vscode.json: 28 px).
+export const DEFAULT_POS = { right: 16, bottom: 28 + 16 };
+// The button's rect in window `win` for its spot `pos` ({ right, bottom }; an older { x, y } as is), inside the window.
+export function buttonRect(pos, win) {
+  const p = pos?.right != null || pos?.x != null ? pos : DEFAULT_POS;
+  const x = p.right != null ? win.width - p.right - BUTTON : p.x, y = p.bottom != null ? win.height - p.bottom - BUTTON : p.y;
+  return clampRect({ x, y, width: BUTTON, height: BUTTON }, win);
+}
+// The spot to keep for a button at `r`.
+export const buttonPos = (r, win) => ({ right: Math.round(win.width - r.x - r.width), bottom: Math.round(win.height - r.y - r.height) });
+
+const inside =(r, p) => !!r && p.x >= r.x && p.x < r.x + r.width && p.y >= r.y && p.y < r.y + r.height;
 // Whether a press at `pos` closes the panel: an unpinned one, pressed outside it and outside the button (which toggles
 // it itself). Its title bar and border are inside: moving and resizing never close it.
 export const closesOnPress = (pos, { panel, button, pinned }) => !pinned && !!panel && !inside(panel, pos) && !inside(button, pos);

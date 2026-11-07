@@ -1,14 +1,15 @@
-// A quick memo per space: a button floats over the window; a click opens a panel with that space's
+// A quick memo per space: a round button floats over the window; a click opens a panel with that space's
 // <folder>/.herdr/memo.md in the terminal editor (vsedit, cut down to a document editor by memo.js MEMO_SETTINGS).
 //
-// The button is layouts/vscode.json's `floating` block on `work-body` (bottom right, above the status bar): Herdr
-// drags it, snaps it to an edge, keeps its spot and keeps it in the window, and no overlay stays open while only the
-// button shows. The panel is a `kind: "window"` overlay holding a layout (memo.js panelLayout: a title bar and resize
-// grips of this mod around the editor's terminal). Herdr gives mods no window geometry and moves a window only while
-// it drags it itself, so the panel's rect is this mod's, in window coordinates: a press on the title bar or a grip
-// opens a full-window, frameless overlay (role "grab", as vscode-tabs' drag overlay) that follows the pointer, shows
-// where the panel lands, learns the window's size and saves the new rect on release; the floating copy then reopens
-// the panel there.
+// The copy in layouts/vscode.json's `floating` block (it draws nothing: it is how the mod starts) opens the button
+// as a frameless `kind: "window"` overlay and the panel as a window holding a layout (memo.js panelLayout: a title bar
+// and resize grips of this mod around the editor's terminal). Herdr gives mods no window geometry and moves a window
+// only while it drags it itself, so this mod places both, in window coordinates: a press on the button, the title bar
+// or a grip opens a full-window, frameless overlay (role "grab", as vscode-tabs' drag overlay) that follows the
+// pointer, shows where it lands, learns the window's size and saves the new spot on release (a press on the button
+// that didn't move is a click); the floating copy then reopens the window there. The window's size, which the
+// button's spot is kept from (its bottom-right corner), comes from such an overlay too: one that closes as soon as it
+// is laid out ("probe") at start.
 //
 // The editor's terminal is started off screen with `hc run --bg` (no Herdr labels: no tab shows it, as
 // vscode-explorer's warm editors) and kept running per memo file, so closing the panel or switching spaces never ends
@@ -16,13 +17,15 @@
 import { View, div, svg } from "gpui-kit";
 import { h_flex } from "gpui-base";
 import { props, openOverlay, closeOverlay, shared, setShared, spaces, panes, terminals, theme, hc, exec, appHome,
-  readTextFile, writeTextFile, nextCommand, run, focused, placement } from "herdr";
-import { MIN, CORNER, GRIP, memoTarget, clampRect, dragRect, closesOnPress, panelRect, panelLayout, gitignoreAddition,
-  memoSettings, dragStarted } from "./memo.js";
+  readTextFile, writeTextFile, nextCommand, run, focused } from "herdr";
+import { BUTTON, MIN, CORNER, GRIP, memoTarget, clampRect, dragRect, buttonRect, buttonPos, closesOnPress, panelRect,
+  panelLayout, gitignoreAddition, memoSettings, dragStarted } from "./memo.js";
 
+const POS = "vscode-memo.button";     // { right, bottom }: the button's spot, from the window's bottom-right corner
 const PANEL = "vscode-memo.panel";    // { x, y, width, height }: the panel's
-const WIN = "vscode-memo.window";     // { width, height }: the window's size, as the grab overlay last saw it
-const OPEN = "vscode-memo.open";      // { button: bounds, panel: { id, rect, key, address, back, note } }: what is shown
+const WIN = "vscode-memo.window";     // { width, height }: the window's size, as the probe or a grab last saw it
+const OPEN = "vscode-memo.open";      // { button: { id, rect }, panel: { id, rect, key, address, back, note } }: what is shown
+const TOGGLE = "vscode-memo.toggle";  // a click on the button (its time): the floating copy opens or closes the panel
 const EDITORS = "vscode-memo.editors"; // { [memo path]: terminal address }: the running memo editors
 const PINNED = "vscode-memo.pinned";  // true: a press outside the panel leaves it open
 const MOD = "vscode-memo", ICON = "mods/vscode-memo/memo.svg", PIN = "mods/vscode-memo/pin.svg", DOTS = "mods/vscode-memo/grip.svg";
@@ -34,6 +37,11 @@ const live = (address) => !!address && terminals().some(t => t.address === addre
 // Which memo the panel shows: its machine and file.
 const memoKey = (t) => JSON.stringify([t?.on ?? null, t?.path ?? null]);
 const tryClose = (id) => { if (id) try { closeOverlay(id); } catch {} };
+// The window's size, from a full-window overlay's (the probe's, a grab's).
+const noteWindow = ({ width, height }) => {
+  const w = shared(WIN);
+  if (width > 0 && height > 0 && (w?.width !== width || w?.height !== height)) setShared(WIN, { width, height });
+};
 
 // Closes the panel (its editor keeps running and saves itself) and, unless `refocus` is false (a press outside put the
 // keyboard there), gives the keyboard back to where it was before (a pane of the shown space, or a terminal block).
@@ -59,20 +67,22 @@ async function focusTerminal(address, tries = 1, wait = 0) {
   return false;
 }
 
-// A press on the title bar (edge "move") or a grip: the grab overlay takes the pointer from here.
-function grab(edge, e, cx) {
+// A press on the button or the panel's title bar (edge "move"), or a grip: the grab overlay takes the pointer from here.
+const fullWindow = (props) => openOverlay({ mod: MOD, kind: "window", frame: "none", at: { x: 0, y: 0 }, width: 1, height: 1, props });
+function grab(target, edge, e, cx) {
   cx.stop_propagation(); // Herdr would drag the window itself
-  const rect = open().panel?.rect;
-  if (rect) openOverlay({ mod: MOD, kind: "window", frame: "none", at: { x: 0, y: 0 }, width: 1, height: 1,
-    props: { role: "grab", grab: { edge, rect, start: e.position } } });
+  const rect = open()[target]?.rect;
+  if (rect) fullWindow({ role: "grab", grab: { target, edge, rect, start: e.position } });
 }
 
-// The floating copy: draws the button, opens, moves and closes the panel, starts the editors.
+// The floating copy: shows the button, opens, moves and closes the panel, starts the editors.
 class Host {
   constructor(cx) {
-    tryClose(open().panel?.id); // windows from before a restart or a layout switch are gone
+    const o = open(); // windows from before a restart, a layout switch or a reload
+    tryClose(o.button?.id); tryClose(o.panel?.id);
     setShared(OPEN, {});
-    this.busy = false; this.down = this.up = this.bounds = null; this.dragged = false;
+    fullWindow({ role: "probe" });
+    this.busy = false; this.toggleAt = shared(TOGGLE);
     cx.spawn(async (cx) => { for (;;) { if ((await nextCommand()) === "toggle") { this.toggle(cx); cx.notify(); } } });
   }
 
@@ -89,10 +99,7 @@ class Host {
         const t = memoTarget(spaces().find(s => s.active), panes());
         const note = !t ? "This space has no folder for a memo." : t.on ? "Memo is local-only for now." : null;
         const address = note ? null : await this.editor(t, cx).catch(() => null);
-        // The button's bounds as its last press saw them (window coordinates): the panel opens beside it, and a press on
-        // it is no press outside the panel (it toggles the panel itself).
-        if (this.bounds && !same(open().button, this.bounds)) setOpen({ button: { ...this.bounds } });
-        const rect = panelRect(shared(PANEL), open().button, shared(WIN));
+        const rect = panelRect(shared(PANEL), open().button?.rect, shared(WIN));
         setShared(PANEL, rect);
         // Where the keyboard was before the panel first opened, for closing it.
         const f = focused(), back = open().panel?.back
@@ -149,6 +156,16 @@ class Host {
   }
 
   render(cx) {
+    const o = open(), win = shared(WIN);
+    // The button where it was left (kept inside the window), once the window's size is known.
+    const b = win && buttonRect(shared(POS), win);
+    if (b && !same(o.button?.rect, b)) {
+      tryClose(o.button?.id);
+      setOpen({ button: { id: openOverlay({ mod: MOD, kind: "window", frame: "none", at: { x: b.x, y: b.y }, width: BUTTON, height: BUTTON,
+        props: { role: "button" } }), rect: b } });
+    }
+    const ask = shared(TOGGLE);
+    if (ask !== this.toggleAt) { this.toggleAt = ask; this.toggle(cx); }
     const p = open().panel;
     if (p && !this.busy) {
       const t = memoTarget(spaces().find(s => s.active), panes());
@@ -157,62 +174,57 @@ class Host {
       else if (memoKey(t) !== p.key) this.show(cx); // another space's memo
       else if (!same(r, p.rect)) this.place(p, r, cx); // moved or resized
     }
-    // The button is the float: Herdr's frame (its background, border, shadow) around the icon. Herdr drags the float on
-    // a press nothing stops, so nothing here stops it, and a press only notes where the button is (locally: a shared
-    // value set then would redraw every mod mid-press); a click that was a drag (placement().dragging seen since the
-    // press, or the pointer moved) doesn't toggle the panel.
-    const t = theme(), on = Boolean(p);
-    if (placement()?.dragging) this.dragged = true;
-    return div().id("memo-button").size(32).flex().items_center().justify_center().cursor_pointer().tooltip("Memo")
-      .text_color(on ? t.accent : t.foreground)
-      .on_mouse_down("left", (e) => { this.down = e.position; this.up = null; this.dragged = false; this.bounds = e.bounds ?? null; })
-      .on_mouse_up("left", (e) => { this.up = e.position; })
-      .on_click((_e, cx) => {
-        const moved = this.dragged || (this.down && this.up && dragStarted(this.down, this.up));
-        this.down = this.up = null; this.dragged = false;
-        if (!moved) this.toggle(cx);
-      })
-      .child(svg(ICON).size(20));
+    return div();
   }
 }
 
-// The full-window overlay while the panel is moved or resized: an outline where it will land; the release saves it.
-// Escape or another press cancels.
+// The button: a round memo icon; a press hands the pointer to a grab overlay (a click or a move).
+function button() {
+  const t = theme(), on = Boolean(open().panel);
+  return div().id("memo-button").size(BUTTON).rounded_full().flex().items_center().justify_center().cursor_pointer().tooltip("Memo")
+    .bg(t.raised).border(1).border_color(on ? t.accent : t.border).shadow_sm().text_color(on ? t.accent : t.foreground)
+    .hover(s => s.bg(t.hover))
+    .on_mouse_down("left", (e, cx) => grab("button", "move", e, cx))
+    .child(svg(ICON).size(20));
+}
+
+// The full-window overlay while the button or the panel is moved, or the panel resized: an outline where it will land;
+// the release saves it (a press on the button that didn't move is a click: TOGGLE). Escape or another press cancels.
 class Grab {
   constructor(cx) {
     this.g = props().grab; this.pos = null; this.win = null;
     this.handle = cx.focus_handle(); this.handle.focus();
   }
   end() { closeOverlay(props().overlay); }
+  moved() { return !!this.pos && dragStarted(this.g.start, this.pos); }
   rect() {
-    const g = this.g;
-    return clampRect(dragRect(g.rect, g.edge, this.pos.x - g.start.x, this.pos.y - g.start.y, MIN), this.win);
+    const g = this.g, min = g.target === "button" ? { width: BUTTON, height: BUTTON } : MIN;
+    return clampRect(dragRect(g.rect, g.edge, this.pos.x - g.start.x, this.pos.y - g.start.y, min), this.win);
   }
   render() {
-    const t = theme(), r = this.pos && dragStarted(this.g.start, this.pos) ? this.rect() : null;
+    const t = theme(), g = this.g, r = this.moved() ? this.rect() : null;
     return div().id("memo-grab").size_full().relative().track_focus(this.handle)
-      .on_size_change((size) => {
-        this.win = size;
-        const w = shared(WIN);
-        if (size.width > 0 && (w?.width !== size.width || w?.height !== size.height)) setShared(WIN, { width: size.width, height: size.height });
-      })
+      .on_size_change((size) => { this.win = size; noteWindow(size); })
       .on_key_down((e) => { if (e.key === "escape") this.end(); })
       .on_mouse_move((e, cx) => { this.pos = e.position; cx.notify(); })
       .on_mouse_up("left", (e) => {
         this.pos = e.position;
-        if (dragStarted(this.g.start, this.pos)) setShared(PANEL, this.rect());
+        if (!this.moved()) { if (g.target === "button") setShared(TOGGLE, Date.now()); }
+        else if (g.target === "button") { if (this.win) setShared(POS, buttonPos(this.rect(), this.win)); }
+        else setShared(PANEL, this.rect());
         this.end();
       })
       .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.end(); })
       .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); this.end(); })
-      .when(Boolean(r), el => el.child(div().absolute().left(r.x).top(r.y).w(r.width).h(r.height).rounded(8).border(2)
-        .border_color(t.accent).bg(t.accent).opacity(0.25)));
+      .when(Boolean(r), el => el.child(g.target === "button"
+        ? div().absolute().left(r.x).top(r.y).size(BUTTON).rounded_full().bg(t.accent).opacity(0.6)
+        : div().absolute().left(r.x).top(r.y).w(r.width).h(r.height).rounded(8).border(2).border_color(t.accent).bg(t.accent).opacity(0.25)));
   }
 }
 
 // A side or corner of the panel's border: the OS's resize pointer, and a press resizes from there.
 const CURSORS = { n: "ns", s: "ns", e: "ew", w: "ew", nw: "nwse", se: "nwse", ne: "nesw", sw: "nesw" };
-const gripArea = (edge, el) => el[`cursor_${CURSORS[edge]}_resize`]().on_mouse_down("left", (e, cx) => grab(edge, e, cx));
+const gripArea = (edge, el) => el[`cursor_${CURSORS[edge]}_resize`]().on_mouse_down("left", (e, cx) => grab("panel", edge, e, cx));
 
 // The panel's title bar: drags the panel; pin and × on the right. Its top corners are the corner grips' inside (memo.js
 // panelLayout), above its own handlers. Unpinned (the default), a press outside the panel closes it, and the keyboard
@@ -225,10 +237,10 @@ function title() {
     .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); action(); }).child(child);
   return h_flex().id("memo-title").size_full().relative().px(10).gap(8).items_center().bg(t.chrome).border_b(1).border_color(t.border)
     .text_size(12.5).text_color(t.foreground).cursor_move()
-    .on_mouse_down("left", (e, cx) => grab("move", e, cx))
+    .on_mouse_down("left", (e, cx) => grab("panel", "move", e, cx))
     .on_mouse_down_out((e) => {
       const o = open();
-      if (closesOnPress(e.position, { panel: o.panel?.rect, button: o.button, pinned: shared(PINNED) === true })) closePanel(false);
+      if (closesOnPress(e.position, { panel: o.panel?.rect, button: o.button?.rect, pinned: shared(PINNED) === true })) closePanel(false);
     })
     .child(svg(ICON).size(14).flex_none().text_color(t.muted))
     .child(div().flex_none().font_semibold().child("Memo"))
@@ -251,14 +263,17 @@ export default class Memo extends View {
     const role = props()?.role, overlay = props()?.overlay;
     if (role === "grab") this.part = new Grab(cx);
     else if (!overlay) this.part = new Host(cx);
+    else if (role === "probe") cx.timer.after(1000, () => tryClose(overlay)); // closes itself even unsized
   }
   render(cx) {
     if (this.part) return this.part.render(cx);
     const role = props().role, overlay = props().overlay, t = theme();
-    // A window this mod no longer opens (an earlier version's always-open button, its size probe: any open window
-    // keeps Herdr's pointer popups, the tab and Explorer menus, from opening), or a panel that isn't the one shown
-    // (left from before a reload), closes itself.
-    if (!["title", "grip", "note"].includes(role) || open().panel?.id !== overlay) { tryClose(overlay); return div(); }
+    if (role === "probe") return div().id("memo-probe").size_full().on_size_change((size) => { noteWindow(size); tryClose(overlay); });
+    // A button or panel window that isn't the one shown (left from before a reload or by an earlier version) closes
+    // itself, so none lingers.
+    const mine = role === "button" ? open().button?.id : ["title", "grip", "note"].includes(role) ? open().panel?.id : null;
+    if (mine !== overlay) { tryClose(overlay); return div(); }
+    if (role === "button") return button();
     if (role === "title") return title();
     if (role === "grip") return grip();
     return div().size_full().p(16).bg(t.background).text_color(t.muted).text_size(13).child(props().note ?? "");
