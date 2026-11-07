@@ -88,14 +88,14 @@ test("the menu groups items like VS Code; a remote entry has every item but Reve
     "New File…", "New Folder…", "-", "Reveal in Finder", "Open in Integrated Terminal", "-", "Cut", "Copy", "Paste", "-",
     "Copy Path", "Copy Relative Path", "-", "Rename…", "Delete"]);
   assert.deepEqual(labels(menuItems({ dir: false, remote: false, canPaste: false })), [
-    "Open", "Open With…", "-", "Reveal in Finder", "Open in Integrated Terminal", "-", "Cut", "Copy", "-",
+    "Open", "Open to the Side", "Open With…", "-", "Reveal in Finder", "Open in Integrated Terminal", "-", "Cut", "Copy", "-",
     "Copy Path", "Copy Relative Path", "-", "Rename…", "Delete"]);
   assert.deepEqual(labels(menuItems({ dir: true, remote: true, canPaste: true })), [
     "New File…", "New Folder…", "-", "Open in Integrated Terminal", "-", "Cut", "Copy", "Paste", "-",
     "Copy Path", "Copy Relative Path", "-", "Rename…", "Delete"]);
-  assert.deepEqual(labels(menuItems({ dir: false, remote: false, canPaste: false, markdown: true })).slice(0, 3), ["Open", "Open Preview", "Open With…"]);
+  assert.deepEqual(labels(menuItems({ dir: false, remote: false, canPaste: false, markdown: true })).slice(0, 4), ["Open", "Open to the Side", "Open Preview", "Open With…"]);
   assert.deepEqual(labels(menuItems({ dir: false, remote: true, canPaste: false })), [
-    "Open", "Open With…", "-", "Open in Integrated Terminal", "-", "Cut", "Copy", "-",
+    "Open", "Open to the Side", "Open With…", "-", "Open in Integrated Terminal", "-", "Cut", "Copy", "-",
     "Copy Path", "Copy Relative Path", "-", "Rename…", "Delete"]);
   assert.equal(menuHeight(["-", ["a"]]), 10 + 9 + 26);
 });

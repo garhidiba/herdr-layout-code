@@ -53,7 +53,7 @@ function harness({ space = { id: "sp1", machine: null }, execResults = [ok], hcR
   let polls = 0;
   const shown = () => polls >= appearsAfter;
   const spaces = () => [{ ...space, active: true, tabs: [{ id: "tbOld" }, ...(shown() ? [{ id: "tbX" }] : [])] }];
-  const panes = () => [{ tab: "tbOld", terminal: "box/t1" }, ...(shown() ? [{ tab: "tbX", terminal: "box/t9" }] : [])];
+  const panes = () => [{ pane: "box/p1", tab: "tbOld", terminal: "box/t1" }, ...(shown() ? [{ pane: "box/p9", tab: "tbX", terminal: "box/t9" }] : [])];
   const openTab = createOpenTab({
     hc: async (a) => { hcCalls.push(a); if (a[0] === "run" && hcResult instanceof Error) throw hcResult; return hcResult; },
     exec: async (...a) => execResults[Math.min(execCalls.push(a), execResults.length) - 1],
@@ -177,6 +177,32 @@ test("the timing log gets each step of an open: warm (start, select) and cold (s
   await opener(null)(editor, { sleep: async () => {} });
   assert.deepEqual(logs.map(l => `${l.step}:${l.mode}`), ["start:cold", "select:warm", "start:cold", "hc-run:cold", "shown:cold", "select:cold"]);
   assert.ok(logs.every(l => l.name === "a.ts" && l.ms >= 0 && l.at >= l.ms));
+});
+
+test("Open to the Side: a warm editor kept right of the focused pane, its tab not renamed; else terminal.open / pane.split", async () => {
+  const calls = [], asked = [];
+  const opener = (warm) => createOpenTab({ hc: async () => { throw new Error("no hc run for a pane"); }, run: (n, a) => calls.push([n, a]),
+    spaces: () => [{ id: "sp1", machine: null, active: true, tabs: [{ id: "tbW" }] }], panes: () => [], newId: () => "tbX", warm });
+  await opener(async (space, args, cx, place) => { asked.push(place); return "tbW"; })(editor, { sleep: async () => {} }, "right");
+  assert.deepEqual(asked, ["right"]);
+  assert.deepEqual(calls.splice(0), [["tab.select", { id: "tbW" }]]);
+  await opener(async () => null)(editor, { sleep: async () => {} }, "right");
+  assert.deepEqual(calls.splice(0), [["terminal.open", { argv: editor.argv, folder: editor.folder, place: "right" }]]);
+  const viewer = { name: "a.png", mod: "vscode-viewer", props: { file: "/p/a.png" } };
+  await opener(null)(viewer, { sleep: async () => {} }, "right");
+  assert.deepEqual(calls.splice(0), [["pane.split", { direction: "right", mod: "vscode-viewer", props: viewer.props }]]);
+});
+
+test("Open to the Side in a remote space: terminal.open there, its new pane gets the right-clicks", async () => {
+  const calls = [], execCalls = [];
+  let polls = 0;
+  const panes = () => [{ pane: "box/p1", tab: "box/tb1", terminal: "box/t1" }, ...(polls ? [{ pane: "box/p9", tab: "box/tb1", terminal: "box/t9" }] : [])];
+  const openTab = createOpenTab({ hc: async () => ok, exec: async (...a) => { execCalls.push(a); return ok; }, run: (n, a) => calls.push([n, a]),
+    spaces: () => [{ id: "box/sp1", machine: "box", active: true, tabs: [{ id: "box/tb1" }] }], panes, wait: 100, step: 25 });
+  await openTab(editor, { sleep: async () => { polls++; } }, "right");
+  await settle();
+  assert.deepEqual(calls, [["terminal.open", { argv: editor.argv, folder: editor.folder, place: "right" }]]);
+  assert.deepEqual(execCalls[0], ["herdr-app", ["do", "terminal.right_click", "--to", "program", "--terminal", "box/t9"]]);
 });
 
 test("extra labels go on the terminal with Herdr's", () => {

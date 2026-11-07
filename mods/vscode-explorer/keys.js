@@ -4,6 +4,7 @@
 const KEYS = {
   up: { all: ["up"] }, down: { all: ["down"] }, left: { all: ["left"] }, right: { all: ["right"] },
   open: { mac: ["space", "cmd-down"], other: ["space", "enter"] },
+  openSide: { mac: ["cmd-enter"], other: ["ctrl-enter"] },
   rename: { mac: ["enter"], other: ["f2"] },
   copy: { mac: ["cmd-c"], other: ["ctrl-c"] },
   cut: { mac: ["cmd-x"], other: ["ctrl-x"] },

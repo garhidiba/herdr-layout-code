@@ -132,7 +132,7 @@ export function nameProblem(name, taken) {
 export function menuItems({ dir, remote, canPaste, markdown = false }) {
   const groups = [
     dir ? [["New File…", "newFile"], ["New Folder…", "newFolder"]]
-      : [["Open", "open"], ...(markdown ? [["Open Preview", "preview"]] : []), ["Open With…", "openWith"]],
+      : [["Open", "open"], ["Open to the Side", "openSide", "⌘↵"], ...(markdown ? [["Open Preview", "preview"]] : []), ["Open With…", "openWith"]],
     [...(remote ? [] : [["Reveal in Finder", "reveal", "⌥⌘R"]]), ["Open in Integrated Terminal", "terminal"]],
     [["Cut", "cut", "⌘X"], ["Copy", "copy", "⌘C"], ...(canPaste ? [["Paste", "paste", "⌘V"]] : [])],
     [["Copy Path", "copyPath", "⌥⌘C"], ["Copy Relative Path", "copyRelative", "⇧⌥⌘C"]],

@@ -33,24 +33,28 @@ export function createOpenTab({ hc, run, exec, spaces, panes, local = false, new
   const tabsOf = (space) => spaces().find(s => s.id === space)?.tabs.map(t => t.id) ?? [];
   const hasTab = (space, tab) => tabsOf(space).includes(tab);
   const routing = new Set(); // terminals whose right-click retry loop is running
-  return async function openTab(args, cx) {
-    const began = Date.now();
+  // `place` "right" / "down" (VS Code's Open to the Side): a pane beside the focused one, in its tab, instead of a tab.
+  return async function openTab(args, cx, place = "tab") {
+    const began = Date.now(), side = place !== "tab";
     let mode = "cold";
     const mark = (step) => log?.({ step, mode, ms: Date.now() - began, at: Date.now(), name: args.name });
     const all = spaces(), active = all.find(s => s.active);
     const space = local && active?.machine ? all.find(s => !s.machine) : active;
-    const tabNew = () => run("tab.new", local && space ? { ...args, space: space.id } : args);
+    const tabNew = () => (!side ? run("tab.new", local && space ? { ...args, space: space.id } : args)
+      : args.argv ? run("terminal.open", { argv: args.argv, folder: args.folder, place })
+      : run("pane.split", { direction: place, mod: args.mod, props: args.props }));
     if (!args.argv || !space) return tabNew();
     if (space.machine) return remoteTab(space.id, tabNew, cx);
     mark("start");
     const show = (tab) => {
       if (!space.active) run("space.select", { id: space.id });
-      run("tab.rename", { id: tab, name: args.name });
+      if (!side) run("tab.rename", { id: tab, name: args.name });
       run("tab.select", { id: tab });
       mark("select");
     };
-    const warmTab = warm ? await warm(space, args, cx).catch(() => null) : null;
+    const warmTab = warm ? await warm(space, args, cx, place).catch(() => null) : null;
     if (warmTab) { mode = "warm"; return show(warmTab); }
+    if (side) return tabNew(); // a labelled terminal shows only as a tab of its own
     const tab = newId();
     const r = await hc(directRun(args, { space: space.id, tab })).catch(() => null);
     let address = null;
@@ -79,9 +83,10 @@ export function createOpenTab({ hc, run, exec, spaces, panes, local = false, new
     } catch {} finally { routing.delete(terminal); }
   }
   async function remoteTab(space, tabNew, cx) {
-    const before = new Set(tabsOf(space));
+    const inSpace = () => panes().filter(p => tabsOf(space).includes(p.tab));
+    const before = new Set(inSpace().map(p => p.pane)); // a new tab's pane, or one beside the focused pane
     tabNew();
-    const shown = () => panes().find(p => p.terminal && tabsOf(space).includes(p.tab) && !before.has(p.tab))?.terminal;
+    const shown = () => inSpace().find(p => p.terminal && !before.has(p.pane))?.terminal;
     for (let waited = 0; !shown() && waited < wait; waited += step) await cx.sleep(step);
     const terminal = shown();
     if (terminal) rightClicks(terminal, cx);

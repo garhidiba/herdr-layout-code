@@ -35,6 +35,12 @@ test("Windows and Linux: Ctrl, F2 renames, Enter opens, Delete deletes", () => {
   assert.equal(treeAction(key("c", { control: true, alt: true, shift: true }), "linux"), "copyRelative");
 });
 
+test("Open to the Side is Cmd+Enter on macOS, Ctrl+Enter elsewhere", () => {
+  assert.equal(treeAction(key("enter", cmd), "mac"), "openSide");
+  for (const os of ["win", "linux"]) assert.equal(treeAction(key("enter", ctrl), os), "openSide");
+  assert.equal(treeAction(key("enter", ctrl), "mac"), null);
+});
+
 test("a key with extra modifiers, or one the tree doesn't use, is left alone", () => {
   assert.equal(treeAction(key("c", { platform: true, shift: true }), "mac"), null);
   assert.equal(treeAction(key("down", { shift: true }), "mac"), null);

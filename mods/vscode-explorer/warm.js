@@ -46,12 +46,13 @@ export function createWarmPool({ hc, run, exec, spaces, panes, terminals, machin
   // The id of the tab now showing `space`'s warm editor, handed tab.new `args` (the Explorer's local editor: paths.js
   // openArgs); null when there is none ready or args are another program's (the open goes on as before). One that
   // can't take the file or get a tab is ended.
-  async function claim(space, args, cx) {
+  // `place` "right" / "down" (launch.js Open to the Side): the pane goes beside the focused one instead of a new tab.
+  async function claim(space, args, cx, place = "tab") {
     const w = entries()[space.id], file = editorFileOf(args.argv);
     const editor = file && JSON.stringify(args.argv) === JSON.stringify(["exec", "sh", launcher(), file, "--close-on-exit"]);
     if (!editor || space.machine || !w?.address) return null;
     put(space.id, null); // taken: nothing else hands it a file, and fill() starts the next one
-    run("terminal.keep", { terminal: w.address, place: "tab" }); // the tab while the editor opens the file
+    run("terminal.keep", { terminal: w.address, place }); // the tab (or pane) while the editor opens the file
     const r = await exec("sh", ["-c", HANDOFF, "warm", w.key, file, args.folder ?? ""]).catch(() => null);
     for (let waited = 0; r?.code === 0 && !paneOf(w.address) && waited < wait; waited += step) await cx.sleep(step);
     const tab = r?.code === 0 ? paneOf(w.address)?.tab : null;

@@ -292,13 +292,13 @@ export function createRemote({ exec, readTextFile, notify, appHome, platform = (
 // and a file still opening isn't opened again: a double-click, or a second click before the tab shows.
 export function createOpenFile({ openTab, remote, appHome, showOpen = () => false }) {
   const opening = new Set();
-  return async function openFile(file, { on = null, how = "auto", folder }, cx) {
+  return async function openFile(file, { on = null, how = "auto", folder, place = "tab" }, cx) {
     const editor = wantsEditor(file, how), key = JSON.stringify([on, how, normalPath(file)]);
     if (opening.has(key) || (editor && showOpen(file, on))) return;
     opening.add(key);
     try {
       const launch = on && editor ? await remote.prepare(on) : null;
-      return await openTab(openArgs(file, { on, appHome: appHome(), how, folder, remote: launch }), cx);
+      return await openTab(openArgs(file, { on, appHome: appHome(), how, folder, remote: launch }), cx, place);
     } finally { opening.delete(key); }
   };
 }

@@ -384,10 +384,10 @@ export default class Files extends View {
     if (i >= 0 || (!this.loading && target.folders.every(f => !this.pending.has(f)))) this.revealing = null;
   }
 
-  open(path, cx) {
+  open(path, cx, place = "tab") {
     // The editor tab is a terminal: started in the Explorer's root, so focusing it keeps the tree where it is.
     const [file, on, folder] = [`${this.root}/${path}`, this.on, this.root];
-    cx.spawn(cx => openFile(file, { on, folder }, cx));
+    cx.spawn(cx => openFile(file, { on, folder, place }, cx));
   }
 
   menu(abs, dir, cx) {
@@ -507,6 +507,7 @@ export default class Files extends View {
         cx.notify();
       }
     } else if (action === "open") { this.platform = false; if (r) this.click(r, cx); } // not a Cmd+click
+    else if (action === "openSide") { if (r && !r.dir) { this.active = r.path; this.open(r.path, cx, "right"); } } // Open to the Side
     else if (r || action === "paste") {
       explorerAction(action, { path: r?.abs ?? this.root, root: this.root, dir: r ? r.dir : true, on: this.on });
       cx.notify();

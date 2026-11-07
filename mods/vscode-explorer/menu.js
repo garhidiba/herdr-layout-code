@@ -135,8 +135,9 @@ export class ExplorerMenu {
     const t = this.target;
     if (action === "openWith") { this.withList = true; this.at = -1; return cx.notify(); }
     // Closed once the tab is shown: closing first could end the wait. A second pick meanwhile is ignored.
-    const open = (how) => !this.opening && (this.opening = true) && cx.spawn(async cx => { try { await openFile(t.path, { on: t.on, how, folder: t.root }, cx); } finally { this.close(); } });
+    const open = (how, place) => !this.opening && (this.opening = true) && cx.spawn(async cx => { try { await openFile(t.path, { on: t.on, how, folder: t.root, place }, cx); } finally { this.close(); } });
     if (action === "open") return open("auto");
+    if (action === "openSide") return open("auto", "right");
     if (action === "preview") return open("viewer");
     if (action === "editor" || action === "viewer") return open(action);
     this.close();
