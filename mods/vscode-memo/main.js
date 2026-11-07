@@ -183,7 +183,7 @@ function button() {
   const t = theme(), on = Boolean(open().panel);
   return div().id("memo-button").size(BUTTON).rounded_full().flex().items_center().justify_center().cursor_pointer().tooltip("Memo")
     .bg(t.raised).border(1).border_color(on ? t.accent : t.border).shadow_sm().text_color(on ? t.accent : t.foreground)
-    .hover(s => s.bg(t.hover))
+    .hover(s => s.border_color(t.accent).text_color(t.accent)) // t.hover is translucent: it would let the panes show through
     .on_mouse_down("left", (e, cx) => grab("button", "move", e, cx))
     .child(svg(ICON).size(20));
 }
