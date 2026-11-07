@@ -5,12 +5,13 @@
 // (VS Code's explorer.autoReveal).
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, v_virtual_list, VirtualListScrollHandle } from "gpui-base";
-import { spaces, panes, focused, terminals, exec, readTextFile, watchFolder, theme, window, appHome, props, shared, setShared, notify, nextCommand } from "herdr";
+import { spaces, panes, focused, terminals, exec, hc, readTextFile, watchFolder, theme, window, appHome, props, shared, setShared, notify, nextCommand } from "herdr";
 import { freshRoot, encode, decode } from "./cache.js";
 import { ExplorerMenu, ExplorerDialog, TabMenu, openMenu, openInCode, refreshKey, openFile, remote, warm, REVEAL } from "./menu.js";
 import { WARM } from "./warm.js";
 import { createCore } from "./core.js";
 import { editorFileOf, autoRevealOf, revealPath } from "./paths.js";
+import { createDesktop } from "./desktop.js";
 // Herdr starts with PATH=/usr/bin:/bin, so Homebrew/user tools (node, code, codex, trash) are looked up here too.
 const userExec = (cmd, args, opts) => exec("sh", ["-c", 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; exec "$0" "$@"', cmd, ...args], opts);
 
@@ -26,6 +27,8 @@ function location() {
   return lastRoot[space?.id] ?? freshRoot(space, panes());
 }
 const key = () => JSON.stringify(location());
+// Remote editors' inline suggestions through this desktop (desktop.js).
+const desktop = createDesktop({ hc, exec, appHome, notify });
 const PER_FOLDER = 500, TOTAL = 5000, ROW = 22;
 
 // The file the focused tab shows, { file, on }: an editor terminal's (its argv or label), or a viewer tab's (it shares its file
@@ -145,6 +148,7 @@ export default class Files extends View {
     setShared(WARM, {});
     this.warmFill(cx, 0);
     cx.timer.every(10000, cx => {
+      cx.spawn(() => desktop.sync(terminals()));
       this.warmFill(cx, 0);
       this.refresh(cx);
       if (this.known && spaces().some(s => !this.known.has(s.id))) this.preloadAll(cx);
@@ -416,6 +420,9 @@ export default class Files extends View {
     if (asked !== this.asked) { if (this.asked !== undefined) this.refresh(cx); this.asked = asked; }
     this.autoReveal(cx);
     this.revealAsked(cx);
+    // an editor focused in this active window: this desktop answers its machine's suggestions (desktop.js)
+    const editorOn = window()?.active ? activeFile(focused(), null)?.on ?? null : null;
+    if (editorOn !== this.editorOn) { this.editorOn = editorOn; cx.spawn(() => desktop.mark(editorOn)); }
     const due = warm.due(); // a space without its warm editor (one was just used), or one to end
     if (due !== null) this.warmFill(cx, due);
     const t = theme(), rows = this.rows("", 0, []), byPath = new Map(rows.map(r => [r.path, r]));
