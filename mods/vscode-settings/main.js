@@ -472,8 +472,8 @@ export default class Settings extends View {
         this.segmented(t, "editor.wrappingIndent", [["none", "None"], ["same", "Same"], ["indent", "Indent"], ["deepIndent", "Deep Indent"]])))
       .child(this.row(t, "Editor", "Inline Suggestions", "Gray ghost text from a code model while you type: Tab accepts, Esc hides, ⌘→ / Ctrl+→ takes a word. The status bar item turns it on and off.",
         this.toggle(t, "editor.inlineSuggest.enabled", "Inline Suggestions")))
-      .child(this.row(t, "Editor", "Inline Suggestion Provider", "Ollama and LM Studio run a model on this machine or another one you set, free. Codestral (Mistral), DeepSeek and Mercury (Inception) are paid APIs with your key; they get the code around the cursor, 2,000 requests a day by default, and the status bar shows the cost.",
-        this.segmented(t, PROVIDER, [["ollama", "Ollama"], ["lmstudio", "LM Studio"], ["codestral", "Codestral"], ["deepseek", "DeepSeek"], ["mercury", "Mercury"], ["off", "Off"]])))
+      .child(this.row(t, "Editor", "Inline Suggestion Provider", "Ollama and LM Studio run a model on this machine or another one you set, free. Codestral (Mistral) and Mercury (Inception) are paid APIs with your key; they get the code around the cursor, 2,000 requests a day by default, and the status bar shows the cost.",
+        this.segmented(t, PROVIDER, [["ollama", "Ollama"], ["lmstudio", "LM Studio"], ["codestral", "Codestral"], ["mercury", "Mercury"], ["off", "Off"]])))
       .when(Boolean(LOCAL_PROVIDERS[this.v[PROVIDER]]), (el) => el.child(this.serverRow(t)))
       .when(this.v[PROVIDER] !== "off", (el) => el.child(this.modelRow(t)))
       .when(HOSTED_PROVIDERS.includes(this.v[PROVIDER]), (el) => el.child(this.apiKeyRow(t)));

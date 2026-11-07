@@ -3224,7 +3224,7 @@ pub(crate) mod tests {
         assert!(ed.ghost_view().is_some());
     }
 
-    /// A fake hosted FIM API: SSE events in the provider's shape (Mistral's chat-like delta, DeepSeek / Mercury's text),
+    /// A fake hosted FIM API: SSE events in the provider's shape (Mistral's chat-like delta, Mercury's text),
     /// 401 unless the key is sk-good; the requests' Authorization headers.
     fn fake_hosted(provider: &'static str, reply: &'static str) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
         use std::io::{Read, Write};
@@ -3265,7 +3265,7 @@ pub(crate) mod tests {
     fn hosted_inline_suggestions_stream_blocks_strip_fences_drop_prose_and_need_a_key() {
         let _one = inline_lock();
         crate::inline::fake_security(&scratch().join(format!("keys-{}", rand_id())));
-        for (provider, env) in [("codestral", "MISTRAL_API_KEY"), ("deepseek", "DEEPSEEK_API_KEY"), ("mercury", "INCEPTION_API_KEY")] {
+        for (provider, env) in [("codestral", "MISTRAL_API_KEY"), ("mercury", "INCEPTION_API_KEY")] {
             std::env::set_var(env, "sk-good");
             for (reply, want) in [("f (a) {\n    go();\n  }\n  stop();", Some(vec!["f (a) {", "    go();", "  }"])), ("```js\nuit();\n```", Some(vec!["uit();"])), ("Here's a breakdown of each service:", None)] {
                 let (url, auth) = fake_hosted(provider, reply);
@@ -3287,10 +3287,10 @@ pub(crate) mod tests {
             assert!(ed.message.as_ref().unwrap().text.contains("the API key was refused (HTTP 401)"), "{provider}");
             std::env::remove_var(env);
         }
-        let mut ed = inline_editor(&["x = "], json!({ "editor.inlineSuggest.endpoint": "http://127.0.0.1:9/fim", "editor.inlineSuggest.provider": "deepseek" }));
-        assert_eq!(ed.inline_status().as_deref(), Some("DeepSeek: no API key"));
+        let mut ed = inline_editor(&["x = "], json!({ "editor.inlineSuggest.endpoint": "http://127.0.0.1:9/fim", "editor.inlineSuggest.provider": "mercury" }));
+        assert_eq!(ed.inline_status().as_deref(), Some("Mercury: no API key"));
         ed.inline_trigger();
-        assert!(ed.message.as_ref().unwrap().text.contains("DeepSeek: no API key: security add-generic-password -U -s herdr-vscode-deepseek -a herdr -w <key>"));
+        assert!(ed.message.as_ref().unwrap().text.contains("Mercury: no API key: security add-generic-password -U -s herdr-vscode-mercury -a herdr -w <key>"));
         assert!(ed.inline_usage().contains("today 0 requests (limit 2000)"));
     }
 

@@ -123,7 +123,10 @@ test("inline suggestions: on unless set off, the provider one of the editor's, R
   assert.equal(normalize({ "editor.inlineSuggest.enabled": false })["editor.inlineSuggest.enabled"], false);
   assert.equal(normalize({ "editor.inlineSuggest.provider": "nope" })["editor.inlineSuggest.provider"], "ollama");
   assert.deepEqual(withSetting({}, "editor.inlineSuggest.provider", "off"), { "editor.inlineSuggest.provider": "off" });
-  for (const p of ["codestral", "deepseek", "mercury"]) assert.equal(normalize({ "editor.inlineSuggest.provider": p })["editor.inlineSuggest.provider"], p);
+  for (const p of ["lmstudio", "codestral", "mercury"]) assert.equal(normalize({ "editor.inlineSuggest.provider": p })["editor.inlineSuggest.provider"], p);
+  assert.equal(normalize({ "editor.inlineSuggest.provider": "deepseek" })["editor.inlineSuggest.provider"], "off", "DeepSeek, no longer offered, reads as Off");
+  assert.deepEqual(withProvider({ "editor.inlineSuggest.provider": "deepseek", "editor.inlineSuggest.model": "deepseek-flash" }, "lmstudio"),
+    { "editor.inlineSuggest.provider": "lmstudio", "editor.inlineSuggest.model": "" }, "picking another one keeps nothing of it");
   assert.throws(() => withSetting({}, "editor.inlineSuggest.enabled", "yes"));
   assert.equal("editor.inlineSuggest.enabled" in withDefaults({ "editor.inlineSuggest.enabled": false }), false);
 });

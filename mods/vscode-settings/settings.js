@@ -22,7 +22,7 @@ export const DEFAULTS = {
   "explorer.autoReveal": true,        // the Explorer reveals and highlights the active editor's file (vscode-explorer)
 };
 export const CHOICES = { "core.engine": ["js", "rust"], "editor.engine": ["js", "rust"], "files.autoSave": ["off", "afterDelay", "onFocusChange"],
-  "editor.inlineSuggest.provider": ["ollama", "lmstudio", "codestral", "deepseek", "mercury", "off"],
+  "editor.inlineSuggest.provider": ["ollama", "lmstudio", "codestral", "mercury", "off"],
   "editor.cursorStyle": ["line", "block", "underline", "line-thin", "underline-thin", "block-outline"],
   "editor.cursorBlinking": ["blink", "smooth", "phase", "expand", "solid"],
   "editor.wordWrap": ["off", "on", "wordWrapColumn", "bounded"], "editor.wrappingIndent": ["none", "same", "indent", "deepIndent"] };
@@ -32,6 +32,8 @@ const INLINE_ENABLED = "editor.inlineSuggest.enabled";
 // Inline keys present only when set (absent: the provider's default; Reset to defaults removes them): the shared server
 // address and each provider's own model and address, which win over the shared ones (inline.cjs).
 const PROVIDER = "editor.inlineSuggest.provider";
+// Inline suggestion providers no longer offered, read as "off" so another one gets picked (DeepSeek: its request limits).
+const RETIRED = ["deepseek"];
 export const ownKey = (provider, k) => `editor.inlineSuggest.${provider}.${k}`;
 function optional(key) {
   const m = /^editor\.inlineSuggest\.(?:(\w+)\.)?(model|endpoint)$/.exec(key);
@@ -52,6 +54,7 @@ export function parse(text) {
 
 // A known setting's value made valid, or undefined when it can't be (wrong type, not a number, unknown choice).
 export function coerce(key, value) {
+  if (key === PROVIDER && RETIRED.includes(value)) return "off";
   const opt = optional(key);
   if (opt) return typeof value === "string" && (opt !== "endpoint" || !endpointProblem(value)) ? value.trim().replace(/\/+$/, "") : undefined;
   if (key === INLINE_ENABLED) return typeof value === "boolean" ? value : undefined;
@@ -85,7 +88,7 @@ export function withProvider(raw, provider) {
   const next = { ...raw };
   for (const k of ["model", "endpoint"]) {
     const shared = `editor.inlineSuggest.${k}`, value = coerce(shared, raw[shared]);
-    if (value && old !== "off" && !coerce(ownKey(old, k), raw[ownKey(old, k)])) next[ownKey(old, k)] = value;
+    if (value && optional(ownKey(old, k)) && !coerce(ownKey(old, k), raw[ownKey(old, k)])) next[ownKey(old, k)] = value;
     delete next[shared];
   }
   return withSetting({ ...next, "editor.inlineSuggest.model": "" }, PROVIDER, provider);
@@ -99,7 +102,7 @@ export const withOwn = (raw, provider, k, value) => {
 export const ownValue = (v, provider, k) => v[ownKey(provider, k)] || v[`editor.inlineSuggest.${k}`] || "";
 
 // ----- the Inline Suggestions rows (their data: `node mods/vscode-viewer/editor/inline.cjs --models / --key`) -----
-export const HOSTED_PROVIDERS = ["codestral", "deepseek", "mercury"];
+export const HOSTED_PROVIDERS = ["codestral", "mercury"];
 // Local servers: their default address (the Server row's placeholder).
 export const LOCAL_PROVIDERS = { ollama: "http://127.0.0.1:11434", lmstudio: "http://127.0.0.1:1234" };
 // The Model row's choices [value, label]: the provider's default first (value "": none in the file), the models it

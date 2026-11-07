@@ -55,13 +55,13 @@ Optional Claude meter: set Claude Code's `statusLine.command` to `sh ~/.config/h
 - `node mods/vscode-viewer/editor/keybindings.cjs --table` (Settings: the Keyboard Shortcuts table, when it opens and when `vscode-keybindings.json` changes)
 - `<herdr home>/vscode-core/vscode-core --version` (Settings: Rust core status), `sh` + `mods/vscode-settings/native/install.sh` → `cargo` (Build Rust core, only when you click it)
 - On a remote space's machine: `uname`, `test` (is the editor installed), the bundle's `vsedit.sh` and `vsedit` (the editor), and, after you confirm, `hc exec -i --on <machine>` from here running `mkdir`, `mktemp`, `cat`, `sha256sum`, `tar`, `chmod`, `mv`, `rm` inside `~/.local/share/herdr-vscode/` there (Windows: `powershell` with `Get-FileHash`, `tar.exe`, `Move-Item` inside `%LOCALAPPDATA%\herdr-vscode`)
-- Inline suggestions: HTTP to the provider (Ollama at `http://127.0.0.1:11434` or LM Studio at `http://127.0.0.1:1234` by default, either at an address you set, or the paid Codestral, DeepSeek or Mercury FIM APIs with your key from the macOS keychain; `node`'s `fetch`, or `curl` from the Rust editor), only after typing pauses and never for files like `.env` or keys; `editor.inlineSuggest.provider: "off"` turns it off
+- Inline suggestions: HTTP to the provider (Ollama at `http://127.0.0.1:11434` or LM Studio at `http://127.0.0.1:1234` by default, either at an address you set, or the paid Codestral or Mercury FIM APIs with your key from the macOS keychain; `node`'s `fetch`, or `curl` from the Rust editor), only after typing pauses and never for files like `.env` or keys; `editor.inlineSuggest.provider: "off"` turns it off
 - `code` (Open in VS Code), `open` (Finder, Reveal in Finder, System Default)
 - `stat`, `cp`, `sips` (image preview: copies the image into `mods/vscode-viewer/.cache/`)
 - `node` + `codex app-server` (Codex usage and limit resets, with your Codex login: it reads every 5 min and redeems a reset only when you click Use a reset and confirm)
 - `grep` over `~/.codex/sessions` (Codex usage when the app-server is unavailable)
 
-Only `codex app-server` reaches the network (OpenAI, as Codex itself does), and the inline suggestion provider you choose (the default, Ollama, and LM Studio are local unless you point them at another machine; Codestral, DeepSeek and Mercury receive the code around the cursor).
+Only `codex app-server` reaches the network (OpenAI, as Codex itself does), and the inline suggestion provider you choose (the default, Ollama, and LM Studio are local unless you point them at another machine; Codestral and Mercury receive the code around the cursor).
 
 ## Credits
 

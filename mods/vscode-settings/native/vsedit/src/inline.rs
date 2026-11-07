@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
-pub const PROVIDERS: &[&str] = &["ollama", "lmstudio", "codestral", "deepseek", "mercury", "off"];
+pub const PROVIDERS: &[&str] = &["ollama", "lmstudio", "codestral", "mercury", "off"];
+/// Providers no longer offered, read as "off" (DeepSeek: its request limits); their stored keys are left alone.
+const RETIRED: &[&str] = &["deepseek"];
 /// Hosted FIM APIs, one adapter (POST {model, prompt, suffix, max_tokens, stop, stream} with a Bearer key): label, model,
 /// URL, the key's environment variable, USD per million input / output tokens (editor.inlineSuggest.price overrides).
 pub struct Hosted {
@@ -22,7 +24,6 @@ pub struct Hosted {
 }
 pub const HOSTED: &[Hosted] = &[
     Hosted { id: "codestral", label: "Codestral", model: "codestral-latest", url: "https://api.mistral.ai/v1/fim/completions", env: "MISTRAL_API_KEY", price: (0.3, 0.9) },
-    Hosted { id: "deepseek", label: "DeepSeek", model: "deepseek-flash", url: "https://api.deepseek.com/beta/completions", env: "DEEPSEEK_API_KEY", price: (0.3, 1.2) },
     Hosted { id: "mercury", label: "Mercury", model: "mercury-edit-2", url: "https://api.inceptionlabs.ai/v1/fim/completions", env: "INCEPTION_API_KEY", price: (0.25, 0.75) },
 ];
 /// Requests a day by default for a paid provider (Ollama: unlimited).
@@ -99,8 +100,10 @@ impl Default for InlineSettings {
 pub fn normalize(raw: &Value) -> InlineSettings {
     let get = |k: &str| &raw[format!("editor.inlineSuggest.{k}")];
     let mut v = InlineSettings { enabled: get("enabled").as_bool(), ..InlineSettings::default() };
-    if let Some(p) = get("provider").as_str().filter(|p| PROVIDERS.contains(p)) {
-        v.provider = p.into();
+    match get("provider").as_str() {
+        Some(p) if PROVIDERS.contains(&p) => v.provider = p.into(),
+        Some(p) if RETIRED.contains(&p) => v.provider = "off".into(),
+        _ => {}
     }
     let text = |k: &str| get(k).as_str().map(|s| s.trim().to_string());
     // editor.inlineSuggest.<provider>.model / .endpoint: that provider's own, over the shared ones
@@ -1319,7 +1322,6 @@ mod tests {
         };
         for (p, url, model) in [
             ("codestral", "https://api.mistral.ai/v1/fim/completions", "codestral-latest"),
-            ("deepseek", "https://api.deepseek.com/beta/completions", "deepseek-flash"),
             ("mercury", "https://api.inceptionlabs.ai/v1/fim/completions", "mercury-edit-2"),
         ] {
             let cfg = cfg_of(p, json!({}));
@@ -1329,7 +1331,9 @@ mod tests {
             assert_eq!(r.body["prompt_cache_key"].is_string(), p == "codestral", "{p}");
             assert_eq!((cfg.limit, cfg.hosted), (2000, true), "{p}");
         }
-        assert_eq!(request(&cfg_of("deepseek", json!({ "editor.inlineSuggest.multiline": false })), &cx("", ""), false, "k").body["stop"], json!(["\n"]));
+        assert_eq!(request(&cfg_of("mercury", json!({ "editor.inlineSuggest.multiline": false })), &cx("", ""), false, "k").body["stop"], json!(["\n"]));
+        let retired = cfg_of("deepseek", json!({}));
+        assert_eq!((retired.provider.as_str(), retired.enabled, PROVIDERS.contains(&"deepseek")), ("off", false, false), "DeepSeek, no longer offered, is off");
         assert_eq!(cache_key("/p/x.ts"), "vsedit-".to_string() + &format!("{:08x}", "/p/x.ts".bytes().fold(0x811c9dc5u32, |h, b| (h ^ b as u32).wrapping_mul(0x01000193))));
         assert_eq!(cache_key("/a/b.ts"), "vsedit-cf0c965f", "the JS editor's key for the same file");
         assert_eq!(cfg_of("codestral", json!({ "editor.inlineSuggest.dailyRequestLimit": 0 })).limit, 0);

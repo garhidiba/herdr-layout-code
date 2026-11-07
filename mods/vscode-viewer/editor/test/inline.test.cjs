@@ -443,10 +443,10 @@ test("typing on a blank line after blank lines at the end asks nothing; Alt+\\ s
 });
 
 
-// ---------- hosted providers (Codestral, DeepSeek, Mercury): one FIM adapter, keys, limits, cost ----------
+// ---------- hosted providers (Codestral, Mercury): one FIM adapter, keys, limits, cost ----------
 test("hosted providers: one FIM request shape, their URLs and models, a Bearer key, Codestral's cache key", () => {
   const cfgOf = (provider, extra = {}) => I.config(S.normalize({ "editor.inlineSuggest.provider": provider, ...extra }), () => true);
-  const want = { codestral: ["https://api.mistral.ai/v1/fim/completions", "codestral-latest"], deepseek: ["https://api.deepseek.com/beta/completions", "deepseek-flash"],
+  const want = { codestral: ["https://api.mistral.ai/v1/fim/completions", "codestral-latest"],
     mercury: ["https://api.inceptionlabs.ai/v1/fim/completions", "mercury-edit-2"] };
   for (const [p, [url, model]] of Object.entries(want)) {
     const cfg = cfgOf(p), r = I.request(cfg, { prefix: "a(", suffix: ")", file: "/p/x.ts" }, true, "sk-test");
@@ -455,7 +455,8 @@ test("hosted providers: one FIM request shape, their URLs and models, a Bearer k
     assert.equal("prompt_cache_key" in r.body, p === "codestral", p);
     assert.deepEqual([cfg.limit, cfg.hosted], [2000, true], "2,000 requests a day unless set");
   }
-  assert.deepEqual(I.request(cfgOf("deepseek", { "editor.inlineSuggest.multiline": false }), { prefix: "", suffix: "" }).body.stop, ["\n"]);
+  assert.deepEqual(I.request(cfgOf("mercury", { "editor.inlineSuggest.multiline": false }), { prefix: "", suffix: "" }).body.stop, ["\n"]);
+  assert.deepEqual([cfgOf("deepseek").provider, cfgOf("deepseek").enabled, I.PROVIDERS.includes("deepseek")], ["off", false, false], "DeepSeek, no longer offered, is off");
   assert.equal(I.request(cfgOf("codestral"), { prefix: "", suffix: "", file: "/p/x.ts" }).body.prompt_cache_key, I.cacheKey("/p/x.ts"));
   assert.equal(cfgOf("codestral", { "editor.inlineSuggest.dailyRequestLimit": 0 }).limit, 0);
   assert.equal(cfgOf("ollama").limit, 0);
@@ -508,7 +509,7 @@ test("API keys: the keychain, then the secrets file only at mode 600, then the e
   assert.equal(I.maskKey("sk-abcdefghijklmnop"), "sk-a…mnop");
 });
 
-// A fake hosted FIM API: SSE events in the provider's shape (Mistral's chat-like delta, DeepSeek / Mercury's text).
+// A fake hosted FIM API: SSE events in the provider's shape (Mistral's chat-like delta, Mercury's text).
 async function hostedStub(provider, answer) {
   const s = { bodies: [], auth: [] };
   s.server = http.createServer((req, res) => {
@@ -534,7 +535,7 @@ async function hostedStub(provider, answer) {
 test("hosted providers in the editor: streamed blocks cut, fences stripped, prose dropped; no key says how to add one", async () => {
   fs.rmSync(process.env.VSEDIT_SECRETS, { force: true }); fs.rmSync(process.env.FAKE_KEYCHAIN, { force: true });
   const replies = { q: "```js\nuit();\n```", p: "Here's a breakdown of each service:", i: "f (a) {\n    go();\n  }\n  stop();" };
-  for (const provider of ["codestral", "deepseek", "mercury"]) {
+  for (const provider of ["codestral", "mercury"]) {
     const s = await hostedStub(provider, (b) => replies[b.prompt.at(-1)] ?? "");
     const env = I.HOSTED[provider].env;
     process.env[env] = "sk-good";
@@ -553,12 +554,12 @@ test("hosted providers in the editor: streamed blocks cut, fences stripped, pros
     delete process.env[env];
     s.server.close();
   }
-  const ed = await editorWith("http://127.0.0.1:9/fim", ["x = "], { "editor.inlineSuggest.provider": "deepseek" });
-  assert.equal(ed.inlineStatus().text, "DeepSeek: no API key");
+  const ed = await editorWith("http://127.0.0.1:9/fim", ["x = "], { "editor.inlineSuggest.provider": "mercury" });
+  assert.equal(ed.inlineStatus().text, "Mercury: no API key");
   ed.inlineTrigger();
-  assert.match(ed.message.text, /DeepSeek: no API key: security add-generic-password -U -s herdr-vscode-deepseek -a herdr -w <key>/);
+  assert.match(ed.message.text, /Mercury: no API key: security add-generic-password -U -s herdr-vscode-mercury -a herdr -w <key>/);
 });
-const LABEL = { codestral: "Codestral", deepseek: "DeepSeek", mercury: "Mercury" };
+const LABEL = { codestral: "Codestral", mercury: "Mercury" };
 
 test("a refused key is an error in the status bar", async () => {
   const s = await hostedStub("mercury", () => "x");

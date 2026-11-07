@@ -1352,7 +1352,7 @@ def run_inline_suggest(tmp):
 
 
 class FakeHosted(http.server.ThreadingHTTPServer):
-    """A hosted FIM API (Codestral / DeepSeek / Mercury) on 127.0.0.1: SSE events in the provider's shape (Mistral's
+    """A hosted FIM API (Codestral / Mercury) on 127.0.0.1: SSE events in the provider's shape (Mistral's
     chat-like delta, the others' text), the reply chosen as FakeOllama's by how the prompt ends; 401 for a wrong key."""
     def __init__(self, provider):
         self.requests, self.auth = [], []
@@ -1387,10 +1387,10 @@ class FakeHosted(http.server.ThreadingHTTPServer):
 
 
 def run_inline_hosted(tmp):
-    """Codestral, DeepSeek and Mercury through fake APIs: the key (from the environment here; the keychain is a stub
+    """Codestral and Mercury through fake APIs: the key (from the environment here; the keychain is a stub
     that has none) goes as a Bearer header, a block is cut after its closing brace, a fenced reply shows without its
     fences, prose never shows; with no key the status bar says so."""
-    for provider, env_var in [("codestral", "MISTRAL_API_KEY"), ("deepseek", "DEEPSEEK_API_KEY"), ("mercury", "INCEPTION_API_KEY")]:
+    for provider, env_var in [("codestral", "MISTRAL_API_KEY"), ("mercury", "INCEPTION_API_KEY")]:
         stub = FakeHosted(provider)
         settings = os.path.join(tmp, "hosted-" + provider, "vscode-settings.json")
         os.makedirs(os.path.dirname(settings))

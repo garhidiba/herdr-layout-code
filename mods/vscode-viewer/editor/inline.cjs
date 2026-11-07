@@ -7,15 +7,16 @@ const os = require("os");
 const path = require("path");
 const { spawnSync } = require("child_process");
 
-const PROVIDERS = ["ollama", "lmstudio", "codestral", "deepseek", "mercury", "off"];
-const LABELS = { ollama: "Ollama", lmstudio: "LM Studio", codestral: "Codestral", deepseek: "DeepSeek", mercury: "Mercury", off: "Inline Suggestions" };
-const MODELS = { ollama: "qwen2.5-coder:1.5b-base", lmstudio: "qwen2.5-coder-1.5b", codestral: "codestral-latest", deepseek: "deepseek-flash", mercury: "mercury-edit-2" };
+const PROVIDERS = ["ollama", "lmstudio", "codestral", "mercury", "off"];
+// Providers no longer offered, read as "off" (DeepSeek: its request limits); their stored keys are left alone.
+const RETIRED = ["deepseek"];
+const LABELS = { ollama: "Ollama", lmstudio: "LM Studio", codestral: "Codestral", mercury: "Mercury", off: "Inline Suggestions" };
+const MODELS = { ollama: "qwen2.5-coder:1.5b-base", lmstudio: "qwen2.5-coder-1.5b", codestral: "codestral-latest", mercury: "mercury-edit-2" };
 const ENDPOINTS = { ollama: "http://127.0.0.1:11434", lmstudio: "http://127.0.0.1:1234", codestral: "https://api.mistral.ai/v1/fim/completions",
-  deepseek: "https://api.deepseek.com/beta/completions", mercury: "https://api.inceptionlabs.ai/v1/fim/completions" };
+  mercury: "https://api.inceptionlabs.ai/v1/fim/completions" };
 // Hosted FIM APIs, one adapter (POST {model, prompt, suffix, max_tokens, stop, stream} with a Bearer key): the key's
 // environment variable and the price in USD per million input / output tokens (editor.inlineSuggest.price overrides).
-const HOSTED = { codestral: { env: "MISTRAL_API_KEY", price: [0.3, 0.9] }, deepseek: { env: "DEEPSEEK_API_KEY", price: [0.3, 1.2] },
-  mercury: { env: "INCEPTION_API_KEY", price: [0.25, 0.75] } };
+const HOSTED = { codestral: { env: "MISTRAL_API_KEY", price: [0.3, 0.9] }, mercury: { env: "INCEPTION_API_KEY", price: [0.25, 0.75] } };
 const HOSTED_LIMIT = 2000; // requests a day by default for a paid provider (Ollama: unlimited)
 const MAX_FILE_CHARS = 1_000_000; // no suggestions in bigger files
 const TIMEOUT = 20000;
@@ -27,7 +28,7 @@ const EXCLUDE = [".env", ".env.*", "*.env", ".envrc", "*.pem", "*.key", "*.p12",
 const P = "editor.inlineSuggest.";
 const DEFAULTS = {
   [P + "enabled"]: null,           // null: on when the provider can run here (Ollama installed, …)
-  [P + "provider"]: "ollama",      // "ollama" | "lmstudio" | "codestral" | "deepseek" | "mercury" | "off"
+  [P + "provider"]: "ollama",      // "ollama" | "lmstudio" | "codestral" | "mercury" | "off"
   [P + "model"]: "",               // "": the provider's default (Ollama: qwen2.5-coder:1.5b-base)
   [P + "endpoint"]: "",            // "": the provider's default (ENDPOINTS: Ollama's server, the hosted APIs' FIM URL)
   // editor.inlineSuggest.<provider>.model / .endpoint: that provider's own, over the two above (the Settings dialog's)
@@ -51,6 +52,7 @@ function normalize(raw = {}) {
   const get = (k) => raw[P + k];
   if (typeof get("enabled") === "boolean") v[P + "enabled"] = get("enabled");
   if (PROVIDERS.includes(get("provider"))) v[P + "provider"] = get("provider");
+  else if (RETIRED.includes(get("provider"))) v[P + "provider"] = "off";
   for (const k of ["model", "endpoint", "keepAlive"]) if (typeof get(k) === "string") v[P + k] = get(k).trim();
   for (const k of ["model", "endpoint"]) { const own = get(`${v[P + "provider"]}.${k}`); if (typeof own === "string" && own.trim()) v[P + k] = own.trim(); }
   if (["auto", "manual"].includes(get("trigger"))) v[P + "trigger"] = get("trigger");
@@ -466,7 +468,7 @@ module.exports = { PROVIDERS, MODELS, DEFAULTS, EXCLUDE, MAX_FILE_CHARS, normali
 // --remove-key P; --test P [model] [endpoint]: one short FIM request, {ok, ms} | {ok: false, error};
 // --models P [endpoint]: {models, recommended, pulled} (a local server's models, the FIM ones recommended; pulled: null
 // when the server didn't answer).
-const CATALOG = { codestral: ["codestral-latest", "codestral-2508"], deepseek: ["deepseek-flash"], mercury: ["mercury-edit-2"] };
+const CATALOG = { codestral: ["codestral-latest", "codestral-2508"], mercury: ["mercury-edit-2"] };
 // Local servers: where they list their models, the names in that reply, the models recommended without asking, and
 // which listed ones to recommend (a FIM template, and not a chat / instruct model).
 const LOCAL = {
