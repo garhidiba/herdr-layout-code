@@ -16,6 +16,12 @@ test("one link per machine, named as hc allows", () => {
   assert.equal(linkName("orangepi"), linkName("orangepi"));
   assert.notEqual(linkName("orangepi"), linkName("raspberry"));
   assert.ok(linkName("Ünïcode machine.local").length <= 32);
+  // FNV-1a over UTF-8, and no TextEncoder (Herdr's QuickJS has none)
+  const fnv = (s) => { let h = 0x811c9dc5; for (const c of new TextEncoder().encode(s)) h = Math.imul(h ^ c, 0x01000193) >>> 0; return `vscode-link-${h.toString(16).padStart(8, "0")}`; };
+  const names = ["orangepi", "nas-docker", "Ünïcode machine.local", "한글"], want = names.map(fnv);
+  const saved = globalThis.TextEncoder;
+  delete globalThis.TextEncoder;
+  try { assert.deepEqual(names.map(linkName), want); } finally { globalThis.TextEncoder = saved; }
 });
 
 test("the machines with an editor open: remote editor terminals only", () => {

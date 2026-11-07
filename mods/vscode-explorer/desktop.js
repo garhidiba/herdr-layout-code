@@ -16,10 +16,16 @@ export const MARK = `d="$HOME/${DESKTOPS}"; mkdir -p "$d" && printf '%s\\n' "$1"
 // PATH may leave node out.
 export const LINK = 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH" HERDR_APP_HOME=$1; export PATH HERDR_APP_HOME; shift; exec node "$@"';
 
-// hc terminal names are 1-32 of a-z 0-9 - _: one per machine, from its name's FNV-1a.
+// hc terminal names are 1-32 of a-z 0-9 - _: one per machine, from its name's FNV-1a over UTF-8 bytes (read off
+// encodeURIComponent: Herdr's QuickJS has no TextEncoder).
 export function linkName(machine) {
   let h = 0x811c9dc5;
-  for (const c of new TextEncoder().encode(machine)) h = Math.imul(h ^ c, 0x01000193) >>> 0;
+  const s = encodeURIComponent(machine);
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i] === "%" ? parseInt(s.slice(i + 1, i + 3), 16) : s.charCodeAt(i);
+    if (s[i] === "%") i += 2;
+    h = Math.imul(h ^ c, 0x01000193) >>> 0;
+  }
   return `vscode-link-${h.toString(16).padStart(8, "0")}`;
 }
 
