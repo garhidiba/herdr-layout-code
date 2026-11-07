@@ -1480,11 +1480,12 @@ class Editor {
     if (cfg.limit && I.usageOf(cfg.key).requests >= cfg.limit) return `${cfg.label}: today's limit of ${cfg.limit} requests is reached (editor.inlineSuggest.dailyRequestLimit)`;
     return null;
   }
-  // A hosted provider's API key (inline.cjs apiKey), looked up again at most every 10 s while there is none.
+  // The provider's API key (inline.cjs apiKey; "" when none). A hosted one is looked up again at most every 10 s while
+  // there is none; a local server's (optional) after a failed request.
   inlineKeyOf(cfg) {
     let k = this.inline.keys.get(cfg.provider);
-    if (!k || (!k.key && Date.now() - k.at > 10000)) this.inline.keys.set(cfg.provider, (k = { ...I.apiKey(cfg.provider), at: Date.now() }));
-    return k.key;
+    if (!k || (cfg.hosted && !k.key && Date.now() - k.at > 10000)) this.inline.keys.set(cfg.provider, (k = { ...I.apiKey(cfg.provider), at: Date.now() }));
+    return k.key ?? "";
   }
   textLength() {
     if (this._length?.buf !== this.buf || this._length.version !== this.buf.version) {
@@ -1540,10 +1541,11 @@ class Editor {
       if (r.text && r.text !== this.inline.ghost?.items[0]) { this.inlineShow([r.text], at, version); this.redraw(); }
       return cfg.multiline && I.blockCut(text, ctx, false).done;
     };
-    try { const { status, json } = await I.postStream(I.request(cfg, ctx, true, cfg.hosted ? this.inlineKeyOf(cfg) : ""), ac.signal, partial); texts = I.reply(cfg, status, json); }
+    try { const { status, json } = await I.postStream(I.request(cfg, ctx, true, this.inlineKeyOf(cfg)), ac.signal, partial); texts = I.reply(cfg, status, json); }
     catch (e) { error = I.failure(cfg, e); if (error === null) return; } // aborted: a newer request or an edit
     if (gen !== this.inline.gen) return;
     if (error === I.missingText(cfg)) this.inline.models.set(cfg.key, { missing: true, chat: false });
+    if (error && !cfg.hosted) this.inline.keys.delete(cfg.provider); // the server may want a key saved since
     Object.assign(this.inline, { abort: null, busy: false, error });
     const results = texts.map(t => I.clean(t, ctx)), good = results.filter(r => r.text).map(r => r.text);
     I.recordUsage(cfg.key, { inChars: ctx.prefix.length + ctx.suffix.length, outChars: texts.join("").length, ms: error ? null : Date.now() - t0 });
@@ -1607,13 +1609,14 @@ class Editor {
   // Once per provider and model (Ollama): asks whether the model is pulled and a chat model, then loads it in the
   // background, so the first suggestion is quick.
   inlineWarmup() {
-    const cfg = this.inlineCfg, req = cfg.enabled && !this.inline.warmed.has(cfg.key) && I.show(cfg);
+    const cfg = this.inlineCfg, key = cfg.enabled && cfg.provider === "ollama" ? this.inlineKeyOf(cfg) : "";
+    const req = cfg.enabled && !this.inline.warmed.has(cfg.key) && I.show(cfg, key);
     if (!req) return;
     this.inline.warmed.add(cfg.key);
     I.post(req).then(({ status, json }) => {
       const info = I.modelInfo(status, json);
       this.inline.models.set(cfg.key, info);
-      if (!info?.missing) I.post(I.warmup(cfg)).catch(() => {});
+      if (!info?.missing) I.post(I.warmup(cfg, key)).catch(() => {});
       this.redraw();
     }).catch(() => {});
   }

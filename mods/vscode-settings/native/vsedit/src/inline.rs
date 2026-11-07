@@ -31,6 +31,15 @@ const HOSTED_LIMIT: u64 = 2000;
 fn hosted(provider: &str) -> Option<&'static Hosted> {
     HOSTED.iter().find(|h| h.id == provider)
 }
+/// The environment variable holding the provider's key: a hosted API's, or a local server's optional one (a proxy or a
+/// protected server in front of it).
+fn key_env(provider: &str) -> &'static str {
+    match provider {
+        "ollama" => "OLLAMA_API_KEY",
+        "lmstudio" => "LMSTUDIO_API_KEY",
+        _ => hosted(provider).map_or("", |h| h.env),
+    }
+}
 /// Ollama's default model: a base (FIM) model; 1.5B answers in ~0.1–0.6 s here, 7B in 0.3–2.5 s (DESIGN.md).
 pub const OLLAMA_MODEL: &str = "qwen2.5-coder:1.5b-base";
 /// LM Studio's default model: the same base model under LM Studio's name.
@@ -635,8 +644,13 @@ fn fim_prompt(t: &Template, prefix: &str, suffix: &str) -> String {
     format!("{}{a}{}{b}{}", t.pre, t.mid, t.end)
 }
 
-fn json_headers() -> Vec<(String, String)> {
-    vec![("Content-Type".into(), "application/json".into())]
+/// A request's headers: a Bearer key only when there is one.
+fn headers(key: &str) -> Vec<(String, String)> {
+    let mut h = vec![("Content-Type".into(), "application/json".into())];
+    if !key.is_empty() {
+        h.push(("Authorization".into(), format!("Bearer {key}")));
+    }
+    h
 }
 
 /// A short stable id of a file (FNV-1a), Codestral's prompt_cache_key: the same file reuses the provider's prompt cache.
@@ -645,7 +659,7 @@ pub fn cache_key(file: &str) -> String {
 }
 
 /// The HTTP request for a suggestion (stream: Ollama's NDJSON lines or the hosted APIs' SSE events, read by
-/// post_stream); `key`: a hosted provider's API key.
+/// post_stream); `key`: the provider's API key (optional for a local server: "" sends none).
 pub fn request(cfg: &Config, ctx: &Context, stream: bool, key: &str) -> Request {
     if cfg.hosted {
         let mut body = json!({ "model": cfg.model, "prompt": ctx.prefix, "suffix": ctx.suffix, "max_tokens": cfg.max_tokens, "stream": stream });
@@ -655,9 +669,7 @@ pub fn request(cfg: &Config, ctx: &Context, stream: bool, key: &str) -> Request 
         if cfg.provider == "codestral" && !ctx.file.is_empty() {
             body["prompt_cache_key"] = json!(cache_key(&ctx.file));
         }
-        let mut headers = json_headers();
-        headers.push(("Authorization".into(), format!("Bearer {key}")));
-        return Request { url: cfg.endpoint.clone(), headers, body };
+        return Request { url: cfg.endpoint.clone(), headers: headers(key), body };
     }
     let t = template(&cfg.model);
     let mut stop: Vec<&str> = t.map_or(vec![], |t| t.stop.to_vec());
@@ -678,7 +690,7 @@ pub fn request(cfg: &Config, ctx: &Context, stream: bool, key: &str) -> Request 
         if !stop.is_empty() {
             body["stop"] = json!(stop);
         }
-        return Request { url: format!("{}/v1/completions", cfg.endpoint), headers: json_headers(), body };
+        return Request { url: format!("{}/v1/completions", cfg.endpoint), headers: headers(key), body };
     }
     let mut options = json!({ "num_predict": cfg.max_tokens, "temperature": 0.2 });
     if !stop.is_empty() {
@@ -695,21 +707,21 @@ pub fn request(cfg: &Config, ctx: &Context, stream: bool, key: &str) -> Request 
             body["suffix"] = json!(ctx.suffix);
         }
     }
-    Request { url: format!("{}/api/generate", cfg.endpoint), headers: json_headers(), body }
+    Request { url: format!("{}/api/generate", cfg.endpoint), headers: headers(key), body }
 }
 
 /// Loads the model ahead of the first suggestion (Ollama keeps it keepAlive); None when the provider needs none.
-pub fn warmup(cfg: &Config) -> Option<Request> {
+pub fn warmup(cfg: &Config, key: &str) -> Option<Request> {
     (cfg.provider == "ollama").then(|| Request {
         url: format!("{}/api/generate", cfg.endpoint),
-        headers: json_headers(),
+        headers: headers(key),
         body: json!({ "model": cfg.model, "prompt": "", "stream": false, "keep_alive": cfg.keep_alive, "options": { "num_predict": 1 } }),
     })
 }
 
 /// Asks Ollama about the model (/api/show), before the warm-up; None when the provider has nothing to ask.
-pub fn show(cfg: &Config) -> Option<Request> {
-    (cfg.provider == "ollama").then(|| Request { url: format!("{}/api/show", cfg.endpoint), headers: json_headers(), body: json!({ "model": cfg.model }) })
+pub fn show(cfg: &Config, key: &str) -> Option<Request> {
+    (cfg.provider == "ollama").then(|| Request { url: format!("{}/api/show", cfg.endpoint), headers: headers(key), body: json!({ "model": cfg.model }) })
 }
 
 /// What Ollama said about the model: not pulled, or a chat template (.Messages).
@@ -785,8 +797,13 @@ pub fn reply(cfg: &Config, status: u16, json: &Value) -> Result<Vec<String>, Str
         if get_model(&cfg.provider, "").is_some() && (lower.contains("not found") || lower.contains("invalid model")) {
             return Err(missing_text(cfg));
         }
-        if cfg.hosted && (status == 401 || status == 403) {
-            return Err(format!("{}: the API key was refused (HTTP {status}); {}", cfg.label, key_help(&cfg.provider)));
+        // a hosted API refused the key; a local server (behind a proxy, or protected) wants one or refused it
+        if status == 401 || status == 403 {
+            return Err(if cfg.hosted {
+                format!("{}: the API key was refused (HTTP {status}); {}", cfg.label, key_help(&cfg.provider))
+            } else {
+                format!("{}: the server needs an API key or refused it (HTTP {status}); add one: {}", cfg.label, key_how(&cfg.provider))
+            });
         }
         return Err(match err {
             Some(e) => format!("{}: {}", cfg.label, e.chars().take(160).collect::<String>()),
@@ -808,10 +825,13 @@ fn security_bin() -> Option<PathBuf> {
 
 /// How to give a provider its key, for the status bar.
 pub fn key_help(provider: &str) -> String {
-    let env = hosted(provider).map_or("", |h| h.env);
+    format!("no API key: {}", key_how(provider))
+}
+fn key_how(provider: &str) -> String {
     format!(
-        "no API key: security add-generic-password -U -s herdr-vscode-{provider} -a herdr -w <key> (or Settings › Inline Suggestions; elsewhere {} with {{\"{provider}\": \"<key>\"}}, chmod 600; or {env})",
-        secrets_file().display()
+        "security add-generic-password -U -s herdr-vscode-{provider} -a herdr -w <key> (or Settings › Inline Suggestions; elsewhere {} with {{\"{provider}\": \"<key>\"}}, chmod 600; or {})",
+        secrets_file().display(),
+        key_env(provider)
     )
 }
 
@@ -837,7 +857,7 @@ pub fn api_key(provider: &str) -> Result<(String, &'static str), bool> {
             return Ok((key, "file"));
         }
     }
-    match hosted(provider).and_then(|h| std::env::var(h.env).ok()).map(|k| k.trim().to_string()).filter(|k| !k.is_empty()) {
+    match std::env::var(key_env(provider)).ok().map(|k| k.trim().to_string()).filter(|k| !k.is_empty()) {
         Some(key) => Ok((key, "env")),
         None => Err(loose),
     }
@@ -1087,8 +1107,8 @@ exit 1
     std::env::set_var("VSEDIT_SECURITY", &path);
     std::env::set_var("FAKE_KEYCHAIN", dir.join("keychain"));
     std::env::set_var("VSEDIT_SECRETS", dir.join("secrets.json"));
-    for h in HOSTED {
-        std::env::remove_var(h.env);
+    for env in PROVIDERS.iter().map(|p| key_env(p)).filter(|e| !e.is_empty()) {
+        std::env::remove_var(env);
     }
     path
 }
@@ -1241,7 +1261,7 @@ mod tests {
         assert!(!chat_model(&instruct, None), "not asked yet");
         assert!(chat_model(&instruct, Some(&None)), "unknown: by its name");
         assert!(!chat_model(&cfg, Some(&None)));
-        assert_eq!(show(&cfg).unwrap().url, "http://127.0.0.1:11434/api/show");
+        assert_eq!(show(&cfg, "").unwrap().url, "http://127.0.0.1:11434/api/show");
     }
 
     #[test]
@@ -1257,7 +1277,7 @@ mod tests {
         assert!(!r.body["options"]["stop"].as_array().unwrap().contains(&json!("\n")));
         let one = Config { multiline: false, ..cfg.clone() };
         assert!(!request(&one, &Context { next_line: true, ..cx("", "") }, false, "").body["options"]["stop"].as_array().unwrap().contains(&json!("\n")));
-        assert_eq!(warmup(&cfg).unwrap().body["options"]["num_predict"], json!(1));
+        assert_eq!(warmup(&cfg, "").unwrap().body["options"]["num_predict"], json!(1));
     }
 
     #[test]
@@ -1413,6 +1433,63 @@ mod tests {
             reply(&cfg, 404, &json!({ "error": { "message": "Model 'x' not found" } })),
             Err("LM Studio: model qwen2.5-coder-1.5b not found (download and load it in LM Studio, or run: lms get qwen2.5-coder-1.5b)".into())
         );
-        assert!(warmup(&cfg).is_none() && show(&cfg).is_none());
+        assert!(warmup(&cfg, "").is_none() && show(&cfg, "").is_none());
+    }
+
+    /// A protected local server for `n` requests: 401 unless `Bearer <need>`; returns each request's Authorization header.
+    fn guarded_server(need: &'static str, n: usize) -> (String, std::thread::JoinHandle<Vec<Option<String>>>) {
+        use std::io::{Read, Write};
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://127.0.0.1:{}", server.local_addr().unwrap().port());
+        let seen = std::thread::spawn(move || {
+            (0..n)
+                .map(|_| {
+                    let (mut s, _) = server.accept().unwrap();
+                    let (mut buf, mut req) = (vec![0; 65536], String::new());
+                    while !req.contains("\r\n\r\n") || !req.ends_with('}') {
+                        let n = s.read(&mut buf).unwrap();
+                        req += &String::from_utf8_lossy(&buf[..n]);
+                    }
+                    let auth = req.lines().find_map(|l| l.strip_prefix("Authorization: ").map(String::from));
+                    let (status, body) = if auth.as_deref() == Some(&format!("Bearer {need}")) { ("200 OK", r#"{"response":" 1","done":true}"#) } else { ("401 Unauthorized", r#"{"error":"Unauthorized"}"#) };
+                    write!(s, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+                    auth
+                })
+                .collect()
+        });
+        (endpoint, seen)
+    }
+
+    #[test]
+    fn a_local_server_gets_its_own_bearer_key_only_when_one_is_stored_and_a_401_says_it_needs_one() {
+        let _env = test_env_lock();
+        let dir = std::env::temp_dir().join(format!("vsedit-local-keys-{}", std::process::id()));
+        fake_security(&dir);
+        for p in ["ollama", "lmstudio"] {
+            let cfg = config(&normalize(&json!({ "editor.inlineSuggest.provider": p })), |_| true);
+            assert_eq!(request(&cfg, &cx("a = ", ""), true, "").headers, vec![("Content-Type".to_string(), "application/json".to_string())], "{p}: no key, no header");
+            assert!(request(&cfg, &cx("a = ", ""), true, "fake-key").headers.contains(&("Authorization".into(), "Bearer fake-key".into())), "{p}");
+            let e = reply(&cfg, 403, &json!({})).unwrap_err();
+            assert!(e.starts_with(&format!("{}: the server needs an API key or refused it (HTTP 403); add one: security add-generic-password -U -s herdr-vscode-{p} ", cfg.label)), "{e}");
+        }
+        let ollama = config(&normalize(&json!({})), |_| true);
+        assert!(show(&ollama, "fake-key").unwrap().headers.contains(&("Authorization".into(), "Bearer fake-key".into())));
+        assert!(warmup(&ollama, "fake-key").unwrap().headers.contains(&("Authorization".into(), "Bearer fake-key".into())));
+        assert!(key_help("ollama").ends_with("or OLLAMA_API_KEY)") && key_help("lmstudio").ends_with("or LMSTUDIO_API_KEY)"));
+        // each provider's own key: LM Studio's keychain item is not Ollama's, nor Ollama's variable LM Studio's
+        std::fs::write(dir.join("keychain"), "herdr-vscode-lmstudio\tlm-fake\n").unwrap();
+        assert_eq!(api_key("ollama"), Err(false));
+        std::env::set_var("OLLAMA_API_KEY", "ol-fake");
+        assert_eq!((api_key("ollama"), api_key("lmstudio")), (Ok(("ol-fake".into(), "env")), Ok(("lm-fake".into(), "keychain"))));
+        std::env::remove_var("OLLAMA_API_KEY");
+        // through curl: no key sends no header and the 401 says why; the stored key passes
+        let (endpoint, seen) = guarded_server("lm-fake", 2);
+        let cfg = config(&normalize(&json!({ "editor.inlineSuggest.provider": "lmstudio", "editor.inlineSuggest.lmstudio.endpoint": endpoint })), |_| true);
+        let (status, v) = post(&request(&cfg, &cx("a = ", ""), false, ""), &Cancel::default()).unwrap();
+        assert!(reply(&cfg, status, &v).unwrap_err().starts_with("LM Studio: the server needs an API key or refused it (HTTP 401)"));
+        let (status, v) = post(&request(&cfg, &cx("a = ", ""), false, &api_key("lmstudio").unwrap().0), &Cancel::default()).unwrap();
+        assert_eq!(reply(&cfg, status, &v), Ok(vec![" 1".to_string()]));
+        assert_eq!(seen.join().unwrap(), vec![None, Some("Bearer lm-fake".to_string())]);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

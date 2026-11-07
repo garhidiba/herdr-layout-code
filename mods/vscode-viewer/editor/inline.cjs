@@ -17,6 +17,9 @@ const ENDPOINTS = { ollama: "http://127.0.0.1:11434", lmstudio: "http://127.0.0.
 // Hosted FIM APIs, one adapter (POST {model, prompt, suffix, max_tokens, stop, stream} with a Bearer key): the key's
 // environment variable and the price in USD per million input / output tokens (editor.inlineSuggest.price overrides).
 const HOSTED = { codestral: { env: "MISTRAL_API_KEY", price: [0.3, 0.9] }, mercury: { env: "INCEPTION_API_KEY", price: [0.25, 0.75] } };
+// A local server's optional key (a proxy or a protected server in front of it): its environment variable.
+const LOCAL_KEY_ENV = { ollama: "OLLAMA_API_KEY", lmstudio: "LMSTUDIO_API_KEY" };
+const keyEnv = (provider) => HOSTED[provider]?.env ?? LOCAL_KEY_ENV[provider];
 const HOSTED_LIMIT = 2000; // requests a day by default for a paid provider (Ollama: unlimited)
 const MAX_FILE_CHARS = 1_000_000; // no suggestions in bigger files
 const TIMEOUT = 20000;
@@ -267,6 +270,8 @@ const TEMPLATES = [
 const template = (model) => TEMPLATES.find(t => t.re.test(model)) ?? null;
 const fimPrompt = (t, prefix, suffix) => t.spm ? t.pre + suffix + t.mid + prefix + t.end : t.pre + prefix + t.mid + suffix + t.end;
 const JSON_HEADERS = { "Content-Type": "application/json" };
+// A request's headers: a Bearer key only when there is one.
+const headers = (key = "") => key ? { ...JSON_HEADERS, Authorization: `Bearer ${key}` } : JSON_HEADERS;
 // A short stable id of a file (FNV-1a), Codestral's prompt_cache_key: the same file reuses the provider's prompt cache.
 function cacheKey(file) {
   let h = 0x811c9dc5;
@@ -274,37 +279,37 @@ function cacheKey(file) {
   return `vsedit-${h.toString(16).padStart(8, "0")}`;
 }
 // The HTTP request for a suggestion: { url, headers, body } (stream: Ollama's NDJSON lines or the hosted APIs' SSE
-// events, read by postStream). key: a hosted provider's API key.
+// events, read by postStream). key: the provider's API key (optional for a local server: "" sends none).
 function request(cfg, ctx, stream = false, key = "") {
   if (cfg.hosted) {
     const stop = cfg.multiline || ctx.nextLine ? [] : ["\n"];
-    return { url: cfg.endpoint, headers: { ...JSON_HEADERS, Authorization: `Bearer ${key}` },
+    return { url: cfg.endpoint, headers: headers(key),
       body: { model: cfg.model, prompt: ctx.prefix, suffix: ctx.suffix, max_tokens: cfg.maxTokens, stream, ...(stop.length ? { stop } : {}),
         ...(cfg.provider === "codestral" && ctx.file ? { prompt_cache_key: cacheKey(ctx.file) } : {}) } };
   }
   const t = template(cfg.model), stop = [...(t?.stop ?? []), ...(cfg.multiline || ctx.nextLine ? [] : ["\n"])];
   if (cfg.provider === "ollama") {
     const prompt = t ? { prompt: fimPrompt(t, ctx.prefix, ctx.suffix), raw: true } : { prompt: ctx.prefix, suffix: ctx.suffix };
-    return { url: `${cfg.endpoint}/api/generate`, headers: JSON_HEADERS,
+    return { url: `${cfg.endpoint}/api/generate`, headers: headers(key),
       body: { model: cfg.model, ...prompt, stream, keep_alive: cfg.keepAlive, options: { num_predict: cfg.maxTokens, temperature: 0.2, ...(stop.length ? { stop } : {}) } } };
   }
   // LM Studio's OpenAI-compatible /v1/completions applies no prompt template, so the FIM prompt goes as is; its docs
   // name no `suffix`, sent only for a model without a known template.
   if (cfg.provider === "lmstudio") {
     const prompt = t ? { prompt: fimPrompt(t, ctx.prefix, ctx.suffix) } : { prompt: ctx.prefix, suffix: ctx.suffix };
-    return { url: `${cfg.endpoint}/v1/completions`, headers: JSON_HEADERS,
+    return { url: `${cfg.endpoint}/v1/completions`, headers: headers(key),
       body: { model: cfg.model, ...prompt, max_tokens: cfg.maxTokens, temperature: 0.2, stream, ...(stop.length ? { stop } : {}) } };
   }
   throw new Error(`Unknown inline suggestion provider: ${cfg.provider}`);
 }
 // Loads the model ahead of the first suggestion (Ollama keeps it keepAlive): null when the provider needs none.
-function warmup(cfg) {
+function warmup(cfg, key = "") {
   if (cfg.provider !== "ollama") return null;
-  return { url: `${cfg.endpoint}/api/generate`, headers: JSON_HEADERS,
+  return { url: `${cfg.endpoint}/api/generate`, headers: headers(key),
     body: { model: cfg.model, prompt: "", stream: false, keep_alive: cfg.keepAlive, options: { num_predict: 1 } } };
 }
 // Asks Ollama about the model (/api/show), before the warm-up: null when the provider has nothing to ask.
-const show = (cfg) => cfg.provider === "ollama" ? { url: `${cfg.endpoint}/api/show`, headers: JSON_HEADERS, body: { model: cfg.model } } : null;
+const show = (cfg, key = "") => cfg.provider === "ollama" ? { url: `${cfg.endpoint}/api/show`, headers: headers(key), body: { model: cfg.model } } : null;
 // show's reply -> { missing: not pulled, chat: a chat template (.Messages) } | null (the server didn't say).
 function modelInfo(status, json) {
   if (status === 404 || /not found/i.test(json?.error ?? "")) return { missing: true, chat: false };
@@ -328,7 +333,7 @@ function reply(cfg, status, json) {
   const err = errorText(json);
   if (status >= 400 || err) {
     if (GET_MODEL[cfg.provider] && /not found|invalid model/i.test(err ?? "")) throw new Error(missingText(cfg));
-    if (cfg.hosted && (status === 401 || status === 403)) throw new Error(`${cfg.label}: the API key was refused (HTTP ${status}); ${keyHelp(cfg.provider)}`);
+    if (status === 401 || status === 403) throw new Error(refused(cfg, status));
     throw new Error(`${cfg.label}: ${err ? err.slice(0, 160) : `HTTP ${status}`}`);
   }
   return [replyText(json) ?? ""];
@@ -386,8 +391,12 @@ const secretsFile = () => process.env.VSEDIT_SECRETS ?? path.join(herdrHome(), "
 const securityBin = () => process.env.VSEDIT_SECURITY ?? (process.platform === "darwin" ? "/usr/bin/security" : null);
 const service = (provider) => `herdr-vscode-${provider}`;
 // How to give a provider its key, for the status bar.
-const keyHelp = (provider) => `no API key: security add-generic-password -U -s ${service(provider)} -a herdr -w <key> ` +
-  `(or Settings › Inline Suggestions; elsewhere ${secretsFile()} with {"${provider}": "<key>"}, chmod 600; or ${HOSTED[provider].env})`;
+const keyHow = (provider) => `security add-generic-password -U -s ${service(provider)} -a herdr -w <key> ` +
+  `(or Settings › Inline Suggestions; elsewhere ${secretsFile()} with {"${provider}": "<key>"}, chmod 600; or ${keyEnv(provider)})`;
+const keyHelp = (provider) => `no API key: ${keyHow(provider)}`;
+// HTTP 401 / 403: a hosted API refused the key; a local server (behind a proxy, or protected) wants one or refused it.
+const refused = (cfg, status) => cfg.hosted ? `${cfg.label}: the API key was refused (HTTP ${status}); ${keyHelp(cfg.provider)}`
+  : `${cfg.label}: the server needs an API key or refused it (HTTP ${status}); add one: ${keyHow(cfg.provider)}`;
 // The provider's key: { key, from: "keychain" | "file" | "env" } | { key: null, loose: the file is readable by others }.
 // The file is read only when no one else may read it.
 function apiKey(provider) {
@@ -401,7 +410,7 @@ function apiKey(provider) {
     if (fs.statSync(secretsFile()).mode & 0o077) loose = true;
     else { const k = JSON.parse(fs.readFileSync(secretsFile(), "utf8"))?.[provider]; if (typeof k === "string" && k.trim()) return { key: k.trim(), from: "file" }; }
   } catch {}
-  const env = process.env[HOSTED[provider].env];
+  const env = process.env[keyEnv(provider)];
   return env?.trim() ? { key: env.trim(), from: "env" } : { key: null, loose };
 }
 // The key with its middle hidden, for the Settings dialog: "sk-a…9xQz".
@@ -467,7 +476,7 @@ module.exports = { PROVIDERS, MODELS, DEFAULTS, EXCLUDE, MAX_FILE_CHARS, normali
 // --key P: {from, masked} | {from: null, help}; --save-key P <file>: stores the key the file holds, deletes the file;
 // --remove-key P; --test P [model] [endpoint]: one short FIM request, {ok, ms} | {ok: false, error};
 // --models P [endpoint]: {models, recommended, pulled} (a local server's models, the FIM ones recommended; pulled: null
-// when the server didn't answer).
+// when the server didn't answer). A local server's key is optional: --test and --models send it only when one is stored.
 const CATALOG = { codestral: ["codestral-latest", "codestral-2508"], mercury: ["mercury-edit-2"] };
 // Local servers: where they list their models, the names in that reply, the models recommended without asking, and
 // which listed ones to recommend (a FIM template, and not a chat / instruct model).
@@ -498,13 +507,12 @@ async function cli([cmd, provider, ...args]) {
   if (cmd === "--models") {
     const local = LOCAL[provider];
     if (!local) return { models: CATALOG[provider], recommended: [MODELS[provider]] };
-    const { json } = await post({ url: `${cfg.endpoint}${local.list}`, method: "GET", headers: {} }).catch(() => ({ json: null }));
+    const { json } = await post({ url: `${cfg.endpoint}${local.list}`, method: "GET", headers: headers(apiKey(provider).key ?? "") }).catch(() => ({ json: null }));
     const listed = local.names(json), pulled = Array.isArray(listed) ? listed.filter(m => typeof m === "string" && m) : null; // null: the server is off
     const recommended = [...new Set([...local.recommended, ...(pulled ?? []).filter(m => local.fim(m) && template(m))])];
     return { models: [...new Set([...recommended, ...(pulled ?? [])])], recommended, pulled };
   }
-  if (cmd === "--test" && LOCAL[provider]) return testRequest(cfg);
-  if (!cfg.hosted) throw new Error(`${cfg.label} needs no API key`);
+  if (cmd === "--test" && LOCAL[provider]) return testRequest(cfg, apiKey(provider).key ?? "");
   if (cmd === "--key") { const k = apiKey(provider); return k.key ? { from: k.from, masked: maskKey(k.key) } : { from: null, help: keyHelp(provider), loose: k.loose }; }
   if (cmd === "--save-key") {
     const file = args[0], key = fs.readFileSync(file, "utf8").trim();

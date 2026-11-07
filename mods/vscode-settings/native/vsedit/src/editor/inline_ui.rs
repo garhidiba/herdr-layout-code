@@ -108,10 +108,10 @@ impl Editor {
         }
         None
     }
-    /// A hosted provider's API key, looked up again at most every 10 s while there is none (Err: the secrets file is
-    /// readable by others).
+    /// The provider's API key (Err: none; true when the secrets file is readable by others). A hosted one is looked up
+    /// again at most every 10 s while there is none; a local server's (optional) after a failed request.
     fn inline_api_key(&mut self, cfg: &Config) -> Result<String, bool> {
-        let stale = self.inline.keys.get(&cfg.provider).is_none_or(|(k, at)| k.is_err() && at.elapsed() > Duration::from_secs(10));
+        let stale = self.inline.keys.get(&cfg.provider).is_none_or(|(k, at)| cfg.hosted && k.is_err() && at.elapsed() > Duration::from_secs(10));
         if stale {
             self.inline.keys.insert(cfg.provider.clone(), (inline::api_key(&cfg.provider).map(|k| k.0), Instant::now()));
         }
@@ -183,7 +183,7 @@ impl Editor {
             let items = items.clone();
             return self.inline_show(items, at, version);
         }
-        let api_key = if cfg.hosted { self.inline_api_key(&cfg).unwrap_or_default() } else { String::new() };
+        let api_key = self.inline_api_key(&cfg).unwrap_or_default();
         let ctx = inline::Context { prose: inline::prose_file(&file), file: file.to_string_lossy().into_owned(), ..inline::context_at(&self.buf.lines, at.line, at.col, cfg.prefix_chars, cfg.suffix_chars) };
         self.inline_cancel();
         let cancel = Arc::new(Cancel::default());
@@ -234,6 +234,9 @@ impl Editor {
                 };
                 if error.as_deref() == Some(&inline::missing_text(&cfg)) {
                     ed.inline.models.insert(cfg.key.clone(), Some(ModelInfo { missing: true, chat: false }));
+                }
+                if error.is_some() && !cfg.hosted {
+                    ed.inline.keys.remove(&cfg.provider); // the server may want a key saved since
                 }
                 ed.inline.error = error.clone();
                 let results: Vec<_> = texts.iter().map(|t| inline::clean(t, &ctx, cfg.multiline)).collect();
@@ -350,7 +353,11 @@ impl Editor {
         if !cfg.enabled || self.inline.warmed.contains(&cfg.key) {
             return;
         }
-        let (Some(show), Some(load)) = (inline::show(&cfg), inline::warmup(&cfg)) else { return };
+        if cfg.provider != "ollama" {
+            return;
+        }
+        let key = self.inline_api_key(&cfg).unwrap_or_default();
+        let (Some(show), Some(load)) = (inline::show(&cfg, &key), inline::warmup(&cfg, &key)) else { return };
         self.inline.warmed.insert(cfg.key.clone());
         self.spawn(
             move || {

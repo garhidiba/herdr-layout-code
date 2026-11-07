@@ -28,7 +28,7 @@ exit 1
 `;
 fs.writeFileSync(path.join(tmp, "security"), FAKE_SECURITY, { mode: 0o755 });
 Object.assign(process.env, { VSEDIT_SECURITY: path.join(tmp, "security"), FAKE_KEYCHAIN: path.join(tmp, "keychain"), VSEDIT_SECRETS: path.join(tmp, "secrets.json") });
-for (const p of Object.values(I.HOSTED)) delete process.env[p.env];
+for (const env of [...Object.values(I.HOSTED).map(p => p.env), "OLLAMA_API_KEY", "LMSTUDIO_API_KEY"]) delete process.env[env];
 test.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
@@ -591,7 +591,7 @@ test("the Settings dialog's helper: a masked key, saving from a file it deletes,
   assert.deepEqual(out("--remove-key", "codestral"), { removed: true });
   assert.equal(out("--key", "codestral").from, null);
   assert.deepEqual(out("--models", "mercury").recommended, ["mercury-edit-2"]);
-  assert.match(cli("--key", "ollama").stdout, /needs no API key/);
+  assert.match(out("--key", "ollama").help, /security add-generic-password -U -s herdr-vscode-ollama .*OLLAMA_API_KEY/);
 });
 
 // ---------- local servers: their own address and model, LM Studio ----------
@@ -688,4 +688,86 @@ test("the Settings dialog's helper for local servers: their models (none when of
   const o = await stub(() => ({ status: 400, error: "starcoder2:3b does not support insert" }));
   assert.match((await run("--test", "ollama", "starcoder2:3b", o.endpoint)).error, /^Ollama: FIM not supported: starcoder2:3b does not support insert/);
   o.server.close();
+});
+
+// ---------- a local server's optional key (a proxy or a protected server in front of it) ----------
+test("a local server gets a Bearer key only when one is stored; a 401 / 403 says it needs one", () => {
+  const ctx = { prefix: "a = ", suffix: "", nextLine: false };
+  for (const p of ["ollama", "lmstudio"]) {
+    const cfg = I.config(I.normalize({ "editor.inlineSuggest.provider": p }));
+    assert.deepEqual(I.request(cfg, ctx, true).headers, { "Content-Type": "application/json" }, p);
+    assert.equal(I.request(cfg, ctx, true, "fake-key").headers.Authorization, "Bearer fake-key", p);
+  }
+  const ollama = I.config(I.normalize({}));
+  assert.equal(I.show(ollama, "fake-key").headers.Authorization, "Bearer fake-key");
+  assert.equal(I.warmup(ollama, "fake-key").headers.Authorization, "Bearer fake-key");
+  assert.equal(I.show(ollama).headers.Authorization, undefined);
+  assert.throws(() => I.reply(ollama, 401, { error: "Unauthorized" }), /^Error: Ollama: the server needs an API key or refused it \(HTTP 401\); add one: security add-generic-password -U -s herdr-vscode-ollama .*OLLAMA_API_KEY\)$/);
+  const lm = I.config(I.normalize({ "editor.inlineSuggest.provider": "lmstudio" }));
+  assert.throws(() => I.reply(lm, 403, {}), /^Error: LM Studio: the server needs an API key or refused it \(HTTP 403\); .*herdr-vscode-lmstudio.*LMSTUDIO_API_KEY\)$/);
+});
+
+// A protected local server (both shapes: Ollama's /api/*, LM Studio's /v1/*): answers only `Bearer <s.need>`, else 401;
+// s.auth logs each request's Authorization header (null: none).
+async function guardedStub() {
+  const s = { auth: [], need: null };
+  s.server = http.createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      s.auth.push(`${req.url} ${req.headers.authorization ?? null}`);
+      if (s.need && req.headers.authorization !== `Bearer ${s.need}`) { res.statusCode = 401; return res.end(JSON.stringify({ error: "Unauthorized" })); }
+      if (req.url === "/api/tags") return res.end(JSON.stringify({ models: [{ name: "qwen2.5-coder:7b-base" }] }));
+      if (req.url === "/v1/models") return res.end(JSON.stringify({ data: [{ id: "qwen2.5-coder-7b" }] }));
+      if (req.url === "/api/show") return res.end(JSON.stringify({ template: "{{ .Prompt }}" }));
+      res.end(JSON.stringify(req.url === "/v1/completions" ? { choices: [{ text: " 1" }] } : { response: " 1", done: true }));
+    });
+  });
+  await new Promise(r => s.server.listen(0, "127.0.0.1", r));
+  s.endpoint = `http://127.0.0.1:${s.server.address().port}`;
+  return s;
+}
+
+test("the Settings helper sends each local server its own key, only when stored, to --models and --test", async () => {
+  const run = (...args) => new Promise(r => require("child_process").execFile(process.execPath, [path.join(__dirname, "..", "inline.cjs"), ...args], { env: process.env }, (_e, o) => r(JSON.parse(o))));
+  fs.rmSync(process.env.FAKE_KEYCHAIN, { force: true }); fs.rmSync(process.env.VSEDIT_SECRETS, { force: true });
+  const s = await guardedStub();
+  assert.equal((await run("--test", "ollama", "", s.endpoint)).ok, true, "no key, an open server: works as before");
+  assert.deepEqual(s.auth, ["/api/generate null"], "no key: no Authorization header");
+  s.need = "ol-fake"; s.auth = [];
+  assert.match((await run("--test", "ollama", "", s.endpoint)).error, /^Ollama: the server needs an API key or refused it \(HTTP 401\)/);
+  assert.equal((await run("--models", "ollama", s.endpoint)).pulled, null, "refused: listed as a server that didn't answer");
+  fs.writeFileSync(process.env.FAKE_KEYCHAIN, "herdr-vscode-lmstudio\tlm-fake\n"); // LM Studio's key only
+  assert.match((await run("--test", "ollama", "", s.endpoint)).error, /HTTP 401/, "LM Studio's key is not Ollama's");
+  assert.ok(s.auth.every(a => a.endsWith(" null")), "Ollama never got another provider's key");
+  fs.writeFileSync(process.env.VSEDIT_SECRETS, JSON.stringify({ ollama: "ol-fake" }), { mode: 0o600 });
+  s.auth = [];
+  assert.equal((await run("--test", "ollama", "", s.endpoint)).ok, true);
+  assert.deepEqual((await run("--models", "ollama", s.endpoint)).pulled, ["qwen2.5-coder:7b-base"]);
+  assert.deepEqual(s.auth, ["/api/generate Bearer ol-fake", "/api/tags Bearer ol-fake"]);
+  s.need = "lm-fake"; s.auth = [];
+  assert.deepEqual((await run("--models", "lmstudio", s.endpoint)).pulled, ["qwen2.5-coder-7b"]);
+  assert.equal((await run("--test", "lmstudio", "", s.endpoint)).ok, true);
+  assert.deepEqual(s.auth, ["/v1/models Bearer lm-fake", "/v1/completions Bearer lm-fake"]);
+  assert.deepEqual(await run("--key", "lmstudio"), { from: "keychain", masked: "••••" });
+  fs.rmSync(process.env.FAKE_KEYCHAIN, { force: true }); fs.rmSync(process.env.VSEDIT_SECRETS, { force: true });
+  s.server.close();
+});
+
+test("the editor with a protected local server: no key is an error, not a warning; a key saved after it is used", async () => {
+  fs.rmSync(process.env.FAKE_KEYCHAIN, { force: true }); fs.rmSync(process.env.VSEDIT_SECRETS, { force: true });
+  const s = await guardedStub();
+  s.need = "lm-fake";
+  const ed = await editorWith("", ["x = "], { "editor.inlineSuggest.provider": "lmstudio", "editor.inlineSuggest.lmstudio.endpoint": s.endpoint });
+  assert.equal(ed.inlineStatus().text, "LM Studio", "no key: no warning");
+  type(ed, "1");
+  assert.ok(await waitFor(() => ed.inline.error));
+  assert.match(ed.inline.error, /^LM Studio: the server needs an API key or refused it \(HTTP 401\)/);
+  assert.deepEqual(s.auth, ["/v1/completions null"]);
+  fs.writeFileSync(process.env.FAKE_KEYCHAIN, "herdr-vscode-lmstudio\tlm-fake\n");
+  type(ed, " ");
+  assert.ok(await waitFor(() => s.auth.length === 2), "no request after the key was saved");
+  assert.equal(s.auth[1], "/v1/completions Bearer lm-fake");
+  assert.ok(await waitFor(() => ghost(ed)), `no suggestion: ${ed.inline.error}`);
+  fs.rmSync(process.env.FAKE_KEYCHAIN, { force: true });
+  s.server.close();
 });
