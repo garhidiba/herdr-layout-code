@@ -23,7 +23,7 @@ const logOpen = (fields) => {
   timing = [];
   exec("sh", ["-c", 'printf %s "$1" >> "$2"', "log", text, `${appHome()}/.vscode-open-timing.log`]).catch(() => {});
 };
-const openTab = createOpenTab({ hc, run, spaces, panes, warm: warm.claim, log: logOpen });
+const openTab = createOpenTab({ hc, run, exec, spaces, panes, warm: warm.claim, log: logOpen });
 // The editor on a remote space's machine (remote.js): installing it is asked on each open with the shipped confirm dialog,
 // whose yes runs INSTALL_COMMAND for the tree (main.js), naming the machine in the shared value INSTALL_REQUEST.
 const askInstall = (machine, size) => {

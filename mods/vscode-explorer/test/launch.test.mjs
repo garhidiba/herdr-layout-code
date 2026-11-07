@@ -45,18 +45,22 @@ test("a program only the login shell knows (nvm) is started through it", () => {
     'shell:-lic exec "$0" "$@" no-such-program-xyz a b\n');
 });
 
-function harness({ space = { id: "sp1", machine: null }, hcResult = { code: 0, stdout: '{"address":"t9"}' }, appearsAfter = 1 } = {}) {
-  const calls = [], hcCalls = [];
+const ok = { code: 0, stdout: "{}" }, unknown = { code: 0, stdout: '{"error":"no such running terminal"}' };
+const settle = () => new Promise(r => setTimeout(r, 20));
+
+function harness({ space = { id: "sp1", machine: null }, execResults = [ok], hcResult = { code: 0, stdout: '{"address":"t9"}' }, appearsAfter = 1 } = {}) {
+  const calls = [], hcCalls = [], execCalls = [];
   let polls = 0;
   const shown = () => polls >= appearsAfter;
   const spaces = () => [{ ...space, active: true, tabs: [{ id: "tbOld" }, ...(shown() ? [{ id: "tbX" }] : [])] }];
   const panes = () => [{ tab: "tbOld", terminal: "box/t1" }, ...(shown() ? [{ tab: "tbX", terminal: "box/t9" }] : [])];
   const openTab = createOpenTab({
     hc: async (a) => { hcCalls.push(a); if (a[0] === "run" && hcResult instanceof Error) throw hcResult; return hcResult; },
+    exec: async (...a) => execResults[Math.min(execCalls.push(a), execResults.length) - 1],
     run: (name, args) => calls.push([name, args]), spaces, panes, newId: () => "tbX", wait: 100, step: 25,
   });
   const cx = { sleep: async () => { polls++; } };
-  return { openTab: (args) => openTab(args, cx), calls, hcCalls };
+  return { openTab: (args) => openTab(args, cx), calls, hcCalls, execCalls };
 }
 
 test("once Herdr shows the new tab, it is named after the file and selected", async () => {
@@ -78,13 +82,25 @@ test("mod tabs and remote spaces open with tab.new as before", async () => {
   assert.equal(h.calls[0][0], "tab.new");
 });
 
-test("a remote editor (no herdr-app on its machine) gets its right-clicks from here once its tab shows up", async () => {
-  let h = harness({ space: { id: "box/sp1", machine: "box" } });
+test("a remote editor gets its right-clicks from here (through exec, never run) once its tab shows up, retried until Herdr knows it", async () => {
+  let h = harness({ space: { id: "box/sp1", machine: "box" }, execResults: [unknown, unknown, ok] });
   await h.openTab(editor);
-  assert.deepEqual(h.calls, [["tab.new", editor], ["terminal.right_click", { to: "program", terminal: "box/t9" }]]);
+  await settle();
+  assert.deepEqual(h.calls, [["tab.new", editor]]);
+  assert.equal(h.execCalls.length, 3);
+  assert.deepEqual(h.execCalls[0], ["herdr-app", ["do", "terminal.right_click", "--to", "program", "--terminal", "box/t9"]]);
   h = harness({ space: { id: "box/sp1", machine: "box" }, appearsAfter: Infinity });
   await h.openTab(editor);
   assert.deepEqual(h.calls, [["tab.new", editor]]);
+  assert.deepEqual(h.execCalls, []);
+});
+
+test("a remote editor's right-click retry gives up quietly after 10 s (every 150 ms), without run", async () => {
+  const h = harness({ space: { id: "box/sp1", machine: "box" }, execResults: [unknown] });
+  await h.openTab(editor);
+  await settle();
+  assert.deepEqual(h.calls, [["tab.new", editor]]);
+  assert.equal(h.execCalls.length, 67);
 });
 
 // Settings' files and Rust core are on this computer: with a remote space focused it uses a local space.

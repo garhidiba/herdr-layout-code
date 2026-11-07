@@ -29,9 +29,10 @@ export function directRun({ folder, argv }, where, labels = []) {
 // `warm(space, args, cx)`: the id of a tab already showing args' program (it is named and selected as a new one), or null.
 // `log(fields)`: each step of a local open, for timing: { step, mode: "warm" | "cold", ms since the open began, at:
 // epoch ms, name }; steps start, hc-run and shown (cold only), select.
-export function createOpenTab({ hc, run, spaces, panes, local = false, newId = newTabId, wait = 3000, step = 25, warm = null, log = null }) {
+export function createOpenTab({ hc, run, exec, spaces, panes, local = false, newId = newTabId, wait = 3000, step = 25, warm = null, log = null }) {
   const tabsOf = (space) => spaces().find(s => s.id === space)?.tabs.map(t => t.id) ?? [];
   const hasTab = (space, tab) => tabsOf(space).includes(tab);
+  const routing = new Set(); // terminals whose right-click retry loop is running
   return async function openTab(args, cx) {
     const began = Date.now();
     let mode = "cold";
@@ -64,12 +65,25 @@ export function createOpenTab({ hc, run, spaces, panes, local = false, newId = n
 
   // The editor on another machine has no herdr-app there to send its right-clicks to it: once its terminal shows up
   // in a new tab of the space, this computer does (the tab closes with the editor, so nothing gives them back).
+  // Herdr may not know the terminal yet (`{"error": "no such running terminal"}`), and run() shows a failure as a toast:
+  // so herdr-app is asked through exec, again every 150 ms for 10 s, silently, one loop per terminal (as vsedit does).
+  async function rightClicks(terminal, cx) {
+    if (routing.has(terminal)) return;
+    routing.add(terminal);
+    try {
+      for (let waited = 0; waited <= 10000; waited += 150) {
+        const r = await exec("herdr-app", ["do", "terminal.right_click", "--to", "program", "--terminal", terminal]);
+        if (r.code === 0 && !/"error"/.test(r.stdout)) return;
+        await cx.sleep(150);
+      }
+    } catch {} finally { routing.delete(terminal); }
+  }
   async function remoteTab(space, tabNew, cx) {
     const before = new Set(tabsOf(space));
     tabNew();
     const shown = () => panes().find(p => p.terminal && tabsOf(space).includes(p.tab) && !before.has(p.tab))?.terminal;
     for (let waited = 0; !shown() && waited < wait; waited += step) await cx.sleep(step);
     const terminal = shown();
-    if (terminal) run("terminal.right_click", { to: "program", terminal });
+    if (terminal) rightClicks(terminal, cx);
   }
 }

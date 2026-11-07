@@ -14,7 +14,7 @@ import { FILE as KB_FILE, fromHerdr, label, matchesRow, conflicts, parseFile, se
   hasUserEntries, herdrRoute, withPassthrough, recordStep } from "./keybindings.js";
 import { createOpenTab } from "./launch.js";
 
-const openTab = createOpenTab({ hc, run, spaces, local: true }); // Settings acts on this computer, whatever space is focused
+const openTab = createOpenTab({ hc, run, exec, spaces, local: true }); // Settings acts on this computer, whatever space is focused
 const settingsPath = () => `${appHome()}/${FILE}`;
 const kbPath = () => `${appHome()}/${KB_FILE}`;
 const keysPath = () => `${appHome()}/keys.json`;
