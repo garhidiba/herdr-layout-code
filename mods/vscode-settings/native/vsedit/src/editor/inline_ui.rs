@@ -283,12 +283,12 @@ impl Editor {
     }
     /// A key or typed text while a suggestion shows: its commands (Tab, Esc, ⌘→ …, keymap.json's `when` keys), or typing
     /// what it starts with, which keeps the rest without asking again. True when handled here.
-    pub fn inline_key(&mut self, ev: &Ev, term: &mut crate::term::Term) -> bool {
+    pub fn inline_key(&mut self, ev: &Ev, term: Option<&mut crate::term::Term>) -> bool {
         let Some(g) = self.inline.ghost.clone() else { return false };
         match ev {
             Ev::Key(k) => match self.keys.keymap.suggest_command(&k.chord()) {
                 Some(c) => {
-                    self.run_command(c, Some(term));
+                    self.run_command(c, term);
                     true
                 }
                 None => false,

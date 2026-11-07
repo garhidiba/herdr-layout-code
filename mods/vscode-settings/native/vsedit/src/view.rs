@@ -30,6 +30,16 @@ struct Hits {
     ruler: String,
 }
 
+/// The status bar's content (Editor::status).
+pub struct Status {
+    /// The items on the right and what a click on each runs.
+    pub parts: Vec<(String, Option<StatusAct>)>,
+    pub left: String,
+    pub left_color: String,
+    /// `left` is the language server's install offer.
+    pub offer: bool,
+}
+
 /// A text row: a line's row (None past the end) or, on the row above it, that line's CodeLens.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Row {
@@ -607,6 +617,24 @@ impl Editor {
         }
     }
 
+    /// The color and font style of byte `i`: its token's (`ti`: the token index, moved forward to `i`; `tokens` sorted,
+    /// the first at 0), the semantic layer's over it for a line of the current file.
+    pub fn style_at(&self, line: Option<usize>, tokens: Option<&Tokens>, ti: &mut usize, i: usize) -> (&str, u32) {
+        let (mut fg, mut style) = (self.c.fg.as_str(), 0);
+        if let Some(t) = tokens {
+            while *ti + 1 < t.len() && t[*ti + 1].0 as usize <= i {
+                *ti += 1;
+            }
+            let meta = t[*ti].1;
+            fg = self.hl.color_map.get(foreground_of(meta)).and_then(|o| o.as_deref()).unwrap_or(self.c.fg.as_str());
+            style = font_style_of(meta);
+        }
+        if let Some(span) = line.and_then(|l| self.semantic.at(l, i)) {
+            (fg, style) = (span.fg.as_str(), span.style);
+        }
+        (fg, style)
+    }
+
     /// Paints a line's visible part [left, left+width) with token colors (and, for a line of the current file, the
     /// semantic layer over them); `curly_at`: the squiggle color at a byte; `from`: a known (byte, display column) at
     /// or before `left` to start at (a wrapped row's start). Returns (cells painted, display width).
@@ -649,18 +677,7 @@ impl Editor {
             if col >= right {
                 break;
             }
-            let (mut fg, mut style) = (c.fg.as_str(), 0);
-            if let Some(t) = tokens {
-                while ti + 1 < t.len() && t[ti + 1].0 as usize <= i {
-                    ti += 1;
-                }
-                let meta = t[ti].1;
-                fg = self.hl.color_map.get(foreground_of(meta)).and_then(|o| o.as_deref()).unwrap_or(c.fg.as_str());
-                style = font_style_of(meta);
-            }
-            if let Some(span) = line.and_then(|l| self.semantic.at(l, i)) {
-                (fg, style) = (span.fg.as_str(), span.style);
-            }
+            let (mut fg, mut style) = self.style_at(line, tokens, &mut ti, i);
             if link.is_some_and(|(a, b)| i >= a && i < b) {
                 (fg, style) = (c.link.as_str(), style | 4); // a Ctrl (⌘) hovered word: underlined like a link
             }
@@ -751,6 +768,34 @@ impl Editor {
     }
 
     fn render_status(&mut self, p: &mut Painter) {
+        let Status { parts, left: left_text, left_color, offer } = self.status();
+        let right = parts.iter().map(|p| p.0.as_str()).collect::<Vec<_>>().join("   ") + "  ";
+        let rw = tw(&right);
+        p.move_to(self.rows, 1);
+        p.text(&fit(&format!("  {left_text}"), (self.cols - rw).max(0) as usize), &left_color, &self.c.bar);
+        self.status_hits.clear();
+        if offer && self.prompt.is_none() {
+            self.status_hits.push((3, tw(&left_text).min((self.cols - rw - 2).max(0)), StatusAct::Install));
+        }
+        if rw > self.cols {
+            return;
+        }
+        let mut x = self.cols - rw + 1;
+        let n = parts.len();
+        for (i, (text, act)) in parts.into_iter().enumerate() {
+            let w = tw(&text);
+            let dim = matches!(act, Some(StatusAct::Wrap)) && self.word_wrap() == "off"; // "No Wrap"
+            p.text(&format!("{text}{}", if i + 1 < n { "   " } else { "  " }), if dim { &self.c.line_number } else { &self.c.bar_fg }, &self.c.bar);
+            if let Some(a) = act {
+                self.status_hits.push((x, w, a));
+            }
+            x += w + 3;
+        }
+    }
+
+    /// The status bar's content: the items on the right, the text on the left (a message, the problem at the cursor
+    /// or the problem counts, the install offer, the find count) and its color.
+    pub fn status(&mut self) -> Status {
         let Pos { line, col } = self.head();
         let (s, e) = self.range();
         let selected = if self.empty() { 0 } else { selected_chars(&self.buf.text(s, e)) };
@@ -768,7 +813,6 @@ impl Editor {
         if let Some(text) = self.inline_status() {
             parts.push((text, Some(StatusAct::Inline)));
         }
-        let right = parts.iter().map(|p| p.0.as_str()).collect::<Vec<_>>().join("   ") + "  ";
         let (mut left_text, mut left_color) = (String::new(), self.c.bar_fg.clone());
         if let Some(m) = self.message.as_ref().filter(|m| m.until > Instant::now()) {
             (left_text, left_color) = (m.text.clone(), m.color.clone());
@@ -798,27 +842,7 @@ impl Editor {
             left_text = if n > 0 { format!("Find: {} of {n}{}", k.map_or("?".into(), |k| (k + 1).to_string()), if n >= 20000 { "+" } else { "" }) } else { "Find: No results".into() };
             left_color = if n > 0 { self.c.bar_fg.clone() } else { self.c.warn.clone() };
         }
-        let rw = tw(&right);
-        p.move_to(self.rows, 1);
-        p.text(&fit(&format!("  {left_text}"), (self.cols - rw).max(0) as usize), &left_color, &self.c.bar);
-        self.status_hits.clear();
-        if offer.is_some() && self.prompt.is_none() {
-            self.status_hits.push((3, tw(&left_text).min((self.cols - rw - 2).max(0)), StatusAct::Install));
-        }
-        if rw > self.cols {
-            return;
-        }
-        let mut x = self.cols - rw + 1;
-        let n = parts.len();
-        for (i, (text, act)) in parts.into_iter().enumerate() {
-            let w = tw(&text);
-            let dim = matches!(act, Some(StatusAct::Wrap)) && self.word_wrap() == "off"; // "No Wrap"
-            p.text(&format!("{text}{}", if i + 1 < n { "   " } else { "  " }), if dim { &self.c.line_number } else { &self.c.bar_fg }, &self.c.bar);
-            if let Some(a) = act {
-                self.status_hits.push((x, w, a));
-            }
-            x += w + 3;
-        }
+        Status { parts, left: left_text, left_color, offer: offer.is_some() }
     }
 
     /// The find widget, top right like VS Code's; returns where the terminal cursor sits in it.
@@ -1049,9 +1073,9 @@ impl Editor {
         true
     }
 
-    pub fn mouse(&mut self, m: &Mouse, term: &mut Term) {
+    pub fn mouse(&mut self, m: &Mouse, term: Option<&mut Term>) {
         if self.popup.is_some() {
-            return self.popup_event(&Ev::Mouse(*m), Some(term));
+            return self.popup_event(&Ev::Mouse(*m), term);
         }
         if self.ls.hover_box.is_some() && !m.motion && !m.release {
             self.ls.hover_box = None; // a click or the wheel closes the hover
@@ -1154,30 +1178,40 @@ impl Editor {
         if m.x == self.gutter() as i32 && !m.shift && self.click_fold(p.line) {
             return;
         }
-        if m.ctrl && !m.shift && m.x > self.gutter() as i32 {
+        let now = Instant::now();
+        let double = now.duration_since(self.last_click.0) < Duration::from_millis(400) && self.last_click.1 == p;
+        self.last_click = (now, p);
+        self.click(p, gutter, m.shift, m.ctrl, if double { 2 } else { 1 });
+    }
+
+    /// A press at `p` (on the line numbers when `gutter`): ⌘ (Ctrl) Go to Definition, Shift extends, a second click
+    /// selects the word and a third the line; a drag may follow.
+    pub fn click(&mut self, p: Pos, gutter: bool, shift: bool, cmd: bool, count: u32) {
+        if cmd && !shift && !gutter {
             // VS Code's ⌘-click / Ctrl+click: Go to Definition
             self.ls.link = None;
             self.move_to(p, false);
             return self.run_act(crate::commands::Act::GoTo("definition"), None);
         }
-        let now = Instant::now();
-        let double = now.duration_since(self.last_click.0) < Duration::from_millis(400) && self.last_click.1 == p;
-        self.last_click = (now, p);
         self.dragging = true;
-        if m.shift && (double || gutter) {
+        if shift && (count > 1 || gutter) {
             self.sel.head = shift_click_head(&self.buf.lines, self.sel.anchor, p, gutter);
             self.buf.seal();
             return;
         }
-        if double && !m.shift {
+        if count > 1 && !shift {
             let t = &self.buf.lines[p.line];
-            let s = word_left(t, next_index(t, p.col).min(t.len()));
-            let e = word_right(t, s);
-            self.sel = Sel { anchor: pos(p.line, s), head: pos(p.line, e) };
+            let (s, e) = if count == 2 {
+                let s = word_left(t, next_index(t, p.col).min(t.len()));
+                (pos(p.line, s), pos(p.line, word_right(t, s)))
+            } else {
+                (pos(p.line, 0), if p.line + 1 < self.buf.lines.len() { pos(p.line + 1, 0) } else { pos(p.line, t.len()) })
+            };
+            self.sel = Sel { anchor: s, head: e };
             self.buf.seal();
             return;
         }
-        self.move_to(p, m.shift);
+        self.move_to(p, shift);
     }
 }
 

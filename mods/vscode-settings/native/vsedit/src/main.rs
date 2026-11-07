@@ -278,7 +278,7 @@ fn run(term: &mut Term, ed: &mut Editor) {
                         }
                     }
                     None => {
-                        ed.handle(&ev, term);
+                        ed.handle(&ev, Some(term));
                         ed.after_event();
                         changed = true;
                     }
@@ -289,7 +289,7 @@ fn run(term: &mut Term, ed: &mut Editor) {
             // a split escape sequence that never completed was a plain Esc
             escape_at = None;
             pending.clear();
-            ed.handle(&keys::key("escape"), term);
+            ed.handle(&keys::key("escape"), Some(term));
             changed = true;
         }
         if term::take_resized() {

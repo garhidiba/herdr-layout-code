@@ -294,6 +294,8 @@ pub struct Editor {
     chord_prefix: Option<String>,
     pub find: Find,
     clip: (String, bool),
+    /// Text copied without a terminal, for the client to put on its clipboard (serve.rs takes it).
+    pub copied: Option<String>,
     closers: (u64, Vec<Pos>),
     pub folds: Folds,
     ranges: Option<(u64, usize, Vec<Range>)>,
@@ -398,6 +400,7 @@ impl Editor {
             chord_prefix: None,
             find: Find { query: String::new(), replace: String::new(), field: Field::Query, opts: Opts::default(), matches: vec![], error: None, scope: None, fresh: false, searched: None },
             clip: (String::new(), false),
+            copied: None,
             closers: st.closers,
             folds: st.folds,
             ranges: st.ranges,
@@ -1042,10 +1045,14 @@ impl Editor {
     }
 
     // ----- clipboard -----
-    fn copy(&mut self, term: &mut Term, cut: bool) {
+    /// Copy / Cut: to the terminal's clipboard, or for a client without a terminal to `copied`.
+    fn copy(&mut self, term: Option<&mut Term>, cut: bool) {
         let whole = self.empty();
         let text = if whole { format!("{}\n", self.buf.lines[self.head().line]) } else { self.buf.text(self.sel.anchor, self.sel.head) };
-        term::write_clipboard(term, &text);
+        match term {
+            Some(t) => term::write_clipboard(t, &text),
+            None => self.copied = Some(text.clone()),
+        }
         self.clip = (text, whole);
         if !cut {
             return;
@@ -2189,10 +2196,11 @@ impl Editor {
     }
 
     // ----- input -----
-    pub fn handle(&mut self, ev: &Ev, term: &mut Term) {
+    /// One input event; `term`: the terminal (None for a client without one, serve.rs).
+    pub fn handle(&mut self, ev: &Ev, mut term: Option<&mut Term>) {
         match ev {
             Ev::Focus(focused) => {
-                if *focused {
+                if *focused && term.is_some() {
                     term::right_clicks_to("program", false); // again, in case Herdr hadn't adopted the terminal yet
                 } else if self.settings.auto_save == AutoSave::OnFocusChange {
                     self.auto_save();
@@ -2210,7 +2218,7 @@ impl Editor {
             return; // any key closes the hover; Esc only that
         }
         if self.popup.is_some() {
-            return self.popup_event(ev, Some(term));
+            return self.popup_event(ev, term);
         }
         if self.prompt.is_some() {
             return self.prompt_key(ev);
@@ -2235,7 +2243,7 @@ impl Editor {
                 crate::overlays::PanelOutcome::Toggle => return self.panel_toggle(),
             }
         }
-        if self.inline.ghost.is_some() && self.inline_key(ev, term) {
+        if self.inline.ghost.is_some() && self.inline_key(ev, term.as_deref_mut()) {
             return;
         }
         let k = match ev {
@@ -2252,7 +2260,7 @@ impl Editor {
             return self.say(text, None, 60000);
         }
         if let Some(c) = self.keys.keymap.command(&chord) {
-            return self.run_command(c, Some(term));
+            return self.run_command(c, term);
         }
         self.key(&k);
     }
@@ -2323,7 +2331,7 @@ impl Editor {
 
     /// The second key of a chord: its command, else VS Code's "not a command" message. A typed character counts as its
     /// key.
-    fn chord_key(&mut self, ev: &Ev, term: &mut Term) {
+    fn chord_key(&mut self, ev: &Ev, term: Option<&mut Term>) {
         let second = match ev {
             Ev::Key(k) => k.chord(),
             Ev::Text(t) => match t.chars().next() {
@@ -2338,7 +2346,7 @@ impl Editor {
         let first = self.chord_prefix.take().unwrap_or_default();
         self.message = None;
         if let Some(c) = self.keys.keymap.command(&format!("{first} {second}")) {
-            return self.run_command(c, Some(term));
+            return self.run_command(c, term);
         }
         let (a, b) = (self.keys.keymap.key_label(&first), self.keys.keymap.key_label(&second));
         self.warn(format!("The key combination ({a}, {b}) is not a command."));
@@ -2383,11 +2391,7 @@ impl Editor {
             Act::JumpToBracket => self.jump_to_bracket(),
             Act::SelectToBracket => self.select_to_bracket(),
             Act::JoinLines => self.join_lines(),
-            Act::Copy(cut) => {
-                if let Some(t) = term {
-                    self.copy(t, cut)
-                }
-            }
+            Act::Copy(cut) => self.copy(term, cut),
             Act::Paste => self.paste(None),
             Act::Save => {
                 self.save(false, false, false);
