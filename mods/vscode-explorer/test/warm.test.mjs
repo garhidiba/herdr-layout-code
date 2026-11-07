@@ -12,206 +12,193 @@ import { openArgs, FILE_LABEL } from "../paths.js";
 const APP = "/h";
 const editor = (file = "/p/a.ts") => openArgs(file, { appHome: APP, folder: "/p" });
 
-// A fake Herdr: spaces with tabs, a shared store, hc that starts a labelled terminal which shows up as its tab after
-// `appearsAfter` polls, and exec for the handoff (`handoff`: its exit code) and rm. `real: true` runs exec for real.
-const ON = '{ "workbench.editor.preloadEditor": true }';
-function world({ spaces = [{ id: "sp1", tabs: ["tbShell"] }], settings = ON, appearsAfter = 1, hcCode = 0, handoff = 0, real = false, appHome = APP } = {}) {
+// A fake Herdr: spaces with tabs, a shared store, hc that starts a core terminal Herdr knows (terminals()) after
+// `knownAfter` polls, terminal.keep that gives it a tab and pane after `keptAfter` polls (Infinity: never), and exec
+// for the handoff (`handoff`: its exit code) and rm. `real: true` runs exec for real.
+function world({ spaces = [{ id: "sp1", tabs: ["tbShell"] }], settings = "{}", knownAfter = 1, keptAfter = 1, hcCode = 0, handoff = 0, real = false, appHome = APP } = {}) {
   const store = {}, calls = [], hcCalls = [], execCalls = [], file = { settings };
-  const live = spaces.map(s => ({ id: s.id, machine: s.machine ?? null, folder: s.folder ?? "/p", tabs: s.tabs.map((id, i) => ({ id, active: i === 0, settled: false })) }));
-  const terms = [], pending = [];
+  const live = spaces.map(s => ({ id: s.id, machine: s.machine ?? null, folder: s.folder ?? "/p", tabs: s.tabs.map((id, i) => ({ id, active: i === 0 })) }));
+  const terms = [], panes = [], later = [];
   let ids = 0, polls = 0, now = 1000;
   const spacesFn = () => live.map(s => ({ ...s, active: s.id === "sp1", tabs: s.tabs.map(t => ({ ...t })) }));
+  const show = (address) => { const tab = `tbK${address}`; live[0].tabs.push({ id: tab, active: false }); panes.push({ pane: `p${address}`, tab, terminal: address }); };
   const pool = createWarmPool({
     hc: async (a) => {
       hcCalls.push(a);
       if (a[0] === "run") {
         if (hcCode) return { code: hcCode, stdout: "", stderr: "no core" };
         const labels = Object.fromEntries(a.flatMap((x, i) => (a[i - 1] === "--label" ? [x.split("=")] : [])));
-        const address = `t${++ids}`;
-        terms.push({ address, argv: a.slice(a.indexOf("--") + 1), labels });
-        pending.push({ at: polls + appearsAfter, space: labels["herdr.space"], tab: labels["herdr.tab"] });
-        return { code: 0, stdout: JSON.stringify({ address }) };
+        const t = { address: `t${++ids}`, argv: a.slice(a.indexOf("--") + 1), labels, known: false };
+        terms.push(t);
+        later.push({ at: polls + knownAfter, run: () => { t.known = true; } });
+        return { code: 0, stdout: JSON.stringify({ address: t.address }) };
       }
       if (a[0] === "ls") return { code: 0, stdout: JSON.stringify({ terminals: terms.filter(t => !t.dead && t.labels[WARM_LABEL]).map(t => ({ address: t.address })) }) };
-      if (a[0] === "kill") { const t = terms.find(x => x.address === a[1]); if (t) t.dead = true; for (const s of live) s.tabs = s.tabs.filter(x => x.id !== t?.labels["herdr.tab"]); }
+      if (a[0] === "kill") {
+        const t = terms.find(x => x.address === a[1]);
+        if (t) t.dead = true;
+        for (const p of panes.filter(p => p.terminal === a[1])) { panes.splice(panes.indexOf(p), 1); live[0].tabs = live[0].tabs.filter(x => x.id !== p.tab); }
+      }
       return { code: 0, stdout: "{}" };
     },
     run: (name, args) => {
       calls.push([name, args]);
-      const tab = live.flatMap(s => s.tabs).find(t => t.id === args?.id);
-      if (name === "tab.settle" && tab) tab.settled = true;
-      if (name === "tab.unsettle" && tab) tab.settled = false;
-      if (name === "tab.select" && tab) for (const s of live) for (const t of s.tabs) t.active = t === tab || (t.active && !s.tabs.includes(tab));
+      if (name === "terminal.keep") later.push({ at: polls + keptAfter, run: () => show(args.terminal) });
     },
     exec: async (cmd, args) => {
       execCalls.push([cmd, args]);
       if (real) return new Promise(resolve => execFile(cmd, args, (e, stdout, stderr) => resolve({ code: e ? e.code ?? 1 : 0, stdout, stderr })));
       return { code: cmd === "sh" ? handoff : 0, stdout: "", stderr: "" };
     },
-    spaces: spacesFn, terminals: () => terms.filter(t => !t.dead), machines: () => [{ name: null, layout: "ready" }],
+    spaces: spacesFn, panes: () => panes.map(p => ({ ...p })), terminals: () => terms.filter(t => !t.dead && t.known),
+    machines: () => [{ name: null, layout: "ready" }],
     shared: (k) => store[k], setShared: (k, v) => { store[k] = v; }, appHome: () => appHome, home: () => "/home",
-    readTextFile: async () => file.settings, newId: () => `tbW${ids + 1}`, now: () => now, wait: 100, step: 25,
+    readTextFile: async () => file.settings, newId: () => `id${ids + 1}`, now: () => now, wait: 100, step: 25,
   });
   const cx = { sleep: async () => {
     polls++;
-    for (const p of pending.filter(p => p.at <= polls)) { live.find(s => s.id === p.space)?.tabs.push({ id: p.tab, active: false, settled: false }); pending.splice(pending.indexOf(p), 1); }
+    for (const l of later.filter(l => l.at <= polls)) { later.splice(later.indexOf(l), 1); l.run(); }
   } };
-  return { pool, cx, store, calls, hcCalls, execCalls, terms, live, file, spaces: spacesFn, advance: (ms) => { now += ms; },
-    // Herdr adopting an orphan from before a restart: a labelled terminal already in a tab.
-    orphan: (space, tab) => { terms.push({ address: `t${++ids}`, argv: [], labels: { [WARM_LABEL]: "1", "herdr.space": space, "herdr.tab": tab } }); live.find(s => s.id === space).tabs.push({ id: tab, active: false }); } };
+  return { pool, cx, store, calls, hcCalls, execCalls, terms, live, file, panes, show, spaces: spacesFn, advance: (ms) => { now += ms; },
+    // a warm terminal from before a restart
+    orphan: () => { terms.push({ address: `t${++ids}`, argv: [], labels: { [WARM_LABEL]: "1", "vscode.key": `/h/.vscode-warm/old${ids}` }, known: true }); } };
 }
 
-test("each local space gets one hidden warm editor tab: listed first, started with --warm and its label, then settled", async () => {
+test("each local space gets one warm editor off screen: no Herdr space/tab labels, no tab, --warm and its own label", async () => {
   const w = world({ spaces: [{ id: "sp1", tabs: ["tbShell"] }, { id: "box/sp2", machine: "box", tabs: ["tbR"] }] });
   await w.pool.fill(w.cx);
-  const entry = w.store[WARM].sp1;
-  assert.deepEqual(Object.keys(w.store[WARM]), ["sp1"], "remote spaces get none");
-  assert.deepEqual(entry, { tab: "tbW1", key: "/h/.vscode-warm/tbW1", address: "t1" });
+  assert.deepEqual(w.store[WARM], { sp1: { key: "/h/.vscode-warm/id1", address: "t1" } }, "remote spaces get none");
   const run = w.hcCalls.find(a => a[0] === "run");
-  assert.ok(run.includes(`${WARM_LABEL}=1`) && run.includes("herdr.tab=tbW1") && run.includes("herdr.space=sp1"));
-  assert.deepEqual(run.slice(-4), ["/h/mods/vscode-viewer/editor/vsedit.sh", "--warm", "/h/.vscode-warm/tbW1", "--close-on-exit"]);
-  assert.deepEqual(w.calls, [["tab.settle", { id: "tbW1" }]]);
+  assert.ok(!run.some(a => /^herdr\.(space|tab)=/.test(a)), "Herdr never shows it");
+  assert.ok(run.includes(`${WARM_LABEL}=1`) && run.includes("vscode.key=/h/.vscode-warm/id1"));
+  assert.deepEqual(run.slice(-4), ["/h/mods/vscode-viewer/editor/vsedit.sh", "--warm", "/h/.vscode-warm/id1", "--close-on-exit"]);
+  assert.deepEqual(w.calls, [], "no tab command: nothing on screen");
+  assert.equal(w.live[0].tabs.length, 1);
   await w.pool.fill(w.cx);
   assert.equal(w.hcCalls.filter(a => a[0] === "run").length, 1, "one per space, never a second");
   assert.equal(w.pool.due(), null);
 });
 
-// Herdr showing the warm tab (as seen live: settling doesn't hide a shown tab) from the `fromPoll`th poll on.
-function showWarmAfter(w, fromPoll, tab = "tbW1") {
-  let polls = 0;
-  w.cx.sleep = (sleep => async () => {
+test("a warm editor is claimable only once Herdr knows its terminal (terminal.keep fails before)", async () => {
+  const w = world({ knownAfter: 3 });
+  const seen = [];
+  const sleep = w.cx.sleep;
+  await w.pool.fill({ sleep: async () => {
+    if (!seen.length) seen.push(w.store[WARM].sp1, await w.pool.claim(w.spaces()[0], editor(), w.cx));
     await sleep();
-    if (++polls >= fromPoll) for (const s of w.live) if (s.tabs.some(t => t.id === tab)) for (const t of s.tabs) t.active = t.id === tab;
-  })(w.cx.sleep);
-}
-
-test("a new warm tab Herdr puts on screen: the shown tab comes back, the warm one ends at once, no more start", async () => {
-  for (const fromPoll of [1, 4]) { // shown as it appears, or a moment after it was settled
-    const w = world();
-    showWarmAfter(w, fromPoll);
-    await w.pool.fill(w.cx);
-    assert.deepEqual(w.calls, [["tab.settle", { id: "tbW1" }], ["tab.select", { id: "tbShell" }]], `poll ${fromPoll}`);
-    assert.ok(w.hcCalls.some(a => a[0] === "kill" && a[1] === "t1"));
-    assert.deepEqual(w.store[WARM], {});
-    w.advance(RETRY_MS * 10);
-    assert.equal(w.pool.due(), null, "never again until a reload");
-    await w.pool.fill(w.cx);
-    assert.equal(w.hcCalls.filter(a => a[0] === "run").length, 1);
-  }
+  } });
+  assert.deepEqual(seen, [{ key: "/h/.vscode-warm/id1", address: null }, null], "listed while it starts, not claimable");
+  assert.deepEqual(w.calls, []);
+  assert.equal(w.store[WARM].sp1.address, "t1");
+  const slow = world({ knownAfter: Infinity });
+  await slow.pool.fill(slow.cx);
+  assert.deepEqual(slow.store[WARM], {});
+  assert.ok(slow.hcCalls.some(a => a[0] === "kill" && a[1] === "t1"), "one Herdr never knows is ended");
 });
 
-test("a ready warm tab that ends up on screen later is ended on the next look", async () => {
+test("opening a file hands it over and gives the terminal a tab with terminal.keep, which is named and selected", async () => {
   const w = world();
   await w.pool.fill(w.cx);
-  for (const t of w.live[0].tabs) t.active = t.id === "tbW1"; // Herdr shows it (a click elsewhere, a restore)
-  assert.equal(w.pool.due(), 0, "at once");
-  await w.pool.fill(w.cx);
-  assert.ok(w.hcCalls.some(a => a[0] === "kill" && a[1] === "t1"));
-  assert.deepEqual(w.store[WARM], {});
-  assert.equal(w.hcCalls.filter(a => a[0] === "run").length, 1, "and none starts again");
-});
-
-test("opening a file hands it to the warm tab: no new terminal, the tab unsettled, moved last, named and selected", async () => {
-  const w = world({ spaces: [{ id: "sp1", tabs: ["tbShell", "tbOther"] }] });
-  await w.pool.fill(w.cx);
-  w.calls.length = 0;
   const logs = [];
   const openTab = createOpenTab({ hc: async () => assert.fail("no hc run on a warm open"), run: (n, a) => w.calls.push([n, a]), spaces: w.spaces,
     panes: () => [], warm: w.pool.claim, log: (f) => logs.push(f) });
   await openTab(editor(), w.cx);
-  const [cmd, args] = w.execCalls.find(c => c[0] === "sh");
-  assert.equal(cmd, "sh");
-  assert.deepEqual(args.slice(2), ["warm", "/h/.vscode-warm/tbW1", "/p/a.ts", "/p"]);
-  assert.deepEqual(w.calls, [["tab.unsettle", { id: "tbW1" }], ["tab.move", { id: "tbW1", index: 3 }],
-    ["tab.rename", { id: "tbW1", name: "a.ts" }], ["tab.select", { id: "tbW1" }]]);
+  const [, args] = w.execCalls.find(c => c[0] === "sh");
+  assert.deepEqual(args.slice(2), ["warm", "/h/.vscode-warm/id1", "/p/a.ts", "/p"]);
+  assert.deepEqual(w.calls, [["terminal.keep", { terminal: "t1", place: "tab" }],
+    ["tab.rename", { id: "tbKt1", name: "a.ts" }], ["tab.select", { id: "tbKt1" }]]);
   assert.deepEqual(w.hcCalls.at(-1), ["label", "t1", `${WARM_LABEL}=`, `${FILE_LABEL}=/p/a.ts`], "it now says which file it shows");
   assert.equal(w.store[WARM].sp1, undefined, "taken: the next one starts behind it");
   assert.equal(w.pool.due(), 500);
   assert.deepEqual(logs.map(l => [l.step, l.mode]), [["start", "cold"], ["select", "warm"]]);
-  assert.ok(logs.every(l => l.name === "a.ts" && Number.isFinite(l.at) && l.ms >= 0));
   await w.pool.fill(w.cx);
-  assert.equal(w.store[WARM].sp1.tab, "tbW2", "a new warm tab replaces the used one");
+  assert.equal(w.store[WARM].sp1.address, "t2", "a new warm editor replaces the used one");
+  assert.ok(!w.hcCalls.some(a => a[0] === "kill"), "the handed-over editor is the user's now");
 });
 
-test("no warm tab, one still starting, or a file it can't take: the open starts its own editor as before", async () => {
+test("no warm editor, a failing hand-off or a tab that never comes: the open starts its own editor as before", async () => {
   const cold = async (w) => {
     const hc = [];
     const openTab = createOpenTab({ hc: async (a) => { hc.push(a); return { code: 1, stdout: "" }; }, run: (n, a) => w.calls.push([n, a]),
       spaces: w.spaces, panes: () => [], warm: w.pool.claim });
     await openTab(editor(), w.cx);
-    return hc;
+    return hc[0]?.[0];
   };
   let w = world();
-  assert.equal((await cold(w))[0][0], "run", "none yet");
-  w = world();
-  w.store[WARM] = { sp1: { tab: "tbW1", key: "/h/.vscode-warm/tbW1", address: null } };
-  assert.equal((await cold(w))[0][0], "run", "still starting (no address)");
-  w = world({ handoff: 1 });
-  await w.pool.fill(w.cx);
-  assert.equal((await cold(w))[0][0], "run", "the editor isn't ready or is gone");
-  assert.ok(w.hcCalls.some(a => a[0] === "kill" && a[1] === "t1"), "a warm tab that can't take a file is ended");
-  assert.ok(w.execCalls.some(([c, a]) => c === "rm" && a.includes("/h/.vscode-warm/tbW1.pid")));
-  assert.equal(w.store[WARM].sp1, undefined);
+  assert.equal(await cold(w), "run", "none yet");
+  for (const opts of [{ handoff: 1 }, { keptAfter: Infinity }]) {
+    w = world(opts);
+    await w.pool.fill(w.cx);
+    assert.equal(await cold(w), "run", JSON.stringify(opts));
+    assert.ok(w.hcCalls.some(a => a[0] === "kill" && a[1] === "t1"), "the warm editor is ended");
+    assert.ok(w.execCalls.some(([c, a]) => c === "rm" && a.includes("/h/.vscode-warm/id1.pid")));
+    assert.equal(w.store[WARM].sp1, undefined);
+  }
 });
 
 test("only the Explorer's local editor is handed over: other programs, the viewer and remote spaces aren't", async () => {
   const w = world();
   await w.pool.fill(w.cx);
   const space = w.spaces()[0];
-  assert.equal(await w.pool.claim(space, { name: "x", folder: "/p", argv: ["sh", "/h/mods/vscode-settings/build-core.sh", "/h"] }), null);
-  assert.equal(await w.pool.claim(space, { name: "a.png", mod: "vscode-viewer", props: {} }), null);
-  assert.equal(await w.pool.claim(space, openArgs("/p/a.ts", { appHome: "/other", folder: "/p" })), null);
-  assert.equal(await w.pool.claim({ ...space, machine: "box" }, editor()), null);
-  assert.equal(w.execCalls.filter(c => c[0] === "sh").length, 0);
-  assert.equal(await w.pool.claim(space, editor()), "tbW1");
+  assert.equal(await w.pool.claim(space, { name: "x", folder: "/p", argv: ["sh", "/h/mods/vscode-settings/build-core.sh", "/h"] }, w.cx), null);
+  assert.equal(await w.pool.claim(space, { name: "a.png", mod: "vscode-viewer", props: {} }, w.cx), null);
+  assert.equal(await w.pool.claim(space, openArgs("/p/a.ts", { appHome: "/other", folder: "/p" }), w.cx), null);
+  assert.equal(await w.pool.claim({ ...space, machine: "box" }, editor(), w.cx), null);
+  assert.deepEqual(w.calls, []);
+  assert.equal(await w.pool.claim(space, editor(), w.cx), "tbKt1");
 });
 
-test("workbench.editor.preloadEditor is opt-in: absent or false, none start; turned off, a running one ends", async () => {
-  for (const settings of ["{}", '// mine\n{ "workbench.editor.preloadEditor": false, }', "not json"]) {
-    const off = world({ settings });
-    await off.pool.fill(off.cx);
-    assert.deepEqual(off.hcCalls.filter(a => a[0] !== "ls"), [], settings);
-    assert.deepEqual(off.store[WARM] ?? {}, {});
-    assert.equal(off.pool.due(), null, "nothing to do while off");
-  }
+test("a warm editor that shows up on screen unasked is ended at once, and none start again until a reload", async () => {
+  const w = world();
+  await w.pool.fill(w.cx);
+  w.show("t1");
+  assert.equal(w.pool.due(), 0, "at once");
+  await w.pool.fill(w.cx);
+  assert.ok(w.hcCalls.some(a => a[0] === "kill" && a[1] === "t1"));
+  assert.deepEqual(w.store[WARM], {});
+  w.advance(RETRY_MS * 10);
+  assert.equal(w.pool.due(), null);
+  await w.pool.fill(w.cx);
+  assert.equal(w.hcCalls.filter(a => a[0] === "run").length, 1);
+});
+
+test("workbench.editor.preloadEditor false: none start, a running one ends on the next pass, opens go as before", async () => {
+  const off = world({ settings: '// mine\n{ "workbench.editor.preloadEditor": false, }' });
+  await off.pool.fill(off.cx);
+  assert.deepEqual(off.hcCalls.filter(a => a[0] !== "ls"), []);
+  assert.deepEqual(off.store[WARM] ?? {}, {});
+  assert.equal(off.pool.due(), null, "nothing to do while off");
   const w = world();
   await w.pool.fill(w.cx);
   w.file.settings = '{ "workbench.editor.preloadEditor": false }';
   await w.pool.fill(w.cx);
   assert.deepEqual(w.hcCalls.at(-1), ["kill", "t1"]);
   assert.deepEqual(w.store[WARM], {});
-  assert.equal(await w.pool.claim(w.spaces()[0], editor()), null);
+  assert.equal(await w.pool.claim(w.spaces()[0], editor(), w.cx), null);
 });
 
-test("a space left with only its warm tab: it ends at once (so the space closes); a closed space's entry goes", async () => {
+test("a closed space's warm editor is ended", async () => {
   const w = world({ spaces: [{ id: "sp1", tabs: ["tbShell"] }, { id: "sp2", tabs: ["tbB"] }] });
   await w.pool.fill(w.cx);
   assert.deepEqual(Object.keys(w.store[WARM]).sort(), ["sp1", "sp2"]);
-  w.live[0].tabs = w.live[0].tabs.filter(t => t.id !== "tbShell"); // its last tab closed
-  w.live.splice(1, 1); // sp2 closed with its tabs
-  assert.equal(w.pool.due(), 0, "at once");
+  w.live.splice(1, 1);
+  assert.equal(w.pool.due(), 500);
   await w.pool.fill(w.cx);
-  assert.ok(w.hcCalls.some(a => a[0] === "kill" && a[1] === "t1"));
-  assert.deepEqual(w.store[WARM], {});
-  assert.equal(w.hcCalls.filter(a => a[0] === "run").length, 2, "no new one for a space with no tab of its own");
+  assert.ok(w.hcCalls.some(a => a[0] === "kill" && a[1] === "t2"));
+  assert.deepEqual(Object.keys(w.store[WARM]), ["sp1"]);
 });
 
 test("a warm editor that ends by itself, or doesn't start, is tried again only after a while", async () => {
   const w = world();
   await w.pool.fill(w.cx);
-  w.live[0].tabs = w.live[0].tabs.filter(t => t.id !== "tbW1"); // it exited
+  w.terms[0].dead = true; // it exited
   assert.equal(w.pool.due(), 500);
   await w.pool.fill(w.cx);
   assert.equal(w.hcCalls.filter(a => a[0] === "run").length, 1, "not again at once");
   assert.equal(w.pool.due(), null);
   w.advance(RETRY_MS);
   await w.pool.fill(w.cx);
-  assert.equal(w.store[WARM].sp1.tab, "tbW2");
-  const never = world({ appearsAfter: Infinity });
-  await never.pool.fill(never.cx);
-  assert.deepEqual(never.hcCalls.at(-1), ["kill", "t1"], "a tab Herdr never shows is ended");
-  assert.deepEqual(never.store[WARM], {});
-  assert.equal(never.pool.due(), null);
+  assert.equal(w.store[WARM].sp1.address, "t2");
   const broken = world({ hcCode: 1 });
   await broken.pool.fill(broken.cx);
   assert.deepEqual(broken.store[WARM], {});
@@ -220,12 +207,12 @@ test("a warm editor that ends by itself, or doesn't start, is tried again only a
 
 test("warm editors left from before a restart (labelled, not listed) are ended once this computer's layout is read", async () => {
   const w = world();
-  w.orphan("sp1", "tbOld1");
-  w.orphan("sp1", "tbOld2");
+  w.orphan();
+  w.orphan();
   await w.pool.fill(w.cx);
   assert.deepEqual(w.hcCalls.filter(a => a[0] === "kill").map(a => a[1]).sort(), ["t1", "t2"]);
-  assert.ok(w.execCalls.some(([c, a]) => c === "rm" && a.includes("/h/.vscode-warm/tbOld1.pid")));
-  assert.equal(w.store[WARM].sp1.tab, "tbW3", "the space gets a new one of its own");
+  assert.ok(w.execCalls.some(([c, a]) => c === "rm" && a.includes("/h/.vscode-warm/old1.pid")));
+  assert.equal(w.store[WARM].sp1.address, "t3", "the space gets a new one of its own");
   const kills = w.hcCalls.filter(a => a[0] === "kill").length;
   await w.pool.fill(w.cx);
   assert.equal(w.hcCalls.filter(a => a[0] === "kill").length, kills, "swept once: a handed-over editor keeps its label a moment");
@@ -243,7 +230,7 @@ test("the timing log follows workbench.editor.openTimingLog", async () => {
 // The handoff script against the real JS editor waiting with --warm: the file reaches it, the files are cleaned up.
 test("the handoff reaches a real warm editor (vsedit.cjs --warm), which then opens the file", async () => {
   const home = mkdtempSync(join(tmpdir(), "warm-home-"));
-  const key = join(home, ".vscode-warm", "tbW1");
+  const key = join(home, ".vscode-warm", "id1");
   const child = spawn(process.execPath, [new URL("../../vscode-viewer/editor/vsedit.cjs", import.meta.url).pathname, "--warm", key, "--close-on-exit"],
     { stdio: ["ignore", "pipe", "pipe"] });
   let err = "";
@@ -252,10 +239,9 @@ test("the handoff reaches a real warm editor (vsedit.cjs --warm), which then ope
   for (let i = 0; i < 100 && !existsSync(`${key}.pid`); i++) await new Promise((r) => setTimeout(r, 50));
   assert.equal(readFileSync(`${key}.pid`, "utf8"), String(child.pid));
   const w = world({ real: true, appHome: home });
-  w.store[WARM] = { sp1: { tab: "tbW1", key, address: "t9" } };
-  w.live[0].tabs.push({ id: "tbW1", active: false });
+  w.store[WARM] = { sp1: { key, address: "t9" } };
   const args = openArgs(join(home, "a.ts"), { appHome: home, folder: home });
-  assert.equal(await w.pool.claim(w.spaces()[0], args), "tbW1");
+  assert.equal(await w.pool.claim(w.spaces()[0], args, w.cx), "tbKt9");
   assert.equal(await exited, 1); // the editor without a terminal stops at its first check, past the wait
   assert.match(err, /needs a terminal/);
   assert.equal(existsSync(key) || existsSync(`${key}.pid`), false);

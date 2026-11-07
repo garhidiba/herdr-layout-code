@@ -19,9 +19,9 @@
   "files.insertFinalNewline": false,
   // The Explorer reveals and highlights the active editor's file (opens its folders, scrolls to it).
   "explorer.autoReveal": true,
-  // Experimental (off): each local space keeps an editor started in a hidden tab, so a file the Explorer opens shows
-  // at once. Herdr may show such a tab when it appears; the Explorer then ends it and stops until it reloads.
-  "workbench.editor.preloadEditor": false,
+  // Each local space keeps an editor started off screen (no tab), so a file the Explorer opens shows at once in a new
+  // tab (false: each open starts its editor, a little later).
+  "workbench.editor.preloadEditor": true,
   // Debugging: each Explorer open's steps (start, hc-run, shown, select; warm or cold) as JSON lines with epoch ms in
   // <herdr home>/.vscode-open-timing.log.
   // "workbench.editor.openTimingLog": true,

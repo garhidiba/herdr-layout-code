@@ -1,14 +1,15 @@
-// Warm editor tabs. Herdr shows a labelled terminal as a tab 0.1-0.5 s after it starts (launch.js), most of the wait
-// when a file opens. So each local space keeps one hidden tab whose editor already runs with no file (`vsedit.sh
-// --warm <key>`: terminal.cjs waitForFile, warm.rs): opening a file hands it the file and shows that tab, and the
-// next one starts behind it. The tab is settled (tab.next / tab.prev skip it) and listed in the shared value WARM,
-// whose tabs vscode-tabs leaves out. Opt-in (workbench.editor.preloadEditor: true in vscode-settings.json): settling
-// doesn't hide a shown tab, and Herdr may show an adopted one; a warm tab seen on screen is ended at once (giveBack).
-// Remote spaces open as before. No Herdr imports, so node tests load it.
+// Warm editors. Herdr shows a labelled terminal as a tab 0.1-0.5 s after it starts (launch.js), most of the wait when
+// a file opens. So each local space keeps one editor already running with no file (`vsedit.sh --warm <key>`:
+// terminal.cjs waitForFile, warm.rs) in a core terminal without Herdr's space/tab labels: Herdr shows no such
+// terminal, so it is never on screen. Opening a file hands it the file and gives the terminal a tab with
+// terminal.keep {place: "tab"} (measured: the tab shows in 32-39 ms, the focus stays), and the next one starts behind
+// it. One that shows up in a pane anyway is ended at once and none start again until the Explorer reloads.
+// workbench.editor.preloadEditor: false in vscode-settings.json turns it off. Remote spaces open as before. No Herdr
+// imports, so node tests load it.
 import { directRun, newTabId } from "./launch.js";
 import { EDITOR, FILE_LABEL, editorFileOf, settingsOf } from "./paths.js";
 
-// { [space id]: { tab, key, address } }: each local space's warm tab (address null while it starts). Shared, so any copy
+// { [space id]: { key, address } }: each local space's warm editor (address null while it starts). Shared, so any copy
 // of the Explorer (the tree, its menus) can hand it a file; the tree starts and ends them (fill).
 export const WARM = "vscode-explorer.warm";
 // The terminal label of a warm editor, until it is handed a file (then it gets paths.js FILE_LABEL).
@@ -18,14 +19,12 @@ export const TIMING = "vscode-explorer.openTiming";
 export const PRELOAD_KEY = "workbench.editor.preloadEditor", TIMING_KEY = "workbench.editor.openTimingLog";
 // After a warm editor fails to start or ends by itself, the next try waits this long.
 export const RETRY_MS = 30000;
-// How long a new warm tab must stay off screen before it is used (Herdr may show an adopted tab a moment later).
-export const GUARD_MS = 500;
 
 // Hands file and folder to the warm editor of <key> ($1): written to <key>, then SIGUSR2 to the pid in <key>.pid,
 // which the editor writes once it can take one. Fails (nonzero) when it isn't ready or is gone.
 const HANDOFF = 'pid=$(cat "$1.pid" 2>/dev/null) && [ -n "$pid" ] && printf "%s\\n%s\\n" "$2" "$3" > "$1.tmp" && mv "$1.tmp" "$1" && kill -USR2 "$pid"';
 
-export function createWarmPool({ hc, run, exec, spaces, terminals, machines, shared, setShared, appHome, home, readTextFile,
+export function createWarmPool({ hc, run, exec, spaces, panes, terminals, machines, shared, setShared, appHome, home, readTextFile,
   newId = newTabId, now = Date.now, wait = 3000, step = 25 }) {
   const dir = () => `${appHome()}/.vscode-warm`;
   const launcher = () => `${appHome()}/${EDITOR}`;
@@ -39,104 +38,91 @@ export function createWarmPool({ hc, run, exec, spaces, terminals, machines, sha
     if (address) hc(["kill", address]).catch(() => {});
     exec("rm", ["-f", key, `${key}.pid`]).catch(() => {});
   };
-  const spaceOf = (id) => spaces().find(s => s.id === id);
-  // enabled: as the last pass read it. broken: a warm tab was shown (Herdr selected it): none start until a reload.
-  let filling = false, retryAt = 0, swept = false, enabled = false, broken = false;
-  const isShown = (space, tab) => !!spaceOf(space)?.tabs.find(t => t.id === tab)?.active;
-  // A warm tab on screen: tab.settle only takes a tab out of the lists, so a shown one stays shown, as "Ready" with the
-  // tab bar leaving it out. The screen goes back to `before` (if given) and the tab is ended at once; no more start.
-  const giveBack = (space, w, before) => {
-    if (before && before !== w.tab) run("tab.select", { id: before });
-    end(w);
-    put(space, null);
-    broken = true;
-  };
+  const live = (address) => terminals().some(t => t.address === address);
+  const paneOf = (address) => panes().find(p => p.terminal === address);
+  // enabled: as the last pass read it. broken: a warm editor showed up on screen: none start until a reload.
+  let filling = false, retryAt = 0, swept = false, enabled = true, broken = false;
 
-  // The id of `space`'s warm tab, handed tab.new `args` (the Explorer's local editor: paths.js openArgs), unsettled and
-  // moved last as a new tab would be; null when there is none ready or args are another program's (the open goes on
-  // as before). A tab that can't take it is ended.
-  async function claim(space, args) {
+  // The id of the tab now showing `space`'s warm editor, handed tab.new `args` (the Explorer's local editor: paths.js
+  // openArgs); null when there is none ready or args are another program's (the open goes on as before). One that
+  // can't take the file or get a tab is ended.
+  async function claim(space, args, cx) {
     const w = entries()[space.id], file = editorFileOf(args.argv);
     const editor = file && JSON.stringify(args.argv) === JSON.stringify(["exec", "sh", launcher(), file, "--close-on-exit"]);
-    if (!editor || space.machine || !w?.address || !space.tabs.some(t => t.id === w.tab)) return null;
+    if (!editor || space.machine || !w?.address) return null;
     put(space.id, null); // taken: nothing else hands it a file, and fill() starts the next one
+    run("terminal.keep", { terminal: w.address, place: "tab" }); // the tab while the editor opens the file
     const r = await exec("sh", ["-c", HANDOFF, "warm", w.key, file, args.folder ?? ""]).catch(() => null);
-    if (r?.code !== 0) { end(w); return null; }
+    for (let waited = 0; r?.code === 0 && !paneOf(w.address) && waited < wait; waited += step) await cx.sleep(step);
+    const tab = r?.code === 0 ? paneOf(w.address)?.tab : null;
+    if (!tab) { end(w); return null; }
     hc(["label", w.address, `${WARM_LABEL}=`, `${FILE_LABEL}=${file}`]).catch(() => {});
-    run("tab.unsettle", { id: w.tab });
-    run("tab.move", { id: w.tab, index: space.tabs.length });
-    return w.tab;
+    return tab;
   }
 
-  // Whether fill() has work: null for none, else how long to wait first (a space left with only its warm tab: at once).
+  // Whether fill() has work: null for none, else how long to wait first (a warm editor on screen: at once).
   function due() {
     if (filling) return null;
-    const all = entries(), live = spaces();
-    let later = !swept || (enabled && !broken && now() >= retryAt && live.some(s => !s.machine && !all[s.id]));
+    const all = entries(), ids = new Set(spaces().map(s => s.id));
+    let later = !swept || (enabled && !broken && now() >= retryAt && spaces().some(s => !s.machine && !all[s.id]));
     for (const [id, w] of Object.entries(all)) {
-      const s = live.find(x => x.id === id);
-      if (s?.tabs.length === 1 && s.tabs[0].id === w.tab) return 0;
-      if (w.address && s?.tabs.find(t => t.id === w.tab)?.active) return 0; // on screen
-      if (!s?.tabs.some(t => t.id === w.tab)) later = true;
+      if (w.address && paneOf(w.address)) return 0;
+      if (!ids.has(id) || (w.address && !live(w.address))) later = true;
     }
     return later ? 500 : null;
   }
 
-  // One pass: reads the settings, ends warm tabs that are off, gone or alone in their space (and, once this computer's
-  // layout is read, warm editors left from before: after a restart), then starts one for each local space without.
+  // One pass: reads the settings, ends warm editors that are off, on screen, gone or of a closed space (and, once this
+  // computer's layout is read, ones left from before: after a restart), then starts one for each local space without.
   async function fill(cx) {
     if (filling) return;
     filling = true;
     try {
       const settings = settingsOf(await readTextFile(`${appHome()}/vscode-settings.json`).catch(() => null));
-      enabled = settings[PRELOAD_KEY] === true;
+      enabled = settings[PRELOAD_KEY] !== false;
       if (shared(TIMING) !== (settings[TIMING_KEY] === true)) setShared(TIMING, settings[TIMING_KEY] === true);
       if (!swept && machines().find(m => m.name === null)?.layout === "ready") {
         swept = true;
-        // `hc ls --label` (its JSON rows carry no labels); terminals() rows name the tab for the hand-off files.
+        // `hc ls --label` (its JSON rows carry no labels); terminals() rows name the hand-off file.
         const listed = await hc(["ls", "--json", "--label", `${WARM_LABEL}=1`]).catch(() => null);
         let found = [];
         try { found = listed?.code === 0 ? JSON.parse(listed.stdout).terminals ?? [] : []; } catch {}
         const mine = new Set(Object.values(entries()).map(w => w.address));
         for (const { address } of found) {
           if (typeof address !== "string" || address.includes("/") || mine.has(address)) continue;
-          const tab = terminals().find(t => t.address === address)?.labels?.["herdr.tab"];
-          end({ address, key: `${dir()}/${tab}` });
+          const key = terminals().find(t => t.address === address)?.labels?.["vscode.key"];
+          end({ address, key: key ?? `${dir()}/none` });
         }
       }
+      const ids = new Set(spaces().map(s => s.id));
       for (const [id, w] of Object.entries(entries())) {
-        const s = spaceOf(id), shown = s?.tabs.some(t => t.id === w.tab);
-        if (w.address && isShown(id, w.tab)) { giveBack(id, w, null); continue; }
-        if (enabled && !broken && shown && s.tabs.length > 1) continue;
+        if (w.address && paneOf(w.address)) broken = true; // Herdr showed it: never again this session
+        else if (enabled && !broken && ids.has(id) && w.address && live(w.address)) continue;
         end(w);
         put(id, null);
-        if (enabled && s && !shown) retryAt = now() + RETRY_MS; // it ended by itself
+        if (enabled && ids.has(id) && w.address && !live(w.address)) retryAt = now() + RETRY_MS; // it ended by itself
       }
       if (!enabled || broken || now() < retryAt) return;
       for (const s of spaces()) {
-        if (s.machine || entries()[s.id] || !s.tabs.length) continue;
+        if (s.machine || entries()[s.id]) continue;
         if (!(await start(s, cx))) { retryAt = now() + RETRY_MS; return; }
       }
     } finally { filling = false; }
   }
 
-  // Starts `space`'s warm tab: listed in WARM before it exists (the tab bar never shows it), settled once Herdr adopts
-  // it, claimable once it stayed off screen for GUARD_MS. False when it doesn't start, show up, or comes on screen.
+  // Starts `space`'s warm editor off screen (no herdr.space/herdr.tab labels), listed at once and claimable once Herdr
+  // knows the terminal (terminal.keep fails before). False when it doesn't start or isn't known in time.
   async function start(space, cx) {
-    const tab = newId(), key = `${dir()}/${tab}`, before = space.tabs.find(t => t.active)?.id;
-    put(space.id, { tab, key, address: null });
+    const key = `${dir()}/${newId()}`;
+    put(space.id, { key, address: null });
     const argv = ["sh", launcher(), "--warm", key, "--close-on-exit"];
-    const r = await hc(directRun({ folder: space.folder || home(), argv }, { space: space.id, tab }, [`${WARM_LABEL}=1`])).catch(() => null);
+    const r = await hc(directRun({ folder: space.folder || home(), argv }, null, [`${WARM_LABEL}=1`, `vscode.key=${key}`])).catch(() => null);
     let address = null;
     try { address = r?.code === 0 ? JSON.parse(r.stdout).address : null; } catch {}
     if (!address) { put(space.id, null); return false; }
-    const shown = () => spaceOf(space.id)?.tabs.find(t => t.id === tab);
-    for (let waited = 0; !shown() && waited < wait; waited += step) await cx.sleep(step);
-    if (!shown()) { end({ address, key }); put(space.id, null); return false; }
-    run("tab.settle", { id: tab });
-    for (let waited = 0; waited < GUARD_MS && !isShown(space.id, tab); waited += step) await cx.sleep(step);
-    if (isShown(space.id, tab) || !shown()) { giveBack(space.id, { address, key, tab }, before); return false; }
-    put(space.id, { tab, key, address });
+    for (let waited = 0; !live(address) && waited < wait; waited += step) await cx.sleep(step);
+    if (!live(address) || paneOf(address)) { end({ address, key }); put(space.id, null); if (paneOf(address)) broken = true; return false; }
+    put(space.id, { key, address });
     return true;
   }
 

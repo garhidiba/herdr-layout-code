@@ -175,10 +175,10 @@ test("explorer.autoReveal: on by default, a boolean the toggle writes, anything 
   assert.throws(() => withSetting({}, "explorer.autoReveal", "off"));
 });
 
-test("workbench.editor.preloadEditor: off by default (opt-in), a boolean", () => {
-  assert.equal(normalize({})["workbench.editor.preloadEditor"], false);
-  assert.equal(normalize({ "workbench.editor.preloadEditor": true })["workbench.editor.preloadEditor"], true);
-  assert.equal(normalize({ "workbench.editor.preloadEditor": "yes" })["workbench.editor.preloadEditor"], false);
+test("workbench.editor.preloadEditor: on by default, a boolean", () => {
+  assert.equal(normalize({})["workbench.editor.preloadEditor"], true);
+  assert.equal(normalize({ "workbench.editor.preloadEditor": false })["workbench.editor.preloadEditor"], false);
+  assert.equal(normalize({ "workbench.editor.preloadEditor": "no" })["workbench.editor.preloadEditor"], true);
 });
 
 test("a server address is checked as typed: http(s), a host, a port in range; empty is the default", () => {

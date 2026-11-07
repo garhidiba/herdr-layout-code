@@ -140,7 +140,7 @@ export default class Files extends View {
     // The confirm dialog's yes for installing the editor on a remote machine (menu.js askInstall).
     cx.spawn(async () => { for (;;) if (await nextCommand() === "install-remote") remote.installRequested(); });
     this.refresh(cx);
-    // The warm editor tabs (warm.js) are this tree's: ones listed from before (a restart, a reload) are forgotten, and
+    // The warm editors (warm.js) are this tree's: ones listed from before (a restart, a reload) are forgotten, and
     // the first pass ends their editors. Every 10s a pass reads workbench.editor.preloadEditor; render() runs one when due.
     setShared(WARM, {});
     this.warmFill(cx, 0);
@@ -155,7 +155,7 @@ export default class Files extends View {
     cx.timer.every(PRELOAD_EVERY, cx => this.preloadAll(cx));
   }
 
-  // One warm tab pass (warm.js fill) after `delay` ms; never two at once.
+  // One warm editor pass (warm.js fill) after `delay` ms; never two at once.
   warmFill(cx, delay) {
     if (this.warming) return;
     this.warming = true;
@@ -416,7 +416,7 @@ export default class Files extends View {
     if (asked !== this.asked) { if (this.asked !== undefined) this.refresh(cx); this.asked = asked; }
     this.autoReveal(cx);
     this.revealAsked(cx);
-    const due = warm.due(); // a space without its warm tab (one was just used), or one to end
+    const due = warm.due(); // a space without its warm editor (one was just used), or one to end
     if (due !== null) this.warmFill(cx, due);
     const t = theme(), rows = this.rows("", 0, []), byPath = new Map(rows.map(r => [r.path, r]));
     this.scrollToRevealed(rows);

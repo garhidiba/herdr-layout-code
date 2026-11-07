@@ -1,7 +1,7 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
 import { spaces, panes, terminals, run, openOverlay, theme, window, shared, layout, settings, hc, exec } from "herdr";
-import { tabFileOf, dirtyTabs, shownTabs, TAB_MENU, WARM } from "./tabfile.js";
+import { tabFileOf, dirtyTabs, TAB_MENU } from "./tabfile.js";
 import { createTabCloser, signalCommand, CLOSE_REQUEST } from "./close.js";
 
 function find(node, id) {
@@ -52,7 +52,7 @@ export default class Tabs extends View {
     this.closeAsked(cx);
     const t = theme();
     const space = spaces().find(p => p.active);
-    const shown = shownTabs(space, shared(WARM)); // not the Explorer's hidden warm editor tabs
+    const shown = space?.tabs ?? [];
     const dirty = dirtyTabs(space, panes());
     // A tab's × on the space's last tab closes without Herdr's "Close space?": vscode-spaces keeps the space as a gray row.
     // An unsaved editor asks first (close.js).

@@ -4,7 +4,7 @@
 // as that tab instead (Herdr's docs: "A terminal with those labels shows up there"), started straight from `sh -c`;
 // once Herdr shows it, the tab is named and selected. Mod tabs, remote spaces, an hc failure or a tab that never
 // shows up go through tab.new as before. Herdr takes 0.1-0.5 s to show such a tab: `warm` (vscode-explorer's
-// warm.js) may hand the open to a hidden tab started ahead of time instead.
+// warm.js) may hand the open to an editor started off screen ahead of time instead.
 // `local` (Settings: its files and the Rust core are on this computer) opens the tab in a space on this computer even
 // while a remote space is focused: tab.new has no machine argument, only `space` (and the new tab's folder is local).
 // The same file is in vscode-explorer and vscode-settings (mods are installed on their own); a test keeps them equal.
@@ -16,15 +16,17 @@ const FIND = 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; co
 
 export const newTabId = () => `tb${randomUUID().replaceAll("-", "")}`;
 
-// `hc` arguments for tab.new {folder, argv} as tab `tab` of `space` (ids on this machine), with `labels` (k=v) too.
-export function directRun({ folder, argv }, { space, tab }, labels = []) {
+// `hc` arguments for tab.new {folder, argv} as tab `tab` of `space` (ids on this machine; null `where`: no tab, off
+// screen), with `labels` (k=v) too.
+export function directRun({ folder, argv }, where, labels = []) {
   const program = argv[0] === "exec" ? argv.slice(1) : argv; // `exec` only matters inside Herdr's shell
-  return ["run", "--bg", "--json", "--no-parent", "--keep", "--cwd", folder, "--label", `herdr.space=${space}`,
-    "--label", `herdr.tab=${tab}`, ...labels.flatMap(l => ["--label", l]), "--", "/bin/sh", "-c", FIND, ...program];
+  const all = [...(where ? [`herdr.space=${where.space}`, `herdr.tab=${where.tab}`] : []), ...labels];
+  return ["run", "--bg", "--json", "--no-parent", "--keep", "--cwd", folder, ...all.flatMap(l => ["--label", l]),
+    "--", "/bin/sh", "-c", FIND, ...program];
 }
 
 // `herdr`'s hc, run, spaces and panes; `newId` makes the tab id. Returns openTab(args, cx), awaitable.
-// `warm(space, args)`: the id of a tab already showing args' program (it is named and selected as a new one), or null.
+// `warm(space, args, cx)`: the id of a tab already showing args' program (it is named and selected as a new one), or null.
 // `log(fields)`: each step of a local open, for timing: { step, mode: "warm" | "cold", ms since the open began, at:
 // epoch ms, name }; steps start, hc-run and shown (cold only), select.
 export function createOpenTab({ hc, run, spaces, panes, local = false, newId = newTabId, wait = 3000, step = 25, warm = null, log = null }) {
@@ -46,7 +48,7 @@ export function createOpenTab({ hc, run, spaces, panes, local = false, newId = n
       run("tab.select", { id: tab });
       mark("select");
     };
-    const warmTab = warm ? await warm(space, args).catch(() => null) : null;
+    const warmTab = warm ? await warm(space, args, cx).catch(() => null) : null;
     if (warmTab) { mode = "warm"; return show(warmTab); }
     const tab = newId();
     const r = await hc(directRun(args, { space: space.id, tab })).catch(() => null);

@@ -10,8 +10,8 @@ import { menuItems, menuHeight, openWith, baseName, parentOf, relativeTo, namePr
 import { createOps } from "./ops.js";
 import { createRemote, createOpenFile, keysOs, ROOT, INSTALL_COMMAND, INSTALL_REQUEST } from "./remote.js";
 
-// Each local space's hidden warm editor tab (warm.js): the tree keeps them (main.js), any open hands one a file.
-export const warm = createWarmPool({ hc, run, exec, spaces, terminals, machines, shared, setShared, appHome, home, readTextFile });
+// Each local space's warm editor, off screen (warm.js): the tree keeps them (main.js), any open hands one a file.
+export const warm = createWarmPool({ hc, run, exec, spaces, panes, terminals, machines, shared, setShared, appHome, home, readTextFile });
 // workbench.editor.openTimingLog: each open's steps as JSON lines in <herdr home>/.vscode-open-timing.log (hidden: no
 // mod reload), written after the tab is selected so the timing doesn't pay for it.
 let timing = [];
