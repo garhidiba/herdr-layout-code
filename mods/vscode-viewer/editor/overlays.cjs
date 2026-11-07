@@ -5,6 +5,7 @@ const path = require("path");
 const W = require("./width.cjs");
 const { fit } = require("./paint.cjs");
 const { stepMenu } = require("./commands.cjs");
+const { Bar } = require("./scrollbar.cjs");
 
 const WHITE = "#ffffff";
 const inside = (ev, x, y, w, h) => ev.x >= x && ev.x < x + w && ev.y >= y && ev.y < y + h;
@@ -91,10 +92,12 @@ class Menu {
 
 // ---------- quick pick ----------
 // source(text) -> [{ label, detail, key, hits, run }]; the list is recomputed on each change. note: dim text at the
-// input's right end (where the results come from).
+// input's right end (where the results come from). Keys keep the selection in view; the wheel and the scrollbar scroll
+// the list alone (follow off until the next key).
 class Picker {
-  constructor(text, source, placeholder, note = "") { this.text = text; this.source = source; this.placeholder = placeholder; this.note = note; this.index = 0; this.top = 0; this.refresh(); }
-  refresh() { this.items = this.source(this.text); this.index = 0; this.top = 0; }
+  constructor(text, source, placeholder, note = "") { this.text = text; this.source = source; this.placeholder = placeholder; this.note = note; this.bar = new Bar(true); this.refresh(); }
+  refresh() { this.items = this.source(this.text); this.index = 0; this.top = 0; this.follow = true; }
+  scroll(top, size) { this.top = Math.max(0, Math.min(top, this.items.length - size)); this.follow = false; }
   box(ed) { const w = Math.min(ed.cols - 2, 80), size = Math.max(1, Math.min(12, this.items.length || 1, ed.rows - 6)); return { x: Math.floor((ed.cols - w) / 2) + 1, y: 2, w, size }; }
   render(P, ed) {
     const c = ed.colors, { x, y, w, size } = this.box(ed), inner = w - 2;
@@ -107,11 +110,13 @@ class Picker {
     P.text(note, c.lineNumber, c.input);
     P.text(" ", c.fg, c.input);
     this.cursor = [y + 1, x + 2 + Math.min(inner - 3, W.textWidth(shown, 8))];
-    this.top = scrollTo(this.top, this.index, size);
+    if (this.follow) this.top = scrollTo(this.top, this.index, size);
+    this.top = Math.max(0, Math.min(this.top, this.items.length - size));
+    const iw = inner - (this.bar.layout(this.items.length > size, y + 2, x + w - 2, size, size, this.items.length, this.top) ? 1 : 0);
     for (let r = 0; r < size; r++) {
       P.move(y + 2 + r, x + 1);
       const it = this.items[this.top + r];
-      if (!it) { P.text(fit(r === 0 ? " No matching results" : "", inner), c.lineNumber, c.widget); continue; }
+      if (!it) { P.text(fit(r === 0 ? " No matching results" : "", iw), c.lineNumber, c.widget); continue; }
       const on = this.top + r === this.index, bg = on ? c.selection : c.widget, key = it.key ? it.key + " " : "";
       let used = 1;
       P.text(" ", c.fg, bg);
@@ -119,19 +124,21 @@ class Picker {
       let i = 0;
       for (const ch of it.label) {
         const cw = W.charWidth(ch.codePointAt(0));
-        if (used + cw > inner - W.textWidth(key, 8) - 1) break;
+        if (used + cw > iw - W.textWidth(key, 8) - 1) break;
         P.text(ch, hits.has(i) ? c.highlight : c.fg, bg, hits.has(i) ? 2 : 0);
         used += cw; i += ch.length;
       }
-      const room = inner - used - W.textWidth(key, 8);
+      const room = iw - used - W.textWidth(key, 8);
       P.text(fit(it.detail ? "  " + it.detail : "", room), c.lineNumber, bg);
       P.text(key, c.barFg, bg);
     }
+    this.bar.paint(P, { ...c, bg: c.widget });
   }
   key(ev, ed) {
     if (ev.type === "text" || ev.type === "paste") { this.text += ev.text.split(/\r?\n|\r/)[0]; this.refresh(); return true; }
     if (ev.type !== "key") return true;
     const n = this.items.length, size = this.box(ed).size;
+    this.follow = true;
     switch (ev.name) {
       case "escape": ed.closePopup(); break;
       case "backspace": this.text = [...this.text].slice(0, -1).join(""); this.refresh(); break;
@@ -139,13 +146,17 @@ class Picker {
       case "down": if (n) this.index = (this.index + 1) % n; break;
       case "pageup": this.index = Math.max(0, this.index - size); break;
       case "pagedown": this.index = Math.min(Math.max(0, n - 1), this.index + size); break;
+      case "home": this.index = 0; break;
+      case "end": this.index = Math.max(0, n - 1); break;
       case "enter": { const it = this.items[this.index]; ed.closePopup(); if (it) it.run(); break; }
     }
     return true;
   }
   mouse(ev, ed) {
-    const { x, y, w, size } = this.box(ed);
+    const { x, y, w, size } = this.box(ed), pos = this.bar.mouse(ev);
+    if (pos !== undefined) { if (pos !== null) this.scroll(pos, size); return true; }
     if (!inside(ev, x, y, w, size + 3)) { if (ev.button === 0 && !ev.release && !ev.motion) ed.closePopup(); return true; }
+    if (ev.button === 64 || ev.button === 65) { this.scroll(this.top + (ev.button === 64 ? -3 : 3), size); return true; }
     const r = ev.y - y - 2;
     if (ev.button === 0 && !ev.release && !ev.motion && r >= 0 && r < size && this.items[this.top + r]) { this.index = this.top + r; this.key({ type: "key", name: "enter" }, ed); }
     return true;

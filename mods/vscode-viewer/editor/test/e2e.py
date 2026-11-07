@@ -1127,6 +1127,37 @@ MED = ('export function greet(name: string) {\n  return "hi " + name;\n}\nconst 
 OTHER = "export function farewell() {\n  return 1;\n}\n"
 
 
+def run_picker_scroll(tmp):
+    """Select Language Mode (Ctrl+K M) lists more languages than its 12 rows: End shows YAML at the bottom, Home goes
+    back to Plain Text, the wheel over the list scrolls it (the selection stays), and a click after the wheel picks the
+    row under the pointer."""
+    file = os.path.join(tmp, "s.lua")
+    open(file, "w").write("print(1)\n")
+    t = Term(file)
+    assert t.read("Ln 1, Col 1")
+    t.send("\x0b"); t.send("m", wait=0.4)                # Ctrl+K M
+    assert t.read("Select Language Mode", timeout=3) or "Lua" in plain(t), "no language picker"
+    t.out = b""
+    t.send("\x1b[F", wait=0.4)                           # End
+    assert "YAML" in plain(t), "End did not scroll to the last language:\n" + plain(t)[-600:]
+    t.out = b""
+    t.send("\x1b[H", wait=0.4)                           # Home
+    assert "Plain Text" in plain(t), "Home did not scroll back to the first language"
+    t.out = b""
+    t.send("\x1b[<65;50;5M", wait=0.2); t.send("\x1b[<65;50;5M", wait=0.4)   # two wheel notches down over the list
+    sc = plain(t)
+    at = sc.rfind("\x1b[4;12H")                         # the first list row (box at x 11, y 2: the list from row 4)
+    row = re.split(r"\x1b", sc[at + 8:], maxsplit=1)[0].strip() if at >= 0 else ""
+    assert row and not row.startswith("Plain Text"), "the wheel did not scroll the list: " + repr(row)
+    assert "\x1b[4;89H" in sc, "no scrollbar in the list's last column"
+    t.send("\x1b[<0;50;4M\x1b[<0;50;4m", wait=0.5)       # click that row
+    name = row.split("(")[0].strip()
+    assert t.read(name, timeout=3) and status_col(t, name) > 0, f"the click did not pick {name}:\n" + plain(t)[-400:]
+    t.send(QUIT)
+    assert t.wait_exit() == 0
+    print(f"picker scroll (End / Home / wheel / click {name}): ok")
+
+
 def run_medium_language(tmp):
     """Through tsserver, on Windows/Linux keys: Ctrl+K Ctrl+I shows greet's signature, the mouse resting on `n` shows its
     type, Ctrl+. offers "Change spelling to 'greet'" and applies it, Shift+Alt+→ / ← grow and shrink the selection in a
@@ -1505,7 +1536,7 @@ def main():
     scenarios = [run_tsx, run_go, run_crlf, run_hex, run_error_page, run_drag_scroll, run_shift_click, run_minified, run_scrollbars, run_decorations,
                  run_autoclose, run_git_gutter, run_folding, run_word_wrap, run_menu_and_cmd_save, run_save_dialog, run_close_request, run_warm, run_auto_save, run_cursor_style, run_hot_exit,
                  run_keybindings, run_mac_keys, run_format, run_typescript, run_find_and_status, run_symbols_and_problems, run_install_prompt, run_small_batch,
-                 run_files_and_navigation, run_medium_language, run_medium_editing, run_inline_suggest, run_references_and_lenses, run_inline_hosted]
+                 run_files_and_navigation, run_picker_scroll, run_medium_language, run_medium_editing, run_inline_suggest, run_references_and_lenses, run_inline_hosted]
     only = set(sys.argv[1:])
     results = []
     try:

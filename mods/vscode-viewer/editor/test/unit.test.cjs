@@ -1892,3 +1892,29 @@ test("a warm editor asked to close (SIGUSR2 with no file handed over) just ends"
   assert.equal(fs.existsSync(`${key}.pid`), false);
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test("quick pick scrolls: keys keep the selection in view, the wheel scrolls the list alone (clamped), a click picks the row under it", () => {
+  const { Painter, themePalette } = require("../paint.cjs");
+  let picked = null, closed = 0;
+  const ed = { cols: 100, rows: 30, colors: themePalette(), closePopup: () => closed++ };
+  const names = Array.from({ length: 30 }, (_, i) => `item ${i}`);
+  const pk = new O.Picker("", () => names.map(label => ({ label, run: () => { picked = label; } })), "");
+  const draw = () => { const P = new Painter(); pk.render(P, ed); return P.out.replace(/\x1b\[[\d;:]*m/g, ""); };
+  assert.equal(pk.box(ed).size, 12);
+  pk.key({ type: "key", name: "end" }, ed); draw();
+  assert.deepEqual([pk.index, pk.top], [29, 18]);
+  pk.key({ type: "key", name: "home" }, ed); draw();
+  assert.deepEqual([pk.index, pk.top], [0, 0]);
+  for (let i = 0; i < 12; i++) pk.key({ type: "key", name: "down" }, ed);
+  draw();
+  assert.deepEqual([pk.index, pk.top], [12, 1], "↓ past the last row scrolls one");
+  pk.mouse({ type: "mouse", button: 65, x: 50, y: 5 }, ed); draw();
+  assert.deepEqual([pk.index, pk.top], [12, 4], "the wheel scrolls 3 rows, the selection stays");
+  for (let i = 0; i < 10; i++) pk.mouse({ type: "mouse", button: 65, x: 50, y: 5 }, ed);
+  assert.match(draw(), /item 29/);
+  assert.equal(pk.top, 18, "clamped at the end");
+  assert.match(draw(), /\x1b\[4;89H/, "a scrollbar in the list's last column");
+  pk.mouse({ type: "mouse", button: 0, x: 50, y: 4 }, ed);
+  assert.equal(picked, "item 18");
+  assert.equal(closed, 1);
+});

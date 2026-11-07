@@ -5,6 +5,7 @@
 use crate::keys::{Ev, Mouse};
 use crate::lang::Loc;
 use crate::paint::{fit, Painter, Palette};
+use crate::scrollbar::{Bar, BarMouse};
 use crate::width::{char_width, text_width};
 use std::path::{Path, PathBuf};
 use vscode_textmate::{OnigString, Scanner};
@@ -262,6 +263,9 @@ pub struct Picker<T> {
     pub items: Vec<Item<T>>,
     pub index: usize,
     top: usize,
+    /// Keys keep the selection in view; the wheel and the scrollbar scroll the list alone (off until the next key).
+    follow: bool,
+    bar: Bar,
     pub cursor: (i32, i32),
     /// The text changed since the editor last filled a computed picker.
     pub changed: bool,
@@ -269,7 +273,7 @@ pub struct Picker<T> {
 
 impl<T: Clone> Picker<T> {
     pub fn new(placeholder: &str, choices: Vec<(String, String, T)>, index: usize) -> Picker<T> {
-        let mut p = Picker { text: String::new(), placeholder: placeholder.into(), note: String::new(), choices: Some(choices), items: vec![], index: 0, top: 0, cursor: (2, 1), changed: false };
+        let mut p = Picker { text: String::new(), placeholder: placeholder.into(), note: String::new(), choices: Some(choices), items: vec![], index: 0, top: 0, follow: true, bar: Bar::new(true), cursor: (2, 1), changed: false };
         p.refresh();
         p.index = index.min(p.items.len().saturating_sub(1));
         p
@@ -277,7 +281,7 @@ impl<T: Clone> Picker<T> {
 
     /// Rows computed by the editor from the text, starting with `text`.
     pub fn computed(text: &str, placeholder: &str, note: &str) -> Picker<T> {
-        Picker { text: text.into(), placeholder: placeholder.into(), note: note.into(), choices: None, items: vec![], index: 0, top: 0, cursor: (2, 1), changed: true }
+        Picker { text: text.into(), placeholder: placeholder.into(), note: note.into(), choices: None, items: vec![], index: 0, top: 0, follow: true, bar: Bar::new(true), cursor: (2, 1), changed: true }
     }
 
     pub fn is_computed(&self) -> bool {
@@ -287,7 +291,7 @@ impl<T: Clone> Picker<T> {
     /// New rows for a computed picker (the selection back on the first).
     pub fn set_items(&mut self, items: Vec<Item<T>>) {
         self.items = items;
-        (self.index, self.top, self.changed) = (0, 0, false);
+        (self.index, self.top, self.follow, self.changed) = (0, 0, true, false);
     }
 
     fn refresh(&mut self) {
@@ -302,6 +306,12 @@ impl<T: Clone> Picker<T> {
             .collect();
         self.index = 0;
         self.top = 0;
+        self.follow = true;
+    }
+
+    fn scroll(&mut self, top: i64, size: usize) {
+        self.top = top.clamp(0, self.items.len().saturating_sub(size) as i64) as usize;
+        self.follow = false;
     }
 
     fn geometry(&self, a: &Area) -> (i32, i32, i32, usize) {
@@ -323,15 +333,18 @@ impl<T: Clone> Picker<T> {
         p.text(&note, &c.line_number, &c.input);
         p.text(" ", &c.fg, &c.input);
         self.cursor = (y + 1, x + 2 + (inner - 3).min(tw(&self.text)));
-        if self.index < self.top {
+        if self.follow && self.index < self.top {
             self.top = self.index;
-        } else if self.index >= self.top + size {
+        } else if self.follow && self.index >= self.top + size {
             self.top = self.index + 1 - size;
         }
+        let n = self.items.len();
+        self.top = self.top.min(n.saturating_sub(size));
+        let iw = inner - self.bar.layout(n > size, y + 2, x + w - 2, size as i64, size as i64, n as i64, self.top as i64) as i32;
         for r in 0..size {
             p.move_to(y + 2 + r as i32, x + 1);
             let Some(it) = self.items.get(self.top + r) else {
-                p.text(&fit(if r == 0 { " No matching results" } else { "" }, inner as usize), &c.line_number, &c.widget);
+                p.text(&fit(if r == 0 { " No matching results" } else { "" }, iw as usize), &c.line_number, &c.widget);
                 continue;
             };
             let bg = if self.top + r == self.index { &c.selection } else { &c.widget };
@@ -340,7 +353,7 @@ impl<T: Clone> Picker<T> {
             let mut used = 1;
             for (i, ch) in it.label.char_indices() {
                 let cw = char_width(ch) as i32;
-                if used + cw > inner - tw(&key) - 1 {
+                if used + cw > iw - tw(&key) - 1 {
                     break;
                 }
                 let hit = it.hits.contains(&i);
@@ -348,13 +361,15 @@ impl<T: Clone> Picker<T> {
                 used += cw;
             }
             let detail = if it.detail.is_empty() { String::new() } else { format!("  {}", it.detail) };
-            p.text(&fit(&detail, (inner - used - tw(&key)).max(0) as usize), &c.line_number, bg);
+            p.text(&fit(&detail, (iw - used - tw(&key)).max(0) as usize), &c.line_number, bg);
             p.text(&key, &c.bar_fg, bg);
         }
+        self.bar.paint(p, &Palette { bg: c.widget.clone(), ..c.clone() }, None);
     }
 
     pub fn event(&mut self, ev: &Ev, a: &Area) -> Outcome<T> {
         let n = self.items.len();
+        self.follow |= matches!(ev, Ev::Key(_));
         match ev {
             Ev::Text(t) | Ev::Paste(t) => {
                 self.text.push_str(t.split(['\r', '\n']).next().unwrap_or(""));
@@ -366,6 +381,8 @@ impl<T: Clone> Picker<T> {
                     self.text.pop();
                     self.refresh();
                 }
+                "home" => self.index = 0,
+                "end" => self.index = n.saturating_sub(1),
                 "up" if n > 0 => self.index = (self.index + n - 1) % n,
                 "down" if n > 0 => self.index = (self.index + 1) % n,
                 "pageup" => self.index = self.index.saturating_sub(self.geometry(a).3),
@@ -373,16 +390,26 @@ impl<T: Clone> Picker<T> {
                 "enter" => return self.items.get(self.index).map_or(Outcome::Close, |it| Outcome::Run(it.act.clone())),
                 _ => {}
             },
-            Ev::Mouse(m) if m.press() => {
+            Ev::Mouse(m) => {
                 let (x, y, w, size) = self.geometry(a);
-                if !inside(m, x, y, w, size as i32 + 3) {
-                    return Outcome::Close;
-                }
-                let r = m.y - y - 2;
-                if r >= 0 && (r as usize) < size {
-                    if let Some(it) = self.items.get(self.top + r as usize) {
-                        return Outcome::Run(it.act.clone());
+                match self.bar.mouse(m) {
+                    BarMouse::To(pos) => self.scroll(pos, size),
+                    BarMouse::Took => {}
+                    BarMouse::No if !inside(m, x, y, w, size as i32 + 3) => {
+                        if m.press() {
+                            return Outcome::Close;
+                        }
                     }
+                    BarMouse::No if m.wheel() => self.scroll(self.top as i64 + if m.button == 64 { -3 } else { 3 }, size),
+                    BarMouse::No if m.press() => {
+                        let r = m.y - y - 2;
+                        if r >= 0 && (r as usize) < size {
+                            if let Some(it) = self.items.get(self.top + r as usize) {
+                                return Outcome::Run(it.act.clone());
+                            }
+                        }
+                    }
+                    BarMouse::No => {}
                 }
             }
             _ => {}
@@ -992,5 +1019,39 @@ mod tests {
         assert_eq!(step_menu(&rows, Some(1), 1), Some(3));
         assert_eq!(step_menu(&rows, Some(3), 1), Some(1));
         assert_eq!(step_menu(&rows, None, -1), Some(3));
+    }
+
+    #[test]
+    fn quick_pick_scrolls_with_keys_wheel_and_clicks() {
+        let c = Palette::of(&serde_json::json!({}));
+        let a = Area { c: &c, rows: 30, cols: 100 };
+        let mut pk = Picker::new("", (0..30).map(|i| (format!("item {i}"), String::new(), i)).collect(), 0);
+        let draw = |pk: &mut Picker<i32>| {
+            let mut p = Painter::default();
+            pk.render(&mut p, &a);
+            p.out
+        };
+        let wheel = Ev::Mouse(Mouse { button: 65, x: 50, y: 5, ..Default::default() });
+        pk.event(&crate::keys::key("end"), &a);
+        draw(&mut pk);
+        assert_eq!((pk.index, pk.top), (29, 18));
+        pk.event(&crate::keys::key("home"), &a);
+        draw(&mut pk);
+        assert_eq!((pk.index, pk.top), (0, 0));
+        for _ in 0..12 {
+            pk.event(&crate::keys::key("down"), &a);
+        }
+        draw(&mut pk);
+        assert_eq!((pk.index, pk.top), (12, 1), "↓ past the last row scrolls one");
+        pk.event(&wheel, &a);
+        draw(&mut pk);
+        assert_eq!((pk.index, pk.top), (12, 4), "the wheel scrolls 3 rows, the selection stays");
+        for _ in 0..10 {
+            pk.event(&wheel, &a);
+        }
+        assert!(draw(&mut pk).contains("\x1b[4;89H"), "a scrollbar in the list's last column");
+        assert_eq!(pk.top, 18, "clamped at the end");
+        let click = Ev::Mouse(Mouse { button: 0, x: 50, y: 4, ..Default::default() });
+        assert!(matches!(pk.event(&click, &a), Outcome::Run(18)));
     }
 }
