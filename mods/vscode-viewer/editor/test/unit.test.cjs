@@ -1852,3 +1852,43 @@ test("Shift+click on the gutter skips a CodeLens row and counts it for the lines
   shift(4);
   assert.deepEqual(ed.sel.head, { line: 2, col: 0 }, "the row below the lens is line 1: through it");
 });
+
+// ----- warm editor (--warm <key>: vscode-explorer's hidden tab waits with no file) -----
+// Starts `node vsedit.cjs --warm <key>` without a terminal; returns once it says it is ready (<key>.pid).
+async function warmEditor(key) {
+  const child = require("child_process").spawn(process.execPath, [path.join(__dirname, "..", "vsedit.cjs"), "--warm", key, "--close-on-exit"],
+    { stdio: ["ignore", "pipe", "pipe"] });
+  let out = "", err = "";
+  child.stdout.on("data", (d) => { out += d; });
+  child.stderr.on("data", (d) => { err += d; });
+  const exited = new Promise((resolve) => child.on("exit", (code) => resolve(code)));
+  for (let i = 0; i < 100 && !fs.existsSync(`${key}.pid`); i++) await new Promise((r) => setTimeout(r, 50));
+  return { child, exited, out: () => out, err: () => err };
+}
+
+test("a warm editor shows Ready, says so in <key>.pid, and opens the file the launcher hands it on SIGUSR2", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vsedit-warm-"));
+  const key = path.join(dir, "warm", "tbX");
+  const w = await warmEditor(key);
+  assert.equal(fs.readFileSync(`${key}.pid`, "utf8"), String(w.child.pid));
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(w.child.exitCode, null, "a warm editor waits");
+  assert.match(w.out(), /Ready/);
+  fs.writeFileSync(key, `${path.join(dir, "a.ts")}\n${dir}\n`);
+  w.child.kill("SIGUSR2");
+  // From here it is the editor started with the file: without a terminal it stops right there.
+  assert.equal(await w.exited, 1);
+  assert.match(w.err(), /vsedit: needs a terminal/);
+  assert.equal(fs.existsSync(key) || fs.existsSync(`${key}.pid`), false, "the handoff files stay behind");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a warm editor asked to close (SIGUSR2 with no file handed over) just ends", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vsedit-warm-"));
+  const key = path.join(dir, "tbY");
+  const w = await warmEditor(key);
+  w.child.kill("SIGUSR2");
+  assert.equal(await w.exited, 0);
+  assert.equal(fs.existsSync(`${key}.pid`), false);
+  fs.rmSync(dir, { recursive: true, force: true });
+});

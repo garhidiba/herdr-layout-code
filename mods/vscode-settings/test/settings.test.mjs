@@ -104,10 +104,10 @@ test("the Rust core status reads its version", () => {
 
 test("the Rust editor status reads its version and launch API", () => {
   assert.equal(editorStatus(null), "Rust editor: not built");
-  assert.equal(editorStatus("vsedit 1.0.0 (api 1)\n"), "Rust editor: built (v1.0.0)");
-  assert.equal(editorStatus("vsedit 1.0.0 (api 2)"), "Rust editor: v1.0.0 is out of date (rebuild it)");
+  assert.equal(editorStatus("vsedit 1.0.0 (api 2)\n"), "Rust editor: built (v1.0.0)");
+  assert.equal(editorStatus("vsedit 1.0.0 (api 1)"), "Rust editor: v1.0.0 is out of date (rebuild it)");
   assert.equal(editorStatus("vsedit 0.9.0"), "Rust editor: v0.9.0 is out of date (rebuild it)");
-  assert.equal(editorCurrent("vsedit 1.0.0 (api 1)"), true);
+  assert.equal(editorCurrent("vsedit 1.0.0 (api 2)"), true);
   assert.equal(editorCurrent(null), false);
 });
 

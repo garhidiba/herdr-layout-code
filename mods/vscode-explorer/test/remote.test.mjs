@@ -73,7 +73,7 @@ test("only a manifest build-remote.sh writes, for this platform, names a bundle"
 });
 
 // A real install with this computer's sh: a fake bundle (vsedit prints its api) under a temp $HOME.
-function bundle(dir, api = "1") {
+function bundle(dir, api = "2") {
   const b = join(dir, "b");
   mkdirSync(join(b, "vscode"), { recursive: true });
   writeFileSync(join(b, "vsedit"), `#!/bin/sh\necho ${api}\n`);
@@ -92,7 +92,7 @@ test("the install checks the bundle, makes it runnable and swaps the version fol
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.stdout.trim(), "installed");
   assert.equal(readFileSync(join(root, VER, "manifest.json"), "utf8"), '{"version": "it\'s"}\n');
-  assert.equal(execFileSync(join(root, VER, "vsedit"), { encoding: "utf8" }).trim(), "1");
+  assert.equal(execFileSync(join(root, VER, "vsedit"), { encoding: "utf8" }).trim(), "2");
   assert.equal(install(root, VER, sum, tgz).stdout.trim(), "current"); // idempotent
   assert.deepEqual(readdirSync(root).filter(n => n.startsWith(".")), []); // no temp folder left
 });
@@ -102,7 +102,7 @@ test("a damaged bundle, an editor that doesn't run, or a folder outside the root
   const bad = install(root, VER, "b".repeat(64), tgz);
   assert.equal(bad.status, 3);
   assert.match(bad.stderr, /damaged/);
-  const other = mkdtempSync(join(tmpdir(), "remote-")), broken = bundle(other, "2");
+  const other = mkdtempSync(join(tmpdir(), "remote-")), broken = bundle(other, "1");
   assert.equal(install(root, VER, broken.sum, broken.tgz).status, 4);
   assert.equal(install(join(home, "elsewhere"), VER, sum, tgz).status, 2);
   assert.equal(install(root, "../x", sum, tgz).status, 2);

@@ -4,12 +4,12 @@
 # also runs whenever the binary is missing or answers another launch API; the binary itself execs vsedit.cjs
 # (--fallback) before touching the terminal when it can't take the file (no grammars, or a keymap.json command it has
 # never heard of: a newer table than the binary).
-# usage: sh vsedit.sh <file> [--close-on-exit]
+# usage: sh vsedit.sh <file> [--close-on-exit]   or   sh vsedit.sh --warm <key> [--close-on-exit] (waits for a file: vscode-explorer's warm tab)
 # Which editor: "editor.engine" ("js" | "rust") in vscode-settings.json; without it "core.engine" (while RUST_READY is
 # 1; the Settings dialog's editorEngine() reads it the same way). VSEDIT_ENGINE overrides both (tests);
 # VSEDIT_ENGINE_LOG=<file> gets a line per launch: rust, js, or js (fallback).
 RUST_READY=1 # 1: "core.engine": "rust" chooses the Rust editor too (0: only "editor.engine")
-API=1        # the launch contract: `vsedit --api` must print this
+API=2        # the launch contract: `vsedit --api` must print this (2: it takes --warm <key>)
 
 here=$(cd "$(dirname "$0")" && pwd)
 home=${HERDR_APP_HOME:-$HOME/.config/herdr-app}

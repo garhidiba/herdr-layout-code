@@ -107,7 +107,7 @@ got=$({ sha256sum "$tmp/bundle.tgz" 2>/dev/null || shasum -a 256 "$tmp/bundle.tg
 mkdir "$tmp/b"
 tar -xzf "$tmp/bundle.tgz" -C "$tmp/b" --no-same-owner
 chmod 755 "$tmp/b/vsedit" "$tmp/b/vscode-core"
-[ "$("$tmp/b/vsedit" --api 2>/dev/null)" = 1 ] || { echo "the editor does not run on $(uname -sm)" >&2; exit 4; }
+[ "$("$tmp/b/vsedit" --api 2>/dev/null)" = 2 ] || { echo "the editor does not run on $(uname -sm)" >&2; exit 4; }
 printf '%s\\n' "$4" > "$tmp/b/manifest.json"
 rm -rf "$root/$ver"
 mv "$tmp/b" "$root/$ver"

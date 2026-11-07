@@ -1,5 +1,6 @@
 //! vsedit: the terminal editor of the herdr-layout-vscode mods (mods/vscode-viewer/editor/vsedit.cjs) in Rust.
 //! usage: vsedit <file> [--close-on-exit] [--vscode <dir>] [--fallback <vsedit.cjs>]
+//!        vsedit --warm <key> [--close-on-exit] ...   (waits with no file until handed one: warm.rs)
 //!        vsedit --serve [--vscode <dir>]   (the editor for the native editor mod, over a socket: serve.rs)
 //! When it can't start (no grammars, no raw mode) it execs `node <vsedit.cjs>` with the same arguments before
 //! touching the terminal (the launcher, vsedit.sh, passes the path); without --fallback it exits 86 then.
@@ -32,6 +33,7 @@ mod smartselect;
 mod symbols;
 mod term;
 mod view;
+mod warm;
 mod width;
 mod wrap;
 
@@ -42,8 +44,8 @@ use std::process::exit;
 use std::time::{Duration, Instant};
 use term::Term;
 
-/// The launcher accepts a binary whose `--api` prints this (bump it when the launch contract changes).
-const API: u32 = 1;
+/// The launcher accepts a binary whose `--api` prints this (bump it when the launch contract changes; 2: --warm).
+const API: u32 = 2;
 const FALLBACK: i32 = 86;
 
 static JS: std::sync::OnceLock<(String, Vec<String>)> = std::sync::OnceLock::new();
@@ -85,7 +87,7 @@ fn setup(vscode: &Path) -> Result<(serde_json::Value, serde_json::Value), String
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let (mut file, mut vscode, mut js, mut rest, mut serve) = (None, None, None, vec![], false);
+    let (mut file, mut vscode, mut js, mut rest, mut serve, mut warm) = (None, None, None, vec![], false, None);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--api" => {
@@ -99,6 +101,10 @@ fn main() {
             "--vscode" => vscode = args.next(),
             "--fallback" => js = args.next(),
             "--serve" => serve = true,
+            "--warm" => {
+                warm = args.next();
+                rest.extend(["--warm".to_string(), warm.clone().unwrap_or_default()]);
+            }
             _ => {
                 if file.is_none() && !a.starts_with("--") {
                     file = Some(a.clone());
@@ -113,22 +119,40 @@ fn main() {
     if let Some(js) = js {
         let _ = JS.set((js, rest));
     }
-    let Some(arg) = file else {
+    if file.is_none() && warm.is_none() {
         eprintln!("usage: vsedit <file> [--close-on-exit] [--vscode <dir>]");
         exit(2)
-    };
+    }
     if !term::is_tty() {
         eprintln!("vsedit: needs a terminal");
         exit(1);
     }
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let file = normalize(&cwd.join(arg));
     let vscode = vscode_dir(vscode);
     // a key table this binary doesn't know (or none), no grammars: the JS editor
     let (index, theme) = setup(&vscode).unwrap_or_else(|e| fallback(&e));
     let colors = theme.get("colors").cloned().unwrap_or(serde_json::Value::Null);
 
     let Ok(mut term) = Term::new() else { fallback("no raw mode") };
+    // Try Again after a crash starts the editor again with these: a warm one's with the file it was handed.
+    let mut relaunch: Vec<String> = std::env::args().skip(1).collect();
+    let arg = match warm {
+        Some(key) => {
+            let Some((file, folder)) = warm::wait(&mut term, Path::new(&key)) else {
+                term.restore();
+                exit(0)
+            };
+            if !folder.is_empty() {
+                let _ = std::env::set_current_dir(&folder);
+            }
+            if let Some(i) = relaunch.iter().position(|a| a == "--warm") {
+                relaunch.splice(i..(i + 2).min(relaunch.len()), [file.clone()]);
+            }
+            file
+        }
+        None => file.unwrap_or_default(),
+    };
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let file = normalize(&cwd.join(arg));
     let doc = open(&mut term, &file, &paint::Palette::of(&colors));
     let hl = Highlight::start(vscode.clone(), term::wake);
     let mut ed = Editor::new(file.clone(), doc, hl, index, &theme, vscode);
@@ -149,7 +173,7 @@ fn main() {
             term.restore();
             lang::shutdown();
             use std::os::unix::process::CommandExt;
-            let e = std::process::Command::new(std::env::current_exe().unwrap_or_default()).args(std::env::args().skip(1)).exec();
+            let e = std::process::Command::new(std::env::current_exe().unwrap_or_default()).args(&relaunch).exec();
             eprintln!("vsedit: {e}");
         }
         close(&mut term, &file, &reason);

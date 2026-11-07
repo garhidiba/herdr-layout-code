@@ -2,7 +2,7 @@
 // A VS Code-like terminal editor: VS Code's own tokenizer and One Dark colors, VS Code's default keys for the OS it runs on
 // (keymap.json; ⌘ through the Kitty keyboard protocol), its editor context menu and command palette, language intelligence (lang/),
 // mouse, IME-friendly cursor, auto save and hot exit.
-// usage: node vsedit.cjs <file>
+// usage: node vsedit.cjs <file> [--close-on-exit]   or   node vsedit.cjs --warm <key> [--close-on-exit] (terminal.cjs waitForFile)
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -2370,6 +2370,12 @@ function readClipboard() {
 const { ENTER, LEAVE, rightClicksTo } = T;
 
 async function main() {
+  if (process.argv[2] === "--warm") { // a warm editor (T.waitForFile): from here on, as if started with the file
+    const asked = await T.waitForFile(process.argv[3] ?? "");
+    if (!asked) process.exit(0);
+    if (asked.folder) try { process.chdir(asked.folder); } catch {}
+    process.argv.splice(2, 2, asked.file);
+  }
   const arg = process.argv[2];
   if (!arg) { process.stderr.write("usage: node vsedit.cjs <file>\n"); process.exit(2); }
   const file = path.resolve(arg);

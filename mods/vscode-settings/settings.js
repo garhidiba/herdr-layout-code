@@ -206,7 +206,7 @@ export function coreStatus(stdout) {
 }
 
 // The launch contract of the Rust editor that mods/vscode-viewer/editor/vsedit.sh accepts (its API, `vsedit --api`).
-export const EDITOR_API = 1;
+export const EDITOR_API = 2;
 // True when `vsedit --version` output ("vsedit 1.0.0 (api 1)") is a binary the launcher runs.
 export const editorCurrent = (stdout) => Number(stdout?.match(/\(api (\d+)\)/)?.[1]) === EDITOR_API;
 // `vsedit --version` output -> its status; null output means not built.

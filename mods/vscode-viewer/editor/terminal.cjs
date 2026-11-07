@@ -2,6 +2,7 @@
 // right-click routing, and a raw-input loop that turns keys/mouse into events for a full-screen app.
 const fs = require("fs");
 const os = require("os");
+const path = require("path");
 const { spawn, spawnSync } = require("child_process");
 const { parse } = require("./keys.cjs");
 const { which } = require("./lang/proc.cjs");
@@ -115,4 +116,28 @@ function session(app) {
 // tab closes when it exits, and a file that isn't there is an error rather than a new file.
 const closeOnExit = () => process.argv.includes("--close-on-exit");
 
-module.exports = { ENTER, LEAVE, inputLog, herdr, answeredOk, rightClicksTo, session, closeOnExit };
+// `--warm <key>`: started ahead of time with no file (vscode-explorer's hidden warm tab), it shows "Ready" and waits.
+// Once its SIGUSR2 handler is set it writes its pid to <key>.pid (the launcher signals only then: SIGUSR2 would end it
+// before); the launcher writes "<file>\n<folder>\n" to <key> and sends SIGUSR2. Resolves { file, folder } with both
+// files removed, or null for a request without a file (a close request: the caller ends). Nothing else starts.
+function waitForFile(key, write = (s) => process.stdout.write(s)) {
+  return new Promise((resolve) => {
+    const keep = setInterval(() => {}, 1 << 30); // a signal handler alone doesn't keep node running
+    process.once("SIGUSR2", () => {
+      clearInterval(keep);
+      let text = "";
+      try { text = fs.readFileSync(key, "utf8"); } catch {}
+      for (const f of [key, `${key}.pid`]) try { fs.unlinkSync(f); } catch {}
+      const [file, folder = ""] = text.split("\n");
+      resolve(file ? { file, folder } : null);
+    });
+    write("\x1b[2J\x1b[H\x1b[?25l  Ready");
+    try {
+      fs.mkdirSync(path.dirname(key), { recursive: true });
+      fs.writeFileSync(`${key}.pid.tmp`, String(process.pid));
+      fs.renameSync(`${key}.pid.tmp`, `${key}.pid`);
+    } catch { clearInterval(keep); resolve(null); }
+  });
+}
+
+module.exports = { ENTER, LEAVE, inputLog, herdr, answeredOk, rightClicksTo, session, closeOnExit, waitForFile };

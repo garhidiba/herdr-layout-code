@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """End-to-end: runs vsedit.cjs in a 100x30 pseudo-terminal, types, saves, quits, and checks colors against tokenize.cjs;
-scrollbars (editor and hex viewer), the context menu, Kitty ⌘ keys, user keybindings, tsserver definition/references/rename, gofmt, the save dialog, the close request (SIGUSR2), auto save and hot exit;
+scrollbars (editor and hex viewer), the context menu, Kitty ⌘ keys, user keybindings, tsserver definition/references/rename, gofmt, the save dialog, the close request (SIGUSR2), a warm editor (--warm), auto save and hot exit;
 find widget toggles, status bar items, symbol breadcrumbs, Go to Symbol and diagnostics; Expand Line Selection, Go to Bracket,
 Toggle Block Comment, Save As, Join Lines and Save All; Go to File with several files, Go Back / Forward and the settings JSON;
 through tsserver Show Hover (keys and mouse), Quick Fix, Expand / Shrink Selection, Format Selection and Go to Symbol in
@@ -426,6 +426,38 @@ def run_close_request(tmp):
     os.kill(t.pid, signal.SIGUSR2)
     assert t.wait_exit() == 0, "a saved editor should end on a close request"
     print("close request: ok")
+
+
+def wait_ready(key, timeout=5.0):
+    end = time.time() + timeout
+    while not os.path.exists(key + ".pid") and time.time() < end:
+        time.sleep(0.02)
+    return os.path.exists(key + ".pid")
+
+
+def run_warm(tmp):
+    """--warm <key> (vscode-explorer's hidden warm tab): Ready with no file and its pid in <key>.pid once it can take
+    one; handed a file and a folder through <key> and SIGUSR2, it opens that file as an editor started with it would;
+    asked with no file handed over, it ends."""
+    file = os.path.join(tmp, "warm.txt")
+    open(file, "w").write("warm text\n")
+    key = os.path.join(tmp, "warm", "tbW")
+    t = Term("--warm", args=[key, "--close-on-exit"])
+    assert t.read("Ready"), "no Ready screen while it waits"
+    assert wait_ready(key), "no <key>.pid"
+    assert open(key + ".pid").read() == str(t.pid), "<key>.pid is not the editor's pid"
+    open(key, "w").write(f"{file}\n{tmp}\n")
+    os.kill(t.pid, signal.SIGUSR2)
+    assert t.read("\x1b]2;warm.txt — vsedit\x07", timeout=5), "the handed file did not open"
+    assert t.read("Ln 1, Col 1") and b"warm text" in t.out
+    assert not os.path.exists(key) and not os.path.exists(key + ".pid"), "the handoff files stay behind"
+    t.send(QUIT)
+    assert t.wait_exit() == 0
+    t = Term("--warm", args=[key + "2", "--close-on-exit"])
+    assert wait_ready(key + "2")
+    os.kill(t.pid, signal.SIGUSR2)
+    assert t.wait_exit() == 0, "a warm editor asked to close should end"
+    print("warm: ok")
 
 
 def run_auto_save(tmp):
@@ -1471,7 +1503,7 @@ def main():
     engines = os.path.join(tmp, "engines.log")
     ISOLATED.update(VSEDIT_ENGINE_LOG=engines, VSEDIT_INLINE_USAGE=os.path.join(tmp, "inline-usage.json"))
     scenarios = [run_tsx, run_go, run_crlf, run_hex, run_error_page, run_drag_scroll, run_shift_click, run_minified, run_scrollbars, run_decorations,
-                 run_autoclose, run_git_gutter, run_folding, run_word_wrap, run_menu_and_cmd_save, run_save_dialog, run_close_request, run_auto_save, run_cursor_style, run_hot_exit,
+                 run_autoclose, run_git_gutter, run_folding, run_word_wrap, run_menu_and_cmd_save, run_save_dialog, run_close_request, run_warm, run_auto_save, run_cursor_style, run_hot_exit,
                  run_keybindings, run_mac_keys, run_format, run_typescript, run_find_and_status, run_symbols_and_problems, run_install_prompt, run_small_batch,
                  run_files_and_navigation, run_medium_language, run_medium_editing, run_inline_suggest, run_references_and_lenses, run_inline_hosted]
     only = set(sys.argv[1:])
