@@ -1,12 +1,13 @@
-// The Explorer's right-click menu and its Rename/New/Delete dialogs. They run as overlays of this same mod
-// (props { menu } or { dialog }), so they share the open rule in paths.js with the tree.
+// The Explorer's right-click menu, its Rename/New/Delete dialogs and the editor tab menu. They run as overlays of this
+// same mod (props { menu }, { dialog } or { tabMenu }), so they share the open rule in paths.js with the tree.
 import { div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { exec, hc, run, spaces, panes, terminals, props, openOverlay, closeOverlay, theme, shared, setShared, appHome, readTextFile, writeTextFile, notify, window } from "herdr";
 import { createOpenTab } from "./launch.js";
-import { menuItems, menuHeight, openWith, baseName, parentOf, relativeTo, nameProblem, vscodeRemoteArgs, isMarkdown, editorTabOf } from "./paths.js";
+import { menuItems, menuHeight, openWith, baseName, parentOf, relativeTo, nameProblem, vscodeRemoteArgs, isMarkdown, editorTabOf,
+  tabMenuItems, closeArgs, fileTabs, splitArgs, clipboardCommand, revealCommand } from "./paths.js";
 import { createOps } from "./ops.js";
-import { createRemote, createOpenFile, ROOT, INSTALL_COMMAND, INSTALL_REQUEST } from "./remote.js";
+import { createRemote, createOpenFile, keysOs, ROOT, INSTALL_COMMAND, INSTALL_REQUEST } from "./remote.js";
 
 const openTab = createOpenTab({ hc, run, spaces, panes });
 // The editor on a remote space's machine (remote.js): installing it is asked on each open with the shipped confirm dialog,
@@ -30,11 +31,15 @@ const showOpen = (file, on) => {
 export const openFile = createOpenFile({ openTab, remote, appHome, showOpen });
 const CLIPBOARD = "vscode-explorer.clipboard", REFRESH = "vscode-explorer.refresh";
 export const refreshKey = REFRESH;
+// The tab menu's Reveal in Explorer View asks the tree: { file, on, at }.
+export const REVEAL = "vscode-explorer.reveal";
 
 // Herdr starts with PATH=/usr/bin:/bin; Homebrew/user tools (code, trash) live elsewhere.
 const sh = (script, ...args) => exec("sh", ["-c", 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; ' + script, "explorer", ...args]);
 const refresh = () => setShared(REFRESH, Date.now());
-const copyText = (text) => sh('printf %s "$1" | pbcopy', text).catch(() => {});
+const os = () => keysOs(window()?.platform);
+const osRun = ([cmd, args]) => exec(cmd, args);
+const copyText = (text) => osRun(clipboardCommand(os(), text)).catch(() => {});
 // Finder's Trash (or the `trash` command when installed); never rm.
 const TRASH = 'if command -v trash >/dev/null 2>&1; then trash "$1"; else osascript -e "on run argv" -e "tell application \\"Finder\\" to delete POSIX file (item 1 of argv)" -e "end run" "$1" >/dev/null; fi';
 
@@ -97,7 +102,7 @@ export class ExplorerMenu {
     switch (action) {
       case "code": return openInCode(t.path, t.on, t.dir).catch(fail);
       case "system": return exec("open", [t.path]).catch(fail);
-      case "reveal": return exec("open", ["-R", t.path]).catch(fail);
+      case "reveal": return osRun(revealCommand(os(), t.path)).catch(fail);
       case "terminal": return run("terminal.open", { folder, place: "tab" });
       case "cut": case "copy": return setShared(CLIPBOARD, { path: t.path, dir: t.dir, cut: action === "cut", on: t.on ?? null });
       case "paste": return paste(folder, t.on).then(refresh, fail);
@@ -110,7 +115,7 @@ export class ExplorerMenu {
   }
 
   render(cx) {
-    const t = theme(), rows = this.rows(), picks = rows.map((r, i) => (r === "-" ? -1 : i)).filter(i => i >= 0);
+    const t = theme(), rows = this.rows(), picks = rows.map((r, i) => (r === "-" || r[3] ? -1 : i)).filter(i => i >= 0);
     const move = (d) => { const k = picks.indexOf(this.at); this.at = picks[(k + d + picks.length + (k === -1 && d < 0 ? 1 : 0)) % picks.length]; };
     return v_flex().id("explorer-menu").track_focus(this.handle).w_full().min_h(0).p(5).bg(t.popover).text_size(12.8)
       .on_key_down((e, cx) => {
@@ -123,11 +128,56 @@ export class ExplorerMenu {
       })
       .children(rows.map((r, i) => r === "-"
         ? div().mx(7).my(4).h(1).bg(t.border)
-        : h_flex().id(`em-${i}`).h(26).px(10).gap(9).rounded(5).items_center().justify_between().text_color(t.foreground)
-          .when(i === this.at, el => el.bg(t.selected)).hover(s => s.bg(t.hover)).cursor_pointer()
-          .on_click((_e, cx) => this.choose(r[1], cx))
+        : h_flex().id(`em-${i}`).h(26).px(10).gap(9).rounded(5).items_center().justify_between().text_color(r[3] ? t.dim : t.foreground)
+          .when(i === this.at, el => el.bg(t.selected))
+          .when(!r[3], el => el.hover(s => s.bg(t.hover)).cursor_pointer().on_click((_e, cx) => this.choose(r[1], cx)))
           .child(div().flex_1().min_w(0).truncate().child(r[0]))
           .child(div().text_size(11).text_color(t.dim).child(r[2] ?? ""))));
+  }
+}
+
+// The editor tab menu, for a { tabMenu: { tab, file, on, pane, argv, root } } overlay (vscode-tabs' tabfile.js): VS Code's
+// editor tab context menu, the items Herdr can do (paths.js tabMenuItems). Closing goes through tab.close as the tab's
+// × does: the editor keeps unsaved text as a hot-exit backup and offers it back on the next open.
+export class TabMenu extends ExplorerMenu {
+  constructor(cx) {
+    super(cx);
+    this.target = props().tabMenu;
+  }
+
+  rows() {
+    const t = this.target;
+    // Reopen offers the other editor: the same one would find this tab open (openFile's showOpen) and only select it.
+    return this.withList ? openWith(!!t.on).slice(0, 2).filter(r => r[1] !== (t.argv ? "editor" : "viewer"))
+      : tabMenuItems({ remote: !!t.on, os: os() });
+  }
+
+  choose(action, cx) {
+    const t = this.target;
+    if (action === "reopenWith") { this.withList = true; this.at = -1; return cx.notify(); }
+    // Reopen: the new tab first (closing the old one first could close the space), then the old one.
+    if (action === "editor" || action === "viewer") return !this.opening && (this.opening = true) && cx.spawn(async cx => {
+      try { await openFile(t.file, { on: t.on, how: action, folder: t.root ?? undefined }, cx); run("tab.close", { id: t.tab }); } finally { this.close(); }
+    });
+    this.close();
+    switch (action) {
+      case "close": case "closeOthers": case "closeRight": case "closeAll": {
+        const space = spaces().find(s => s.tabs.some(x => x.id === t.tab));
+        for (const args of closeArgs(action, space?.tabs ?? [], t.tab, fileTabs(space, panes(), terminals()))) run("tab.close", args);
+        return;
+      }
+      case "copyPath": return copyText(t.file);
+      case "copyRelative": return copyText(t.root ? relativeTo(t.root, t.file) : t.file);
+      case "reveal": return osRun(revealCommand(os(), t.file)).catch(toast);
+      // The tree follows the focused tab's folder, so the tab is shown first; the tree reveals the file even with
+      // explorer.autoReveal off (main.js).
+      case "revealExplorer":
+        run("tab.select", { id: t.tab });
+        run("layout.select", { stack: "panel-body", child: "explorer" });
+        run("layout.show", { id: "panel" });
+        return setShared(REVEAL, { file: t.file, on: t.on, at: Date.now() });
+      case "split": return run("pane.split", splitArgs(t));
+    }
   }
 }
 

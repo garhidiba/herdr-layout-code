@@ -7,7 +7,7 @@ import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, v_virtual_list, VirtualListScrollHandle } from "gpui-base";
 import { spaces, panes, focused, terminals, exec, readTextFile, watchFolder, theme, window, appHome, props, shared, setShared, notify, nextCommand } from "herdr";
 import { freshRoot, encode, decode } from "./cache.js";
-import { ExplorerMenu, ExplorerDialog, openMenu, openInCode, refreshKey, openFile, remote } from "./menu.js";
+import { ExplorerMenu, ExplorerDialog, TabMenu, openMenu, openInCode, refreshKey, openFile, remote, REVEAL } from "./menu.js";
 import { createCore } from "./core.js";
 import { editorFileOf, autoRevealOf, revealPath } from "./paths.js";
 // Herdr starts with PATH=/usr/bin:/bin, so Homebrew/user tools (node, code, codex, trash) are looked up here too.
@@ -121,6 +121,7 @@ export default class Files extends View {
     const p = props();
     if (p?.menu) { this.overlay = new ExplorerMenu(cx); return; }
     if (p?.dialog) { this.overlay = new ExplorerDialog(cx); return; }
+    if (p?.tabMenu) { this.overlay = new TabMenu(cx); return; }
     // Every project's last tree from before the restart, so each space shows at once and refreshes behind it.
     let cache = null;
     try { cache = localStorage.getItem(CACHE); } catch {}
@@ -306,14 +307,29 @@ export default class Files extends View {
     cx.spawn(async cx => {
       const on = autoRevealOf(await readTextFile(`${appHome()}/vscode-settings.json`).catch(() => null));
       if (this.context !== context || this.revealSig !== sig) return;
-      const target = on ? revealPath(this.root, active.file) : null;
-      if (!on) this.active = null;
-      if (target) {
-        this.active = target.path; this.revealing = target;
-        for (const folder of target.folders) this.expand(folder, cx);
-      }
+      if (on) this.reveal(active.file, cx);
+      else if (this.active !== this.askedRow) this.active = null; // a Reveal in Explorer View's row stays, as VS Code's selection
       cx.notify();
     });
+  }
+
+  // The tab menu's Reveal in Explorer View (menu.js REVEAL), whatever explorer.autoReveal says: once, when the tree shows
+  // the file's machine and folder (the menu shows its tab first, so the tree may switch to it a draw later). A request
+  // older than 5s is dropped: shared values outlive a restart.
+  revealAsked(cx) {
+    const ask = shared(REVEAL);
+    if (!ask || ask.at === this.revealedAt || Date.now() - ask.at > 5000 || (ask.on ?? null) !== this.on) return;
+    if (this.reveal(ask.file, cx)) { this.revealedAt = ask.at; this.askedRow = this.active; }
+  }
+
+  // Opens the folders above `file`, highlights its row and scrolls to it once listed (scrollToRevealed); false for a
+  // file outside the tree.
+  reveal(file, cx) {
+    const target = revealPath(this.root, file);
+    if (!target) return false;
+    this.active = target.path; this.revealing = target;
+    for (const folder of target.folders) this.expand(folder, cx);
+    return true;
   }
 
   // Scrolls to the revealed row once it is listed (nothing moves when it is on screen already); gives up when its
@@ -384,6 +400,7 @@ export default class Files extends View {
     const asked = shared(refreshKey);
     if (asked !== this.asked) { if (this.asked !== undefined) this.refresh(cx); this.asked = asked; }
     this.autoReveal(cx);
+    this.revealAsked(cx);
     const t = theme(), rows = this.rows("", 0, []), byPath = new Map(rows.map(r => [r.path, r]));
     this.scrollToRevealed(rows);
     return v_flex().id("explorer").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)

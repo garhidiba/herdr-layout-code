@@ -132,3 +132,67 @@ export function vscodeRemoteArgs(machine, path, dir) {
 
 // Popup height for rows (26px each, 9px per separator, 10px padding).
 export const menuHeight = (rows) => rows.reduce((h, r) => h + (r === "-" ? 9 : 26), 10);
+
+// ----- the editor tab menu (vscode-tabs opens it on a tab showing a file; menu.js TabMenu) -----
+
+// VS Code's keys for the tab menu's items on each OS ("mac" | "win" | "linux", remote.js keysOs), as it labels them.
+const TAB_KEYS = {
+  close: { mac: "⌘W", win: "Ctrl+F4", linux: "Ctrl+W" },
+  closeOthers: { mac: "⌥⌘T" },
+  copyPath: { mac: "⌥⌘C", win: "Shift+Alt+C", linux: "Ctrl+Alt+C" },
+  copyRelative: { mac: "⌥⇧⌘C", win: "Ctrl+K Ctrl+Shift+C", linux: "Ctrl+Shift+Alt+C" },
+  reveal: { mac: "⌥⌘R", win: "Shift+Alt+R", linux: "Ctrl+Alt+R" },
+  split: { mac: "⌘\\", win: "Ctrl+\\", linux: "Ctrl+\\" },
+};
+const REVEAL_LABEL = { mac: "Reveal in Finder", win: "Reveal in File Explorer", linux: "Open Containing Folder" };
+
+// VS Code's editor tab menu, the items Herdr can do. Rows as menuItems' plus a 4th field: disabled. A remote file's
+// reveal is disabled (the file manager only sees this computer), not hidden, so the menu's height never changes
+// (vscode-tabs opens the popup at a fixed size, its TAB_MENU, which its test checks against this).
+export function tabMenuItems({ remote, os }) {
+  const key = (id) => TAB_KEYS[id][os] ?? "";
+  const groups = [
+    [["Close", "close", key("close")], ["Close Others", "closeOthers", key("closeOthers")], ["Close to the Right", "closeRight"], ["Close All", "closeAll"]],
+    [["Copy Path", "copyPath", key("copyPath")], ["Copy Relative Path", "copyRelative", key("copyRelative")]],
+    [["Reopen Editor With…", "reopenWith"]],
+    [[REVEAL_LABEL[os], "reveal", key("reveal"), remote], ["Reveal in Explorer View", "revealExplorer"]],
+    [["Split Right", "split", key("split")]],
+  ];
+  return groups.flatMap((g, i) => (i ? ["-", ...g] : g));
+}
+
+// The tabs of `space` showing a file (VS Code's editors): an editor terminal's or a vscode-viewer pane's. Shells and
+// agents are never among them.
+export const fileTabs = (space, panes, terminals) => {
+  const argv = new Map(terminals.map(t => [t.address, t.argv])), tabs = new Set((space?.tabs ?? []).map(t => t.id));
+  return new Set(panes.filter(p => tabs.has(p.tab) && (p.mod === "vscode-viewer" || (p.terminal && editorFileOf(argv.get(p.terminal)) !== null))).map(p => p.tab));
+};
+
+// tab.close args for a close item on tab `id`, in tab bar order (`tabs`: its space's; `files`: fileTabs). Close Others /
+// to the Right / All close file tabs only, as VS Code closes editors: a shell or a running agent stays. When nothing
+// is left in the space, the last one is confirmed: no "Close space?", vscode-spaces keeps it as a gray row, as the ×.
+export function closeArgs(action, tabs, id, files) {
+  const at = tabs.findIndex(t => t.id === id);
+  if (at < 0) return [];
+  const isFile = (t) => files.has(t.id);
+  const picked = { close: [tabs[at]], closeOthers: tabs.filter(t => t.id !== id && isFile(t)), closeRight: tabs.slice(at + 1).filter(isFile),
+    closeAll: tabs.filter(t => t.id === id || isFile(t)) }[action] ?? [];
+  return picked.map((t, i) => (picked.length === tabs.length && i === picked.length - 1 ? { id: t.id, confirmed: true } : { id: t.id }));
+}
+
+// pane.split args showing the tab's file again on the right: the editor launcher with the same arguments (`argv` from
+// the launcher on; in a remote space it runs on that machine), or a viewer pane.
+export const splitArgs = ({ pane, argv, file, on }) => (argv
+  ? { direction: "right", pane, argv: ["exec", "sh", ...argv] }
+  : { direction: "right", pane, mod: "vscode-viewer", props: { file, on } });
+
+// [program, args] putting text on this computer's clipboard, or showing a path in its file manager.
+export function clipboardCommand(os, text) {
+  if (os === "win") return ["powershell", ["-NoProfile", "-NonInteractive", "-Command", `Set-Clipboard -Value '${text.replaceAll("'", "''")}'`]];
+  const tool = os === "mac" ? "pbcopy" : "if command -v wl-copy >/dev/null 2>&1; then wl-copy; else xclip -selection clipboard; fi";
+  return ["sh", ["-c", `printf %s "$1" | { ${tool}; }`, "copy", text]];
+}
+export function revealCommand(os, path) {
+  if (os === "win") return ["explorer.exe", [`/select,${path}`]];
+  return os === "mac" ? ["open", ["-R", path]] : ["xdg-open", [parentOf(path)]];
+}
