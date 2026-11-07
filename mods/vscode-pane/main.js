@@ -5,7 +5,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { panes, props, run, theme, home, setShared } from "herdr";
+import { panes, props, run, theme, home, shared, setShared } from "herdr";
 
 // vscode-tabs' move.js MOVE_REQUEST: the tab bar moves the pane ({ terminal } or { pane }: a viewer).
 const MOVE = "vscode-tabs.move";
@@ -19,6 +19,18 @@ function folder(cwd) {
   if (!cwd) return "";
   const h = home();
   return cwd === h ? "~" : cwd.startsWith(h + "/") ? "~" + cwd.slice(h.length) : cwd;
+}
+
+// { [pane]: { x, y, width, height } }: where each pane's header is in the window, for vscode-tabs' drag to drop a tab
+// onto one pane (Herdr gives mods no pane geometry). A header learns its bounds from GPUI's pointer events: any press
+// elsewhere (a tab pressed to drag it) and the pointer moving over it. Written only when it changed; gone panes dropped.
+const BOUNDS = "vscode-pane.bounds";
+function share(pane, b) {
+  if (!b || !pane) return;
+  const all = shared(BOUNDS) ?? {}, was = all[pane];
+  if (was && was.x === b.x && was.y === b.y && was.width === b.width && was.height === b.height) return;
+  const live = new Set(panes().map((p) => p.pane));
+  setShared(BOUNDS, { ...Object.fromEntries(Object.entries(all).filter(([k]) => live.has(k))), [pane]: { x: b.x, y: b.y, width: b.width, height: b.height } });
 }
 
 export default class Pane extends View {
@@ -65,6 +77,8 @@ export default class Pane extends View {
       .border_color(t.border)
       .text_size(12)
       .on_hover((hovered, cx) => { this.hovered = hovered; cx.notify(); })
+      .on_mouse_down_out((e) => share(pane, e.bounds))
+      .on_mouse_move((e) => share(pane, e.bounds))
       .on_click(() => run("pane.focus", { pane }))
       .when(Boolean(pic), (el) => el.child(pic))
       .child(div().flex_none().truncate().max_w(260).font_medium().text_color(t.foreground).child(name))

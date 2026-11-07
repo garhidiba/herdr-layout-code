@@ -30,6 +30,28 @@ export function panesRect(bar, win, tree) {
   return { x: bar.x + pad, y: top, width: Math.max(0, bar.width - 2 * pad - side), height: Math.max(0, bottom - top) };
 }
 
+// Each pane of the shown tab as a rect, from its header's bounds (vscode-pane shares them: `headers`, { [pane]: {x, y,
+// width, height} }; Herdr gives mods no pane geometry): as wide as its header, from the header's top down to the next
+// header below it in the same columns (less `gap`, layouts/vscode.json's pane gap), else to the panes' bottom
+// (`area`, panesRect). `ids`: the shown tab's pane ids; panes without a header are left out.
+export function paneRects(headers, ids, area, gap = 8) {
+  const known = ids.filter(id => headers?.[id]).map(id => ({ pane: id, ...headers[id] }));
+  return known.map(h => {
+    const below = known.filter(o => o.y > h.y && o.x < h.x + h.width && o.x + o.width > h.x).map(o => o.y - gap);
+    const bottom = Math.min(area.y + area.height, ...below);
+    return { pane: h.pane, x: h.x, y: h.y, width: h.width, height: Math.max(0, bottom - h.y) };
+  });
+}
+
+// Where a drag over the panes lands: the pane under `pos` (`rects`: paneRects) and its zone, splitting that pane; with
+// no pane known there, the zone of the whole `area` (the tab's focused pane is split). null outside the panes.
+export function dropTarget(rects, area, pos) {
+  const r = rects.find(x => dropZone(x, pos));
+  if (r) return { beside: r.pane, rect: r, zone: dropZone(r, pos) };
+  const zone = dropZone(area, pos);
+  return zone ? { beside: null, rect: area, zone } : null;
+}
+
 // The drop zone under `pos` in `rect`: the nearest edge, as a share of the size ("left" | "right" | "up" | "down"), or
 // null outside it.
 export function dropZone(rect, pos) {

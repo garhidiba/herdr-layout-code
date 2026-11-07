@@ -6,11 +6,11 @@ import { createMover } from "../move.js";
 
 // A fake Herdr: park takes the pane away, keep gives it one (beside the focused pane, or in a new tab); `parked` /
 // `kept` false: that step never shows; `empty` true: a tab whose last pane is parked stays, empty.
-function harness({ parked = true, kept = true, empty = false } = {}) {
+function harness({ parked = true, kept = true, empty = false, focusable = true } = {}) {
   const panes = [
     { pane: "p1", tab: "a", terminal: "t1" }, // a shell
     { pane: "p2", tab: "b", terminal: "t2" }, // an editor
-    { pane: "p3", tab: "c", terminal: "t3" }, { pane: "p4", tab: "c", terminal: "t4", focused: true, title: "● a.ts — vsedit" }, // a shell and an editor
+    { pane: "p3", tab: "c", terminal: "t3" }, { pane: "p4", tab: "c", terminal: "t4", title: "● a.ts — vsedit" }, // a shell and an editor (focused)
     { pane: "pv", tab: "v", terminal: null, mod: "vscode-viewer" }, // an image
   ];
   const tabs = [{ id: "a" }, { id: "b" }, { id: "c" }, { id: "v" }], calls = [];
@@ -35,9 +35,13 @@ function harness({ parked = true, kept = true, empty = false } = {}) {
     };
     if (name === "tab.close") tabs.splice(tabs.findIndex(t => t.id === args.id), 1);
   };
-  const move = createMover({ run, panes: () => panes, spaces: () => [{ id: "s", tabs }], viewers: () => viewers });
+  const remembered = [], failed = [];
+  // panes()' `focused`, as Herdr sets it after pane.focus (`focusable` false: a pane.focus that never lands).
+  const rows = () => panes.map(p => ({ ...p, focused: focusable && p.pane === focus }));
+  const move = createMover({ run, panes: rows, spaces: () => [{ id: "s", tabs }], viewerOf: (pane) => viewers[pane] ?? null,
+    remember: (pane, file) => remembered.push([pane, file]), fail: (reason) => failed.push(reason) });
   const sleep = async () => { pending?.(); pending = null; };
-  return { move: (req) => move(req, sleep), calls, panes, tabs };
+  return { move: (req) => move(req, sleep), calls, panes, tabs, remembered, failed, focus: (p) => { focus = p; } };
 }
 
 test("an editor tab joins a shell's tab right of its pane; its own tab goes with its only pane", async () => {
@@ -51,14 +55,36 @@ test("an editor tab joins a shell's tab right of its pane; its own tab goes with
 
 test("it goes beside the target tab's focused pane, else its last one", async () => {
   const h = harness();
-  h.panes[3].focused = false;
-  h.panes[2].focused = true;
+  h.focus("p3");
   await h.move({ terminal: "t1", into: "c", place: "down" });
   assert.deepEqual(h.calls[2], ["pane.focus", { pane: "p3" }]);
   const g = harness();
-  g.panes[3].focused = false;
-  await g.move({ terminal: "t1", into: "c", place: "down" });
+  g.focus("p1");
+  await g.move({ terminal: "t2", into: "c", place: "down" });
   assert.deepEqual(g.calls[2], ["pane.focus", { pane: "p4" }]);
+});
+
+test("a drop on one pane splits that pane: it is focused, and keep waits until it is", async () => {
+  const h = harness(); // p4 focused; the drop is on p3
+  assert.equal(await h.move({ terminal: "t1", into: "c", place: "down", beside: "p3" }), true);
+  assert.deepEqual(h.calls.slice(0, 4), [["terminal.park", { terminal: "t1" }], ["tab.select", { id: "c" }], ["pane.focus", { pane: "p3" }],
+    ["terminal.keep", { terminal: "t1", place: "down" }]]);
+});
+
+test("each zone's keep place and swap: down and right as they are, up and left as down and right then swapped", async () => {
+  for (const [zone, keep, swap] of [["down", "down", null], ["right", "right", null], ["up", "down", "up"], ["left", "right", "left"]]) {
+    const h = harness();
+    await h.move({ terminal: "t2", into: "c", place: zone, beside: "p3" });
+    assert.deepEqual(h.calls.find(c => c[0] === "terminal.keep"), ["terminal.keep", { terminal: "t2", place: keep }], zone);
+    assert.deepEqual(h.calls.find(c => c[0] === "pane.swap") ?? null, swap && ["pane.swap", { direction: swap }], zone);
+  }
+});
+
+test("when the target pane never takes focus, the terminal gets its own tab back and the person is told", async () => {
+  const h = harness({ focusable: false });
+  assert.equal(await h.move({ terminal: "t2", into: "c", place: "down", beside: "p3" }), false);
+  assert.deepEqual(h.calls.at(-1), ["terminal.keep", { terminal: "t2", place: "tab" }]);
+  assert.match(h.failed[0], /didn't take focus/);
 });
 
 test("left and up are kept right and down, then swapped with that neighbour", async () => {
@@ -94,6 +120,7 @@ test("a viewer joins a tab: the same file opened beside the target pane, then th
   assert.deepEqual(h.calls, [
     ["pane.split", { direction: "right", pane: "p1", mod: "vscode-viewer", props: { file: "/p/icon.png", on: null } }],
     ["pane.close", { pane: "pv" }], ["tab.select", { id: "a" }], ["pane.focus", { pane: "pv2" }], ["pane.swap", { direction: "left" }]]);
+  assert.deepEqual(h.remembered, [["pv2", { file: "/p/icon.png", on: null }]], "the new viewer pane's file, for its next move");
   assert.deepEqual(h.tabs.map(t => t.id), ["a", "b", "c"]);
 });
 
@@ -103,6 +130,8 @@ test("a viewer whose file vscode-viewer hasn't shared yet, or a pane that isn't 
   assert.equal(await h.move({ pane: "pw", into: null, place: "tab" }), false);
   assert.equal(await h.move({ pane: "px", into: null, place: "tab" }), false);
   assert.deepEqual(h.calls, []);
+  assert.equal(h.failed.length, 1, "the unknown viewer is explained in a toast");
+  assert.match(h.failed[0], /^Can't move this viewer/);
 });
 
 test("a viewer whose file is known moves out to tab.new with the same props", async () => {

@@ -1,10 +1,12 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { spaces, panes, terminals, run, openOverlay, closeOverlay, props, theme, window, shared, setShared, layout, settings, hc, exec } from "herdr";
+import { spaces, panes, terminals, run, openOverlay, closeOverlay, props, theme, window, shared, setShared, layout, settings, hc, exec, notify } from "herdr";
 import { tabFileOf, dirtyTabs, TAB_MENU, withDetails, DETAILS } from "./tabfile.js";
 import { createTabCloser, signalCommand, CLOSE_REQUEST } from "./close.js";
-import { createMover, MOVE_REQUEST, VIEWER_FILES } from "./move.js";
-import { find, dragStarted, panesRect, dropZone, zoneRect, dragSource } from "./drag.js";
+import { createMover, withViewer, MOVE_REQUEST, VIEWER_FILES } from "./move.js";
+import { find, dragStarted, panesRect, paneRects, dropTarget, zoneRect, dragSource } from "./drag.js";
+// vscode-pane's { [pane]: bounds }: where each shown pane's header is, for dropping onto one pane.
+const PANE_BOUNDS = "vscode-pane.bounds";
 
 // Asks the editor in terminal `address` to close (close.js): its first process from hc, signalled on its machine.
 async function requestClose(address) {
@@ -18,7 +20,14 @@ async function requestClose(address) {
   }
 }
 const closeTabs = createTabCloser({ run, panes, requestClose });
-const movePane = createMover({ run, panes, spaces, viewers: () => shared(VIEWER_FILES) });
+// A viewer's file: as its opener recorded it, else as the viewer shared it when it was last focused.
+const viewerOf = (pane) => {
+  const focusedViewer = shared("vscode-viewer.focused");
+  return shared(VIEWER_FILES)?.[pane] ?? (focusedViewer?.pane === pane ? focusedViewer : null);
+};
+const movePane = createMover({ run, panes, spaces, viewerOf,
+  remember: (pane, file) => setShared(VIEWER_FILES, withViewer(shared(VIEWER_FILES), new Set(panes().map(p => p.pane)), pane, file)),
+  fail: (body) => notify({ title: "Move", body, level: "error" }) });
 
 // The drag of a tab once it left the bar (drag.js): a full-window, frameless overlay of this mod ({ drag: { source,
 // into, title, bar } }) that follows the pointer over the shown tab's panes, shows where the tab will land and moves
@@ -34,21 +43,25 @@ class DragOverlay {
 
   end() { closeOverlay(props().overlay); }
 
-  rect() { return this.win ? panesRect(this.drag.bar, this.win, layout()) : null; }
-
-  zone(pos) { return dropZone(this.rect(), pos); }
+  // The pane under `pos` and its zone (drag.js dropTarget), from the shown tab's pane headers' bounds (vscode-pane).
+  target(pos) {
+    if (!this.win || !pos) return null;
+    const area = panesRect(this.drag.bar, this.win, layout());
+    const ids = panes().filter(p => p.tab === this.drag.into).map(p => p.pane);
+    return dropTarget(paneRects(shared(PANE_BOUNDS), ids, area), area, pos);
+  }
 
   render() {
-    const t = theme(), d = this.drag, zone = this.pos && this.zone(this.pos);
-    const area = zone && zoneRect(this.rect(), zone);
+    const t = theme(), d = this.drag, hit = this.target(this.pos);
+    const area = hit && zoneRect(hit.rect, hit.zone);
     const box = (r) => div().absolute().left(r.x).top(r.y).w(r.width).h(r.height);
     return div().id("tab-drag").size_full().relative().track_focus(this.handle)
       .on_size_change((size) => { this.win = size; })
       .on_key_down((e) => { if (e.key === "escape") this.end(); })
       .on_mouse_move((e, cx) => { this.pos = e.position; cx.notify(); })
       .on_mouse_up("left", (e) => {
-        const place = this.zone(e.position);
-        if (place) setShared(MOVE_REQUEST, { ...d.source, into: d.into, place, at: Date.now() });
+        const drop = this.target(e.position);
+        if (drop) setShared(MOVE_REQUEST, { ...d.source, into: d.into, place: drop.zone, beside: drop.beside, at: Date.now() });
         this.end();
       })
       .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.end(); })

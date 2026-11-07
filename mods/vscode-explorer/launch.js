@@ -25,11 +25,22 @@ export function directRun({ folder, argv }, where, labels = []) {
     "--", "/bin/sh", "-c", FIND, ...program];
 }
 
+// Runs `open` (it opens a vscode-viewer pane showing `props`' file), waits for the new viewer pane in panes() and
+// hands its id to `remember(pane, { file, on })`: a viewer's props aren't in panes(), and moving it to another tab
+// (vscode-tabs' move.js) opens the same file again.
+export async function noteViewer({ panes, remember, open, props, cx, wait = 3000, step = 25 }) {
+  const before = new Set(panes().map(p => p.pane));
+  const fresh = () => panes().find(p => p.mod === "vscode-viewer" && !before.has(p.pane));
+  open();
+  for (let waited = 0; !fresh() && waited < wait; waited += step) await cx.sleep(step);
+  if (fresh()) remember(fresh().pane, { file: props.file, on: props.on ?? null });
+}
+
 // `herdr`'s hc, run, spaces and panes; `newId` makes the tab id. Returns openTab(args, cx), awaitable.
 // `warm(space, args, cx)`: the id of a tab already showing args' program (it is named and selected as a new one), or null.
 // `log(fields)`: each step of a local open, for timing: { step, mode: "warm" | "cold", ms since the open began, at:
-// epoch ms, name }; steps start, hc-run and shown (cold only), select.
-export function createOpenTab({ hc, run, exec, spaces, panes, local = false, newId = newTabId, wait = 3000, step = 25, warm = null, log = null }) {
+// epoch ms, name }; steps start, hc-run and shown (cold only), select. `remember`: noteViewer's, for a viewer it opens.
+export function createOpenTab({ hc, run, exec, spaces, panes, local = false, newId = newTabId, wait = 3000, step = 25, warm = null, log = null, remember = null }) {
   const tabsOf = (space) => spaces().find(s => s.id === space)?.tabs.map(t => t.id) ?? [];
   const hasTab = (space, tab) => tabsOf(space).includes(tab);
   const routing = new Set(); // terminals whose right-click retry loop is running
@@ -43,6 +54,7 @@ export function createOpenTab({ hc, run, exec, spaces, panes, local = false, new
     const tabNew = () => (!side ? run("tab.new", local && space ? { ...args, space: space.id } : args)
       : args.argv ? run("terminal.open", { argv: args.argv, folder: args.folder, place })
       : run("pane.split", { direction: place, mod: args.mod, props: args.props }));
+    if (args.mod === "vscode-viewer" && remember) return noteViewer({ panes, remember, open: tabNew, props: args.props, cx, wait, step });
     if (!args.argv || !space) return tabNew();
     if (space.machine) return remoteTab(space.id, tabNew, cx);
     mark("start");

@@ -8,13 +8,18 @@
 // tests load it.
 
 // { terminal } or { pane } (a viewer), and { into: tab id (a tab of the same space) | null (a new tab),
-// place: PLACES' keys | "tab", name?, at }.
+// place: PLACES' keys | "tab", beside?: a pane of `into` to split, name?, at }.
 export const MOVE_REQUEST = "vscode-tabs.move";
-// vscode-viewer's { [pane]: { file, on } }: what each viewer pane shows (its props aren't in panes()).
+// { [pane]: { file, on } }: what each viewer pane shows, since panes() has no mod props. Whoever opens a viewer
+// records it (vscode-explorer's launch.js, this file; withViewer); vscode-viewer also records itself when it can.
 export const VIEWER_FILES = "vscode-viewer.files";
 // Where beside the target pane: the side terminal.keep / pane.split puts it, then the pane.swap direction.
 const PLACES = { right: ["right"], down: ["down"], left: ["right", "left"], up: ["down", "up"] };
 const WAIT_MS = 3000, STEP_MS = 25;
+
+// VIEWER_FILES `files` with pane `pane` showing { file, on }, less the panes no longer in `live` (panes() ids).
+export const withViewer = (files, live, pane, { file, on = null }) =>
+  ({ ...Object.fromEntries(Object.entries(files ?? {}).filter(([k]) => live.has(k))), [pane]: { file, on } });
 
 // The name a pane's new tab gets: an editor's file (its title "● a.ts — vsedit"), a viewer's file name; else none.
 export function tabName(p, viewer) {
@@ -22,16 +27,20 @@ export function tabName(p, viewer) {
   return /^(?:● )?(.+?) — vsedit/.exec(p?.title ?? "")?.[1] ?? null;
 }
 
-// `viewers()`: shared VIEWER_FILES.
-export function createMover({ run, panes, spaces, viewers = () => ({}) }) {
+// `viewerOf(pane)`: the { file, on } a viewer pane shows, or null; `remember(pane, { file, on })`: records a viewer this
+// opens; `fail(reason)`: tells the person why a move stopped (nothing is said for a move with nowhere to go).
+export function createMover({ run, panes, spaces, viewerOf = () => null, remember = () => {}, fail = () => {} }) {
   const until = async (ok, sleep) => { for (let w = 0; !ok() && w < WAIT_MS; w += STEP_MS) await sleep(STEP_MS); return ok() ?? false; };
-  return async function move({ terminal = null, pane = null, into = null, place = "tab", name = null }, sleep) {
+  const stop = (reason) => { fail(reason); return false; };
+  return async function move({ terminal = null, pane = null, into = null, place = "tab", beside = null, name = null }, sleep) {
     const from = terminal ? panes().find(p => p.terminal === terminal) : panes().find(p => p.pane === pane && p.mod === "vscode-viewer");
-    const viewer = !terminal && from ? viewers()?.[from.pane] : null;
-    if (!from || (!terminal && !viewer?.file) || into === from.tab || (into ? !PLACES[place] : place !== "tab")) return false;
-    // Beside the target tab's focused pane, else its last one; a new tab only for a pane that shares its tab.
+    if (!from || into === from.tab || (into ? !PLACES[place] : place !== "tab")) return false;
+    const viewer = terminal ? null : viewerOf(from.pane);
+    if (!terminal && !viewer?.file) return stop("Can't move this viewer: its file isn't known yet. Click into it and try again.");
+    // Beside `beside` (the pane a drag was dropped on), else the target tab's focused pane, else its last one; a new
+    // tab only for a pane that shares its tab.
     const there = into ? panes().filter(p => p.tab === into) : [];
-    const target = there.find(p => p.focused) ?? there[there.length - 1];
+    const target = there.find(p => p.pane === beside) ?? there.find(p => p.focused) ?? there[there.length - 1];
     if (into ? !target : !panes().some(p => p.tab === from.tab && p.pane !== from.pane)) return false;
     const [side, swap] = PLACES[place] ?? [place];
     const title = name ?? tabName(from, viewer);
@@ -39,7 +48,15 @@ export function createMover({ run, panes, spaces, viewers = () => ({}) }) {
     if (terminal) {
       run("terminal.park", { terminal });
       if (!(await until(() => !panes().some(p => p.terminal === terminal), sleep))) return false; // Herdr toasts why
-      if (target) { run("tab.select", { id: into }); run("pane.focus", { pane: target.pane }); }
+      if (target) {
+        // keep splits the focused pane: it must be the target before keep runs, or another pane gets split.
+        run("tab.select", { id: into });
+        run("pane.focus", { pane: target.pane });
+        if (!(await until(() => panes().find(p => p.pane === target.pane)?.focused, sleep))) {
+          run("terminal.keep", { terminal, place: "tab" }); // parked: give it its tab back rather than lose it
+          return stop(`Can't move ${title ?? "this pane"}: the pane to put it beside didn't take focus.`);
+        }
+      }
       run("terminal.keep", { terminal, place: side });
       shown = await until(() => panes().find(p => p.terminal === terminal), sleep);
     } else {
@@ -48,12 +65,15 @@ export function createMover({ run, panes, spaces, viewers = () => ({}) }) {
       if (target) run("pane.split", { direction: side, pane: target.pane, mod: "vscode-viewer", props });
       else run("tab.new", { name: title, space: space?.id, mod: "vscode-viewer", props });
       shown = await until(() => panes().find(p => p.mod === "vscode-viewer" && !before.has(p.pane) && (!into || p.tab === into)), sleep);
-      if (shown) run("pane.close", { pane: from.pane });
+      if (!shown) return stop(`Can't move ${title}: its new pane didn't show up.`);
+      remember(shown.pane, props);
+      run("pane.close", { pane: from.pane });
     }
-    if (!shown) return false;
+    if (!shown) return stop(`Can't move ${title ?? "this pane"}: Herdr didn't show it again.`);
     run("tab.select", { id: shown.tab });
     run("pane.focus", { pane: shown.pane });
-    if (swap) run("pane.swap", { direction: swap });
+    // pane.swap moves the focused pane too.
+    if (swap && (await until(() => panes().find(p => p.pane === shown.pane)?.focused, sleep))) run("pane.swap", { direction: swap });
     if (!into && title && terminal) run("tab.rename", { id: shown.tab, name: title }); // a viewer's tab.new named it
     // The tab it came from, if Herdr keeps it with no pane left.
     if (!panes().some(p => p.tab === from.tab) && spaces().some(s => s.tabs.some(t => t.id === from.tab))) run("tab.close", { id: from.tab });

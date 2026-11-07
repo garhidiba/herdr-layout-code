@@ -205,6 +205,18 @@ test("Open to the Side in a remote space: terminal.open there, its new pane gets
   assert.deepEqual(execCalls[0], ["herdr-app", ["do", "terminal.right_click", "--to", "program", "--terminal", "box/t9"]]);
 });
 
+test("a viewer the Explorer opens is remembered by its new pane's id, so it can be moved to another tab", async () => {
+  const calls = [], remembered = [];
+  let shown = false;
+  const openTab = createOpenTab({ hc: async () => ok, run: (n, a) => { calls.push([n, a]); }, remember: (pane, file) => remembered.push([pane, file]),
+    spaces: () => [{ id: "sp1", machine: null, active: true, tabs: [] }], wait: 100, step: 25,
+    panes: () => [{ pane: "p1", tab: "t", mod: "vscode-viewer" }, ...(shown ? [{ pane: "p2", tab: "t2", mod: "vscode-viewer" }] : [])] });
+  const viewer = { name: "a.png", mod: "vscode-viewer", props: { file: "/p/a.png", on: null } };
+  await openTab(viewer, { sleep: async () => { shown = true; } });
+  assert.deepEqual(calls, [["tab.new", viewer]]);
+  assert.deepEqual(remembered, [["p2", { file: "/p/a.png", on: null }]]);
+});
+
 test("extra labels go on the terminal with Herdr's", () => {
   const args = directRun(editor, where, ["vscode.warm=1"]);
   assert.deepEqual(args.slice(7, 13), ["--label", "herdr.space=sp1", "--label", "herdr.tab=tb1", "--label", "vscode.warm=1"]);

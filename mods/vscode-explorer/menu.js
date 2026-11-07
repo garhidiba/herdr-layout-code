@@ -3,7 +3,7 @@
 import { div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { exec, hc, run, spaces, panes, terminals, machines, props, openOverlay, closeOverlay, theme, shared, setShared, appHome, home, readTextFile, writeTextFile, notify, window } from "herdr";
-import { createOpenTab } from "./launch.js";
+import { createOpenTab, noteViewer } from "./launch.js";
 import { createWarmPool, TIMING } from "./warm.js";
 import { menuItems, menuHeight, openWith, baseName, parentOf, relativeTo, nameProblem, vscodeRemoteArgs, isMarkdown, editorPaneOf,
   tabMenuItems, moveRows, outRows, moveOf, closeArgs, fileTabs, splitArgs, clipboardCommand, revealCommand, withDetails, deleteTitle, extraLines, DETAILS } from "./paths.js";
@@ -26,7 +26,13 @@ const logOpen = (fields) => {
   timing = [];
   exec("sh", ["-c", 'printf %s "$1" >> "$2"', "log", text, `${appHome()}/.vscode-open-timing.log`]).catch(() => {});
 };
-const openTab = createOpenTab({ hc, run, exec, spaces, panes, warm: warm.claim, log: logOpen });
+// Each viewer pane the Explorer opens, { [pane]: { file, on } } (vscode-tabs' move.js VIEWER_FILES; gone panes dropped).
+const VIEWER_FILES = "vscode-viewer.files";
+const rememberViewer = (pane, file) => {
+  const live = new Set(panes().map(p => p.pane));
+  setShared(VIEWER_FILES, { ...Object.fromEntries(Object.entries(shared(VIEWER_FILES) ?? {}).filter(([k]) => live.has(k))), [pane]: file });
+};
+const openTab = createOpenTab({ hc, run, exec, spaces, panes, warm: warm.claim, log: logOpen, remember: rememberViewer });
 // The editor on a remote space's machine (remote.js): installing it is asked on each open with the shipped confirm dialog,
 // whose yes runs INSTALL_COMMAND for the tree (main.js), naming the machine in the shared value INSTALL_REQUEST.
 const askInstall = (machine, size) => {
@@ -54,8 +60,6 @@ export const REVEAL = "vscode-explorer.reveal";
 const TAB_CLOSE = "vscode-tabs.close";
 // Move into Tab / Move to New Tab ask the tab bar too (vscode-tabs' move.js MOVE_REQUEST).
 const MOVE = "vscode-tabs.move";
-// vscode-viewer's { [pane]: { file, on } } (vscode-tabs' move.js VIEWER_FILES): names a viewer pane in Move to New Tab….
-const VIEWER_FILES = "vscode-viewer.files";
 
 // Herdr starts with PATH=/usr/bin:/bin; Homebrew/user tools (code, trash) live elsewhere.
 const sh = (script, ...args) => exec("sh", ["-c", 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; ' + script, "explorer", ...args]);
@@ -195,6 +199,10 @@ export class TabMenu extends ExplorerMenu {
     // Reopen: the new tab first (closing the old one first could close the space), then the old one.
     if (action === "editor" || action === "viewer") return !this.opening && (this.opening = true) && cx.spawn(async cx => {
       try { await openFile(t.file, { on: t.on, how: action, folder: t.root ?? undefined }, cx); run("tab.close", { id: t.tab }); } finally { this.close(); }
+    });
+    // A viewer's Split Right: its new pane is remembered as the Explorer's opens are, so it can move too (closed once shown).
+    if (action === "split" && !t.argv) return !this.opening && (this.opening = true) && cx.spawn(async cx => {
+      try { await noteViewer({ panes, remember: rememberViewer, open: () => run("pane.split", splitArgs(t)), props: { file: t.file, on: t.on }, cx }); } finally { this.close(); }
     });
     this.close();
     switch (action) {
