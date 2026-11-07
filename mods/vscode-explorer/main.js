@@ -369,7 +369,12 @@ export default class Files extends View {
     if (r.dir) return this.toggle(r.path, cx);
     if (this.platform && !this.on) userExec("code", [r.abs]).catch(() => {});
     else if (this.platform) openInCode(r.abs, this.on).catch(err => notify({ title: "Explorer", body: String(err?.message ?? err), level: "error" }));
-    else this.open(r.path, cx);
+    else {
+      // Selected at once, as VS Code does, rather than once the editor tab shows and autoReveal() marks it.
+      this.active = r.path;
+      cx.notify();
+      this.open(r.path, cx);
+    }
   }
 
   render(cx) {
