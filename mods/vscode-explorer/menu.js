@@ -159,7 +159,7 @@ export class ExplorerMenu {
   render(cx) {
     const t = theme(), rows = this.rows(), picks = rows.map((r, i) => (r === "-" || r[3] ? -1 : i)).filter(i => i >= 0);
     const move = (d) => { const k = picks.indexOf(this.at); this.at = picks[(k + d + picks.length + (k === -1 && d < 0 ? 1 : 0)) % picks.length]; };
-    return v_flex().id("explorer-menu").track_focus(this.handle).w_full().h_full().min_h(0).overflow_y_scrollbar().p(5).bg(t.popover).text_size(12.8)
+    return v_flex().id("explorer-menu").track_focus(this.handle).w_full().max_h(480).overflow_y_scrollbar().p(5).bg(t.popover).text_size(12.8)
       .on_key_down((e, cx) => {
         if (e.key === "down") move(1);
         else if (e.key === "up") move(-1);

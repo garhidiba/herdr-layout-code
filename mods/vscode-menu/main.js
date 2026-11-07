@@ -176,8 +176,7 @@ export default class Menu extends View {
       .id("menu")
       .track_focus(this.handle)
       .w_full()
-      .h_full()
-      .min_h(0)
+      .max_h(480) // a popup gives its content no height: a full-height scroll area would be 0 tall
       .overflow_y_scrollbar()
       .p(5)
       .bg(t.popover)
