@@ -1,9 +1,10 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { spaces, panes, terminals, run, openOverlay, theme, window, shared, layout, settings, hc, exec } from "herdr";
+import { spaces, panes, terminals, run, openOverlay, closeOverlay, props, theme, window, shared, setShared, layout, settings, hc, exec } from "herdr";
 import { tabFileOf, dirtyTabs, TAB_MENU, withDetails, DETAILS } from "./tabfile.js";
 import { createTabCloser, signalCommand, CLOSE_REQUEST } from "./close.js";
 import { createMover, MOVE_REQUEST } from "./move.js";
+import { dragStarted, contentRect, dropZone, zoneRect, dragTerminal } from "./drag.js";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -28,9 +29,50 @@ async function requestClose(address) {
 const closeTabs = createTabCloser({ run, panes, requestClose });
 const moveTerminal = createMover({ run, panes, spaces });
 
+// The drag of a tab once it left the bar (drag.js): a full-window, frameless overlay of this mod ({ drag: { terminal,
+// into, title, bar } }) that follows the pointer over the shown tab, shows where the tab will land and moves it there
+// on release. Escape, a release outside the content or any new press cancels.
+class DragOverlay {
+  constructor(cx) {
+    this.drag = props().drag;
+    this.win = null;
+    this.pos = null;
+    this.handle = cx.focus_handle();
+    this.handle.focus();
+  }
+
+  end() { closeOverlay(props().overlay); }
+
+  zone(pos) { return this.win ? dropZone(contentRect(this.drag.bar, this.win), pos) : null; }
+
+  render() {
+    const t = theme(), d = this.drag, zone = this.pos && this.zone(this.pos);
+    const area = zone && zoneRect(contentRect(d.bar, this.win), zone);
+    const box = (r) => div().absolute().left(r.x).top(r.y).w(r.width).h(r.height);
+    return div().id("tab-drag").size_full().relative().track_focus(this.handle)
+      .on_size_change((size) => { this.win = size; })
+      .on_key_down((e) => { if (e.key === "escape") this.end(); })
+      .on_mouse_move((e, cx) => { this.pos = e.position; cx.notify(); })
+      .on_mouse_up("left", (e) => {
+        const place = this.zone(e.position);
+        if (place) setShared(MOVE_REQUEST, { terminal: d.terminal, into: d.into, place, at: Date.now() });
+        this.end();
+      })
+      .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.end(); })
+      .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); this.end(); })
+      .when(Boolean(area), el => el.child(box(area).bg(t.accent).opacity(0.2)).child(box(area).border(2).border_color(t.accent).rounded(4)))
+      .when(Boolean(this.pos), el => el.child(div().absolute().left(this.pos.x + 12).top(this.pos.y + 10).px(8).py(3).rounded(6)
+        .bg(t.raised).border(1).border_color(t.border).text_size(12.8).text_color(t.foreground).child(d.title)));
+  }
+}
+
 export default class Tabs extends View {
-  init() {
+  init(_props, cx) {
+    if (props()?.drag) return void (this.dragView = new DragOverlay(cx));
     this.pressed = null;
+    this.press = null; // { id, title, at }: the tab pressed and where, until a release or a drag out of the bar
+    this.dragging = false;
+    this.bar = null; // the bar's window bounds, from the pointer's moves over it
     this.hoverClose = null; // the tab whose close slot the pointer is on
     this.closeAt = null; // the tab menu's last close request taken (close.js CLOSE_REQUEST)
     this.moveAt = null; // the menus' last move request taken (move.js MOVE_REQUEST)
@@ -59,7 +101,17 @@ export default class Tabs extends View {
 
   // The side panel (Explorer / Source Control) is one global state: switching spaces leaves it as it is.
 
+  // A press dragged out of the bar: the overlay takes it over when the tab has one terminal to move into the shown tab.
+  dragOut(space) {
+    const p = this.press, active = space?.tabs.find(c => c.active)?.id;
+    this.press = null; this.pressed = null; this.dragging = false;
+    const terminal = p && this.bar ? dragTerminal(p.id, active, panes()) : null;
+    if (terminal) openOverlay({ mod: "vscode-tabs", kind: "window", frame: "none", at: { x: 0, y: 0 }, width: 1, height: 1,
+      props: { drag: { terminal, into: active, title: p.title, bar: this.bar } } });
+  }
+
   render(cx) {
+    if (this.dragView) return this.dragView.render(cx);
     this.closeAsked(cx);
     this.moveAsked(cx);
     const t = theme();
@@ -76,19 +128,24 @@ export default class Tabs extends View {
       const name = /^tb\d+$/.test(c.name) ? program?.name ?? "Terminal" : c.name;
       return h_flex().id(`tab-${c.id}`).h(29).px(10).gap(7).rounded(7).items_center().flex_none().text_size(12.8)
         .border(1).border_color(c.active ? t.border : t.chrome).bg(c.active ? t.raised : t.chrome).text_color(c.active ? t.foreground : t.muted)
-        .hover(s => s.bg(t.hover))
-        .on_mouse_down("left", (e, cx) => { cx.stop_propagation(); this.pressed = i; if (e.click_count === 2) run("tab.rename", { id: c.id }); })
+        .hover(s => s.bg(t.hover)).when(this.dragging && this.press?.id === c.id, el => el.opacity(0.5))
+        .on_mouse_down("left", (e, cx) => {
+          cx.stop_propagation(); this.pressed = i; this.press = { id: c.id, title: name, at: e.position };
+          if (e.click_count === 2) run("tab.rename", { id: c.id });
+        })
         .on_mouse_up("left", () => {
           const from = this.pressed; this.pressed = null;
           if (from !== null && from !== i) run("tab.move", { id: shown[from].id, index: space.tabs.findIndex(x => x.id === c.id) + 1 });
           else run("tab.select", { id: c.id });
         })
-        // A tab showing a file gets VS Code's editor tab menu (vscode-explorer's), any other Herdr's.
+        // A tab showing a file gets VS Code's editor tab menu (vscode-explorer's), any other Herdr's items with Move into
+        // tab… (vscode-menu: rows of 31px, a separator, 10px padding; the move only for a tab of one terminal).
         .on_mouse_down("right", (_e, cx) => {
           cx.stop_propagation();
           const file = tabFileOf(c.id, space, panes(), withDetails(terminals(), shared(DETAILS)), shared("vscode-viewer.focused"));
+          const movable = shown.length > 1 && dragTerminal(c.id, null, panes());
           openOverlay(file ? { mod: "vscode-explorer", kind: "popup", ...TAB_MENU, props: { tabMenu: { ...file, dirty: [...dirty] } } }
-            : { mod: "menu", kind: "popup", width: 200, props: { tab: "tab", target: { id: c.id, space: space.id } } });
+            : { mod: "vscode-menu", kind: "popup", width: 220, height: movable ? 143 : 112, props: { tab: "tab", target: { id: c.id, space: space.id } } });
         })
         .when(Boolean(program?.icon), el => el.child(program.tint ? svg(program.icon).size(14).text_color(t.muted) : image(program.icon).size(14)))
         .child(div().max_w(170).truncate().child(c.zoomed ? `${name} Z` : name))
@@ -123,7 +180,13 @@ export default class Tabs extends View {
         }).child(svg(icon).size(18));
     };
     return h_flex().size_full().min_w(0).px(10).pl(lightsPadding).gap(3).items_center().bg(t.chrome).border_b(1).border_color(t.border)
-      .on_mouse_up("left", () => { this.pressed = null; })
+      .on_mouse_up("left", (_e, cx) => { this.pressed = null; this.press = null; if (this.dragging) { this.dragging = false; cx.notify(); } })
+      // A press on a tab dragged past THRESHOLD is a drag (the tab dims); leaving the bar hands it to the overlay.
+      .on_mouse_move((e, cx) => {
+        this.bar = e.bounds;
+        if (this.press && !this.dragging && dragStarted(this.press.at, e.position)) { this.dragging = true; cx.notify(); }
+      })
+      .on_hover((on) => { if (!on && this.dragging) this.dragOut(space); })
       .on_scroll_wheel(e => { if (Math.abs(e.delta.y) >= 1) run(e.delta.y > 0 ? "tab.prev" : "tab.next"); })
       .child(h_flex().id("tab-scroll").flex_1().min_w(0).h_full().items_center().gap(3).overflow_x_scrollbar().children(shown.map(item)))
       .child(button("tab-new", "+", () => openOverlay({ mod: "new-menu", kind: "popup", width: 250, height: 512 })))

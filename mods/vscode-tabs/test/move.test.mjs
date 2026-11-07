@@ -55,6 +55,15 @@ test("it goes beside the target tab's focused pane, else its last one", async ()
   assert.deepEqual(g.calls[2], ["pane.focus", { pane: "p4" }]);
 });
 
+test("left and up are kept right and down, then swapped with that neighbour", async () => {
+  for (const [place, keep, swap] of [["left", "right", "left"], ["up", "down", "up"]]) {
+    const h = harness();
+    assert.equal(await h.move({ terminal: "t2", into: "a", place }), true);
+    assert.deepEqual(h.calls.slice(3), [["terminal.keep", { terminal: "t2", place: keep }], ["tab.select", { id: "a" }],
+      ["pane.focus", { terminal: "t2" }], ["pane.swap", { direction: swap }]]);
+  }
+});
+
 test("an emptied tab Herdr keeps is closed once the terminal is shown elsewhere", async () => {
   const h = harness({ empty: true });
   await h.move({ terminal: "t2", into: "a", place: "right" });
@@ -77,6 +86,7 @@ test("nothing moves when there is nowhere to go or the request makes no sense", 
     { terminal: "t2", into: "b", place: "right" }, // its own tab
     { terminal: "t2", into: "gone", place: "right" },
     { terminal: "t2", into: "a", place: "tab" },
+    { terminal: "t2", into: "a", place: "middle" },
     { terminal: "t4", into: null, place: "right" },
     { terminal: "nope", into: "a", place: "right" },
   ]) assert.equal(await h.move(req), false, JSON.stringify(req));
