@@ -72,6 +72,20 @@ test("several unsaved editors are asked one at a time, each after the one before
   assert.deepEqual(h.calls, [["tab.select", { id: "b" }], ["request", "t2"], ["tab.select", { id: "box/f" }], ["request", "box/t6"]]);
 });
 
+test("a tab holding two unsaved editors and a shell (move.js) asks each editor in turn, then closes what is left", async () => {
+  const h = harness({ editors: { t2: ["● a.ts — vsedit (closing)", null], t7: ["● c.ts — vsedit (closing)", null] } });
+  h.panes.push({ pane: "p7", tab: "b", terminal: "t7", title: "● c.ts — vsedit" }, { pane: "p8", tab: "b", terminal: "t8", title: "zsh" });
+  await h.close([{ id: "b" }]);
+  assert.deepEqual(h.calls, [["tab.select", { id: "b" }], ["request", "t2"], ["tab.select", { id: "b" }], ["request", "t7"], ["tab.close", { id: "b" }]]);
+});
+
+test("Cancel on the first of two unsaved editors in a tab keeps the tab, the other one unasked", async () => {
+  const h = harness({ editors: { t2: ["● a.ts — vsedit (closing)", "● a.ts — vsedit"] } });
+  h.panes.push({ pane: "p7", tab: "b", terminal: "t7", title: "● c.ts — vsedit" });
+  await h.close([{ id: "b" }]);
+  assert.deepEqual(h.calls, [["tab.select", { id: "b" }], ["request", "t2"]]);
+});
+
 test("a person may take their time in the dialog: no timeout once it asks", async () => {
   const h = harness({ editors: { t2: Array(200).fill("● a.ts — vsedit (closing)").concat([null]) } });
   await h.close([{ id: "b" }]);

@@ -41,6 +41,7 @@ export function createTabCloser({ run, panes, requestClose, now = Date.now }) {
     const editor = mine.find(p => p.terminal && isUnsaved(p));
     if (!editor) return run("tab.close", args);
     pending.add(args.id);
+    let ended = false; // the editor saved or discarded and ended: the tab may hold more panes (move.js), so on to them
     try {
       run("tab.select", { id: args.id }); // the dialog is in the tab
       if (editorTitleState(editor.title) === "closing") return; // it asks already
@@ -49,13 +50,14 @@ export function createTabCloser({ run, panes, requestClose, now = Date.now }) {
       for (let asked = false; ;) {
         await sleep(POLL_MS);
         const p = panes().find(x => x.terminal === editor.terminal);
-        if (!p) return; // it ended: Herdr closed its pane
+        if (!p) { ended = true; return; } // it ended: Herdr closed its pane
         if (editorTitleState(p.title) === "closing") asked = true;
         else if (asked) return; // answered: Cancel keeps the tab; Save / Don't Save end the editor
         else if (now() >= end) return run("tab.close", args);
       }
     } finally {
       pending.delete(args.id);
+      if (ended) await closeOne(args, sleep);
     }
   }
   return async (list, sleep) => { for (const args of list) await closeOne(args, sleep); };
