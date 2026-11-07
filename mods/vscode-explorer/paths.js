@@ -1,8 +1,9 @@
 // Pure rules for the Explorer: where a file opens, path text, names for new/pasted entries, the context menu's items.
 
-// What the viewer previews: images. Everything else opens in the editor, as in VS Code: it reads the file's first
-// bytes and shows text (any name or extension, dotfiles and files without one too) or, with NUL bytes, the hex viewer.
-const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|ico|svg|tiff?)$/i;
+// What the viewer previews: images and videos (vscode-viewer main.js: IMAGES, VIDEOS). Everything else opens in the
+// editor, as in VS Code: it reads the file's first bytes and shows text (any name or extension, dotfiles and files
+// without one too) or, with NUL bytes, the hex viewer.
+const PREVIEW_EXT = /\.(png|jpe?g|gif|webp|bmp|ico|svg|tiff?|mp4|m4v|mov|webm|mkv|avi)$/i;
 const MARKDOWN_EXT = /\.(md|markdown|mdx|mkd)$/i;
 // The editor launcher: the Rust editor when vscode-settings.json picks it (and it is built), else vsedit.cjs.
 export const EDITOR = "mods/vscode-viewer/editor/vsedit.sh";
@@ -10,14 +11,14 @@ export const EDITOR = "mods/vscode-viewer/editor/vsedit.sh";
 export const baseName = (p) => p.slice(p.lastIndexOf("/") + 1);
 export const parentOf = (p) => p.slice(0, p.lastIndexOf("/")) || "/";
 
-// Whether a file opens in the terminal editor (else the viewer): all but images, or when asked.
-export const wantsEditor = (file, how = "auto") => how === "editor" || (how === "auto" && !IMAGE_EXT.test(baseName(file)));
+// Whether a file opens in the terminal editor (else the viewer): all but images and videos, or when asked.
+export const wantsEditor = (file, how = "auto") => how === "editor" || (how === "auto" && !PREVIEW_EXT.test(baseName(file)));
 export const isMarkdown = (file) => MARKDOWN_EXT.test(baseName(file));
 
 // tab.new args: the terminal editor (started in `folder`, default the file's own), or the vscode-viewer tab
-// (images, Open Preview, or when asked). Every way of opening a file goes through here, the remote ones too: a remote
-// file takes the editor only with `remote` ({launcher, args}, remote.js: the bundle installed on that machine; the
-// tab is in the remote space, so it runs there), else the viewer, which offers the install when `remote` is
+// (images, videos, Open Preview, or when asked). Every way of opening a file goes through here, the remote ones too:
+// a remote file takes the editor only with `remote` ({launcher, args}, remote.js: the bundle installed on that machine;
+// the tab is in the remote space, so it runs there), else the viewer, which offers the install when `remote` is
 // { install: true } (not installed there yet).
 export function openArgs(file, { on = null, appHome, how = "auto", folder = parentOf(file), remote = null }) {
   const name = baseName(file);

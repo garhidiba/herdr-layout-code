@@ -13,11 +13,11 @@ test("a dialog grows by the lines a long file name wraps onto, and not for a sho
 
 const home = "/Users/me/.config/herdr-app";
 
-test("every file but an image opens in the terminal editor, which shows text or (NUL bytes) the hex viewer", () => {
+test("every file but an image or a video opens in the terminal editor, which shows text or (NUL bytes) the hex viewer", () => {
   const text = ["x.toml", "x.yaml", "x.yml", ".env", ".env.dev", ".env.example", ".profile", "Dockerfile", "Makefile",
     "README.md", "notes.markdown", "LICENSE", "no-extension", "big.log", "data.unknownext", "app.min.js", "a.pdf", "a.bin"];
   for (const name of text) assert.ok(wantsEditor(`/p/${name}`), name);
-  for (const name of ["logo.PNG", "a.jpg", "a.jpeg", "a.gif", "a.webp", "a.bmp", "a.ico", "a.svg", "a.tif", "a.tiff"]) assert.ok(!wantsEditor(`/p/${name}`), name);
+  for (const name of ["logo.PNG", "a.jpg", "a.jpeg", "a.gif", "a.webp", "a.bmp", "a.ico", "a.svg", "a.tif", "a.tiff", "clip.MP4", "a.mov", "a.m4v", "a.webm", "a.mkv", "a.avi"]) assert.ok(!wantsEditor(`/p/${name}`), name);
   assert.ok(!wantsEditor("/p/a.ts", "viewer"));
   assert.ok(wantsEditor("/p/a.png", "editor"));
   assert.ok(isMarkdown("/p/README.md") && isMarkdown("/p/a.MDX") && !isMarkdown("/p/md") && !isMarkdown("/p/a.toml"));

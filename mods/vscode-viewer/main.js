@@ -2,12 +2,14 @@
 // machine yet: an Install Editor button asks the Explorer to install it, as its confirm dialog's yes does) }.
 // Opens straight into Herdr's built-in editor (Atom One Dark colors, VS Code's file-type recognition from langs.json),
 // saves with Cmd+S ("vscode-viewer.save" in keys.json), flags changes on disk, and shows a VS Code-style status bar.
-// Images open as a preview; markdown opens rendered, with Edit to switch to the editor.
+// Images open as a preview, videos as a still with Open in Player (from another machine both are fetched first:
+// preview.js); markdown opens rendered, with Edit to switch to the editor.
 // Auto save follows files.autoSave in <herdr home>/vscode-settings.json (shared with the terminal editor). A mod can't stop
 // its tab from closing, so unsaved text is kept as a hot-exit backup in close() and offered back on the next open.
 import { View, div, image, PathBuilder, Background } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState, TextView } from "gpui-base";
 import { props, readTextFile, writeTextFile, exec, theme, appHome, nextCommand, focused, panes, run, setShared } from "herdr";
+import { FETCHED, POSTER, fetchFile, prune } from "./preview.js";
 // Herdr starts with PATH=/usr/bin:/bin, so Homebrew/user tools (node, code, codex, trash) are looked up here too.
 const userExec = (cmd, args, opts) => exec("sh", ["-c", 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; exec "$0" "$@"', cmd, ...args], opts);
 
@@ -46,12 +48,13 @@ const extOf = (name) => { const n = name.toLowerCase(), e = n.includes(".") ? n.
 // Atom One Dark editor colors (akamud.vscode-theme-onedark: editor.background / editor.foreground).
 const EDITOR_BG = "#282c34", EDITOR_FG = "#abb2bf";
 
-// What the tab shows: an image preview, markdown (preview + editor) or code. Images: extension -> format name.
+// What the tab shows: an image preview, a video still, markdown (preview + editor) or code. Extension -> format name.
 const IMAGES = { png: "PNG", jpg: "JPEG", jpeg: "JPEG", gif: "GIF", webp: "WebP", bmp: "BMP", ico: "ICO", svg: "SVG", tif: "TIFF", tiff: "TIFF" };
+const VIDEOS = { mp4: "MPEG-4", m4v: "MPEG-4", mov: "QuickTime", webm: "WebM", mkv: "Matroska", avi: "AVI" };
 const MARKDOWN = ["md", "markdown", "mdx", "mkd"];
 function kindOf(name) {
   const n = name.toLowerCase(), e = n.includes(".") ? n.split(".").pop() : "";
-  return IMAGES[e] ? "image" : MARKDOWN.includes(e) ? "markdown" : "code";
+  return IMAGES[e] ? "image" : VIDEOS[e] ? "video" : MARKDOWN.includes(e) ? "markdown" : "code";
 }
 const sizeText = (b) => b < 1024 ? `${b} B` : b < 1048576 ? `${(b / 1024).toFixed(1)} KB` : `${(b / 1048576).toFixed(1)} MB`;
 // `sips -g pixelWidth -g pixelHeight` output -> "W × H" (null when it has none).
@@ -59,15 +62,16 @@ function sipsSize(out) {
   const w = /pixelWidth: (\d+)/.exec(out ?? ""), h = /pixelHeight: (\d+)/.exec(out ?? "");
   return w && h ? `${w[1]} × ${h[1]}` : null;
 }
-// image() only loads from the app's folder, so images are copied to <app>/mods/vscode-viewer/.cache/<path hash>-<mtime>-<size>.<ext>.
+// image() only loads from the app's folder, so images are copied to <app>/mods/vscode-viewer/.cache/<path hash>-<mtime>-<size>.<ext>
+// (a video's still: that name + .png; a remote file's hash covers its machine too).
 const CACHE = "mods/vscode-viewer/.cache";
 const pathHash = (s) => { let h = 5381; for (const c of s) h = (h * 33 ^ c.charCodeAt(0)) >>> 0; return h.toString(36); };
 // Hot-exit backups: <app>/mods/vscode-viewer/.backups/<path hash>.json, the format editor/backup.cjs reads and writes:
 // { path, text, cursor, time, mtimeMs, size } (mtimeMs/size: the file on disk at backup time; compared to the second).
 const BACKUPS = "mods/vscode-viewer/.backups";
-// { mtime (s), size } of a local file, or null.
-async function statOf(file) {
-  const st = await exec("sh", ["-c", `stat -f '%m %z' "$1" 2>/dev/null || stat -c '%Y %s' "$1"`, "sh", file]).catch(() => null);
+// { mtime (s), size } of a file here or on machine `on`, or null.
+async function statOf(file, on = null) {
+  const st = await exec("sh", ["-c", `stat -f '%m %z' "$1" 2>/dev/null || stat -c '%Y %s' "$1"`, "sh", file], { on }).catch(() => null);
   const [mtime, size] = (st?.stdout ?? "").trim().split(" ").map(Number);
   return st?.code === 0 && Number.isFinite(size) ? { mtime, size } : null;
 }
@@ -191,7 +195,7 @@ export default class Viewer extends View {
           const scope = lookup(this.file.split("/").pop(), await tableReady("vscode/index.json"));
           this.language = scope ? NAMES[scope] ?? scope.replace(/^(source|text)\./, "") : "Plain Text";
         }
-        if (this.kind === "image") return await this.loadImage();
+        if (this.kind === "image" || this.kind === "video") return await this.loadPreview(cx);
         const disk = await readTextFile(this.file, { on: this.on });
         if (disk === null) this.error = "This file is no longer available";
         else if (disk.includes("\0")) { this.code?.release(); this.code = null; this.error = "Binary file · no text preview"; }
@@ -208,21 +212,34 @@ export default class Viewer extends View {
     });
   }
 
-  // Re-copies the image into the cache when its mtime or size changes, dropping this file's older copies.
-  async loadImage() {
-    if (this.on) { this.error = "Image preview is local only"; return; }
+  // Re-copies the image (or the video's still) into the cache when its mtime or size changes, dropping this file's older
+  // copies; a remote file is fetched first (preview.js), and not again after a failure until it changes.
+  async loadPreview(cx) {
     if (this.copying) return;
     this.copying = true;
     try {
-      const st = await statOf(this.file);
+      const st = await statOf(this.file, this.on);
       if (!st) { this.img = null; this.error = "This file is no longer available"; return; }
-      const { mtime, size } = st;
-      if (this.img?.key === `${mtime}-${size}`) return;
-      const id = pathHash(this.file), name = `${id}-${mtime}-${size}.${extOf(this.file)}`;
-      const cp = await exec("sh", ["-c", `mkdir -p "$1" && rm -f "$1/$2"-* && cp "$3" "$1/$4"`, "sh", `${appHome()}/${CACHE}`, id, this.file, name]);
-      if (cp.code !== 0) { this.img = null; this.error = "Cannot preview this image"; return; }
-      const dims = await exec("sips", ["-g", "pixelWidth", "-g", "pixelHeight", this.file]).then(r => sipsSize(r.stdout)).catch(() => null);
-      this.img = { key: `${mtime}-${size}`, path: `${CACHE}/${name}`, size, dims }; this.error = null;
+      const { mtime, size } = st, key = `${mtime}-${size}`;
+      if (this.img?.key === key || this.failed === key) return;
+      const dir = `${appHome()}/${CACHE}`, id = pathHash(this.on ? `${this.on}:${this.file}` : this.file), name = `${id}-${key}.${extOf(this.file)}`;
+      const shown = this.kind === "video" ? `${name}.png` : name;
+      const fail = (why) => { this.img = null; this.error = why; this.failed = key; };
+      if ((await exec("sh", ["-c", 'mkdir -p "$1" && rm -rf "$1/$2"-*', "sh", dir, id])).code !== 0) return fail("Cannot write the preview cache");
+      let local = this.file;
+      if (this.on && FETCHED.includes(this.kind)) {
+        local = `${dir}/${name}`;
+        this.img = null; this.error = null; this.fetching = `Fetching from ${this.on}…`; cx.notify();
+        try { await fetchFile(exec, this.on, this.file, local, size, p => { this.fetching = `Fetching from ${this.on}… ${Math.round(p * 100)}%`; cx.notify(); }); }
+        catch (e) { return fail(e.message); }
+        finally { this.fetching = null; }
+      }
+      const made = this.kind === "video" ? await exec("sh", ["-c", POSTER, "sh", local, `${dir}/${id}-ql`, `${dir}/${shown}`])
+        : local === this.file ? await exec("cp", [this.file, `${dir}/${name}`]) : { code: 0 };
+      if (made.code !== 0) return fail(`Cannot preview this ${this.kind}`);
+      const dims = this.kind === "image" ? await exec("sips", ["-g", "pixelWidth", "-g", "pixelHeight", local]).then(r => sipsSize(r.stdout)).catch(() => null) : null;
+      this.img = { key, path: `${CACHE}/${shown}`, local, size, dims }; this.error = null; this.failed = null;
+      await prune(exec, dir, [name, shown]).catch(() => {});
     } finally { this.copying = false; }
   }
 
@@ -257,11 +274,11 @@ export default class Viewer extends View {
   }
 
   body(t) {
-    if (this.kind === "image") return this.img
+    if (this.kind === "image" || this.kind === "video") return this.img
       ? v_flex().flex_1().min_h(0).relative().items_center().justify_center().p(16).overflow_hidden().bg(EDITOR_BG)
         .child(window.paint_path(RECT(), Background.checkerboard("#323842", 8)).absolute().top(0).left(0).size_full())
         .child(image(this.img.path).max_w("100%").max_h("100%"))
-      : div().p(12).text_color(t.dim).child(this.error || "Loading image…");
+      : div().p(12).text_color(t.dim).child(this.error || this.fetching || `Loading ${this.kind}…`);
     if (!this.code) return div().p(12).text_color(t.dim).child(this.error || "Loading file…");
     if (this.preview) return TextView.markdown("preview", this.code.value()).scrollable(true).selectable(true)
       .flex_1().min_h(0).px(28).py(16).bg(EDITOR_BG).text_color(EDITOR_FG).text_size(14);
@@ -269,7 +286,7 @@ export default class Viewer extends View {
   }
 
   render() {
-    const t = theme(), text = this.kind !== "image", parts = (this.file ?? "").split("/").filter(Boolean), name = parts[parts.length - 1] ?? "";
+    const t = theme(), text = this.kind !== "image" && this.kind !== "video", parts = (this.file ?? "").split("/").filter(Boolean), name = parts[parts.length - 1] ?? "";
     // Ghost buttons like VS Code's editor actions: no fill until hovered or active.
     const button = (id, label, onClick, on = false) => div().id(id).px(7).h(22).flex().items_center().rounded(4).cursor_pointer().text_size(11.5)
       .text_color(on ? t.foreground : t.muted).when(on, el => el.bg(t.selected)).hover(s => s.bg(t.hover)).on_click((_e, cx) => onClick(cx)).child(label);
@@ -285,6 +302,7 @@ export default class Viewer extends View {
         .when(this.kind === "markdown", el => el.child(button("preview", this.preview ? "Edit" : "Preview", cx => { this.preview = !this.preview; cx.notify(); })))
         .when(text && !this.preview, el => el.child(button("wrap", "Wrap", cx => this.toggleWrap(cx), this.wrap)))
         .when(this.dirty, el => el.child(button("revert", "Revert", cx => this.revert(cx))))
+        .when(this.kind === "video" && Boolean(this.img), el => el.child(button("play", "Open in Player", () => exec("open", [this.img.local]).catch(() => {}))))
         .when(Boolean(this.install), el => el.child(button("install", this.install === "asked" ? "Installing…" : `Install Editor on ${this.on}`, cx => this.install === "offer" && this.installEditor(cx))))
         .when(!this.on, el => el.child(button("vscode", "Open in VS Code", () => userExec("code", [this.file]).catch(() => {}))))
         .when(text && !this.on, el => el.child(button("save", this.dirty ? "Save ⌘S" : "Saved", cx => this.save(cx), this.dirty))))
@@ -298,7 +316,7 @@ export default class Viewer extends View {
         .child(button("discard", "Discard", cx => this.discardBackup(cx)))))
       .child(this.body(t))
       .child(h_flex().h(22).flex_none().px(12).gap(16).items_center().bg(t.chrome).border_t(1).border_color(t.border).text_size(11.5).text_color(t.muted)
-        .child(div().child(text ? this.language : IMAGES[extOf(this.file)]))
+        .child(div().child(text ? this.language : IMAGES[extOf(this.file)] ?? VIDEOS[extOf(this.file)]))
         .when(this.on, el => el.child(div().child("Read-only (remote)")))
         .when(text && !this.on && this.autoSave.mode !== "off", el => el.child(div().child(this.autoSave.mode === "afterDelay" ? `Auto Save: after ${this.autoSave.delay}s` : "Auto Save: on focus change")))
         .child(div().flex_1())
