@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { DEFAULTS, parse, normalize, coreEngine, editorEngine, withSetting, withDefaults, serialize, updateFile, stepDelay, coreStatus, coreCurrent,
-  editorStatus, editorCurrent, modelChoices, chosenModel, keyLine } from "../settings.js";
+  editorStatus, editorCurrent, modelChoices, chosenModel, keyLine, endpointProblem, withProvider, withOwn, ownValue, ownKey } from "../settings.js";
 
 // An in-memory file with writeTextFile's contract: writes only when `expected` still matches.
 function memoryFile(text, { raceOnce = null } = {}) {
@@ -167,4 +167,32 @@ test("explorer.autoReveal: on by default, a boolean the toggle writes, anything 
   assert.equal(normalize({ "explorer.autoReveal": "no" })["explorer.autoReveal"], true);
   assert.deepEqual(withSetting({ "my.key": 1 }, "explorer.autoReveal", false), { "my.key": 1, "explorer.autoReveal": false });
   assert.throws(() => withSetting({}, "explorer.autoReveal", "off"));
+});
+
+test("a server address is checked as typed: http(s), a host, a port in range; empty is the default", () => {
+  for (const ok of ["", "  ", "http://127.0.0.1:11434", "http://192.168.0.10:1234/v1", "https://gpu.lan", "http://[::1]:11434/", "HTTP://Box:8080"]) assert.equal(endpointProblem(ok), null, ok);
+  assert.match(endpointProblem("localhost:11434"), /^Start the address with http:\/\//);
+  assert.match(endpointProblem("http://"), /^Not a server address/);
+  assert.match(endpointProblem("http://a b:1"), /^Not a server address/);
+  assert.match(endpointProblem("http://host:70000"), /^The port is 1–65535/);
+  assert.throws(() => withOwn({}, "ollama", "endpoint", "ollama.lan:11434"), /Invalid value/);
+});
+
+test("each provider keeps its own model and address; switching moves the shared ones to the provider left", () => {
+  let raw = withOwn({}, "ollama", "endpoint", "http://192.168.0.10:11434/");
+  raw = withOwn(raw, "ollama", "model", "qwen2.5-coder:7b-base");
+  raw = withProvider(raw, "lmstudio");
+  raw = withOwn(raw, "lmstudio", "model", "qwen2.5-coder-7b");
+  const v = normalize(raw);
+  assert.deepEqual([ownValue(v, "ollama", "endpoint"), ownValue(v, "ollama", "model")], ["http://192.168.0.10:11434", "qwen2.5-coder:7b-base"]);
+  assert.deepEqual([ownValue(v, "lmstudio", "endpoint"), ownValue(v, "lmstudio", "model")], ["", "qwen2.5-coder-7b"], "nothing from Ollama");
+  assert.equal(ownValue(normalize(withProvider(raw, "codestral")), "codestral", "model"), "");
+  // a file from before: the shared model and address belonged to the provider then chosen
+  const moved = withProvider({ "editor.inlineSuggest.provider": "ollama", "editor.inlineSuggest.model": "starcoder2:3b", "editor.inlineSuggest.endpoint": "http://box:11434" }, "lmstudio");
+  assert.deepEqual(moved, { "editor.inlineSuggest.provider": "lmstudio", "editor.inlineSuggest.model": "",
+    [ownKey("ollama", "model")]: "starcoder2:3b", [ownKey("ollama", "endpoint")]: "http://box:11434" });
+  assert.equal("editor.inlineSuggest.endpoint" in withOwn({ "editor.inlineSuggest.endpoint": "http://a:1" }, "ollama", "endpoint", ""), false);
+  // invalid ones read as absent; Reset to defaults removes them all
+  assert.equal(ownKey("lmstudio", "endpoint") in normalize({ [ownKey("lmstudio", "endpoint")]: "nope" }), false);
+  assert.deepEqual(withDefaults(raw), { ...DEFAULTS });
 });

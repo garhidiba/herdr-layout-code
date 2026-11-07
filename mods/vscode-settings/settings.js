@@ -22,13 +22,21 @@ export const DEFAULTS = {
   "explorer.autoReveal": true,        // the Explorer reveals and highlights the active editor's file (vscode-explorer)
 };
 export const CHOICES = { "core.engine": ["js", "rust"], "editor.engine": ["js", "rust"], "files.autoSave": ["off", "afterDelay", "onFocusChange"],
-  "editor.inlineSuggest.provider": ["ollama", "codestral", "deepseek", "mercury", "off"],
+  "editor.inlineSuggest.provider": ["ollama", "lmstudio", "codestral", "deepseek", "mercury", "off"],
   "editor.cursorStyle": ["line", "block", "underline", "line-thin", "underline-thin", "block-outline"],
   "editor.cursorBlinking": ["blink", "smooth", "phase", "expand", "solid"],
   "editor.wordWrap": ["off", "on", "wordWrapColumn", "bounded"], "editor.wrappingIndent": ["none", "same", "indent", "deepIndent"] };
 // editor.inlineSuggest.enabled: absent, the editor turns suggestions on when the provider can run there (Ollama
 // installed); the dialog shows that as on, and Reset to defaults removes the key again.
 const INLINE_ENABLED = "editor.inlineSuggest.enabled";
+// Inline keys present only when set (absent: the provider's default; Reset to defaults removes them): the shared server
+// address and each provider's own model and address, which win over the shared ones (inline.cjs).
+const PROVIDER = "editor.inlineSuggest.provider";
+export const ownKey = (provider, k) => `editor.inlineSuggest.${provider}.${k}`;
+function optional(key) {
+  const m = /^editor\.inlineSuggest\.(?:(\w+)\.)?(model|endpoint)$/.exec(key);
+  return m && (!m[1] || (m[1] !== "off" && CHOICES[PROVIDER].includes(m[1]))) && !(key in DEFAULTS) ? m[2] : null;
+}
 const NUMBERS = { "files.autoSaveDelay": [0.1, 3600, false], "editor.tabSize": [1, 16, true], "editor.wordWrapColumn": [1, 500, true] }; // [min, max, integer]
 
 // VS Code settings files allow comments and trailing commas (same rule as the editor's highlight.cjs `loose`).
@@ -44,6 +52,8 @@ export function parse(text) {
 
 // A known setting's value made valid, or undefined when it can't be (wrong type, not a number, unknown choice).
 export function coerce(key, value) {
+  const opt = optional(key);
+  if (opt) return typeof value === "string" && (opt !== "endpoint" || !endpointProblem(value)) ? value.trim().replace(/\/+$/, "") : undefined;
   if (key === INLINE_ENABLED) return typeof value === "boolean" ? value : undefined;
   if (CHOICES[key]) return CHOICES[key].includes(value) ? value : undefined;
   if (NUMBERS[key]) {
@@ -56,8 +66,42 @@ export function coerce(key, value) {
   return value;
 }
 
+// A server address the editor can ask: "" (the provider's default) or http(s)://host[:port][/path], on this machine or
+// another one. -> what is wrong with it, or null.
+export function endpointProblem(text) {
+  const s = String(text ?? "").trim();
+  if (!s) return null;
+  if (!/^https?:\/\//i.test(s)) return "Start the address with http:// or https://, e.g. http://192.168.0.10:11434";
+  const m = /^https?:\/\/(\[[0-9a-f:.]+\]|[a-z0-9]([a-z0-9.-]*[a-z0-9])?)(?::(\d{1,5}))?(\/[^\s?#]*)?$/i.exec(s);
+  if (!m) return "Not a server address: http://host:port";
+  if (m[3] && (Number(m[3]) < 1 || Number(m[3]) > 65535)) return "The port is 1–65535";
+  return null;
+}
+// raw switched to another provider: the shared model and address (which the previous provider used) move to its own
+// keys, so they don't follow the switch.
+export function withProvider(raw, provider) {
+  const old = raw[PROVIDER] ?? DEFAULTS[PROVIDER];
+  if (old === provider) return withSetting(raw, PROVIDER, provider);
+  const next = { ...raw };
+  for (const k of ["model", "endpoint"]) {
+    const shared = `editor.inlineSuggest.${k}`, value = coerce(shared, raw[shared]);
+    if (value && old !== "off" && !coerce(ownKey(old, k), raw[ownKey(old, k)])) next[ownKey(old, k)] = value;
+    delete next[shared];
+  }
+  return withSetting({ ...next, "editor.inlineSuggest.model": "" }, PROVIDER, provider);
+}
+// raw with the provider's own model / address set ("": its default); the shared one goes, as it no longer applies.
+export const withOwn = (raw, provider, k, value) => {
+  const { [`editor.inlineSuggest.${k}`]: _, ...rest } = withSetting(raw, ownKey(provider, k), value);
+  return k === "model" ? { ...rest, "editor.inlineSuggest.model": "" } : rest;
+};
+// The model / address in effect for a provider in normalized values: its own, else the shared one ("": the default).
+export const ownValue = (v, provider, k) => v[ownKey(provider, k)] || v[`editor.inlineSuggest.${k}`] || "";
+
 // ----- the Inline Suggestions rows (their data: `node mods/vscode-viewer/editor/inline.cjs --models / --key`) -----
 export const HOSTED_PROVIDERS = ["codestral", "deepseek", "mercury"];
+// Local servers: their default address (the Server row's placeholder).
+export const LOCAL_PROVIDERS = { ollama: "http://127.0.0.1:11434", lmstudio: "http://127.0.0.1:1234" };
 // The Model row's choices [value, label]: the provider's default first (value "": none in the file), the models it
 // lists (Ollama: the pulled ones, base models recommended), and the file's model when it is none of them.
 export function modelChoices(current, listed) {
@@ -92,6 +136,7 @@ export function normalize(raw = {}) {
   for (const k of Object.keys(DEFAULTS)) v[k] = coerce(k, raw[k]) ?? DEFAULTS[k];
   v["editor.engine"] = coerce("editor.engine", raw["editor.engine"]) ?? (RUST_EDITOR_READY ? v["core.engine"] : "js");
   v[INLINE_ENABLED] = coerce(INLINE_ENABLED, raw[INLINE_ENABLED]) ?? true;
+  for (const k of Object.keys(raw)) if (optional(k) && coerce(k, raw[k]) !== undefined) v[k] = coerce(k, raw[k]);
   return v;
 }
 
@@ -108,7 +153,8 @@ export function withSetting(raw, key, value) {
 }
 
 // raw with every known setting back to its default (the editor's engine follows the core's again); unknown keys are kept.
-export const withDefaults = ({ "editor.engine": _, [INLINE_ENABLED]: __, ...raw }) => ({ ...raw, ...DEFAULTS });
+export const withDefaults = ({ "editor.engine": _, [INLINE_ENABLED]: __, ...raw }) =>
+  ({ ...Object.fromEntries(Object.entries(raw).filter(([k]) => !optional(k))), ...DEFAULTS });
 
 export const serialize = (raw) => JSON.stringify(raw, null, 2) + "\n";
 
