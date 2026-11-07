@@ -12,6 +12,7 @@ A VS Code–style layout for [Herdr](https://herdr.dev):
 - **Pane menu:** Open in VS Code / Finder.
 - **Status bar:** Claude and Codex usage meters; Codex limit resets can be redeemed from the card; a gear for Settings.
 - **Settings:** a VS Code-style dialog (gear, `cmd-,`, or the editor's Preferences: Open Settings) for auto save, trim/final newline, format on save, tab size, inline suggestions, word wrap and the core and editor engines (JavaScript, or the optional Rust builds), with a **Keyboard Shortcuts** page (or the editor's Preferences: Open Keyboard Shortcuts) to change, remove and reset the editor's keys.
+- **Quick memo:** a round button floating over the window (drag it anywhere) opens a resizable panel with the space's `.herdr/memo.md` in the editor, cut down to a document editor (word wrap on, saved 0.5 s after each edit); a folder's `.gitignore` gets the memo added. Local spaces only for now.
 
 See [RECIPE.md](RECIPE.md) for exactly what it does and how it is built.
 
@@ -57,6 +58,7 @@ Optional Claude meter: set Claude Code's `statusLine.command` to `sh ~/.config/h
 - `<herdr home>/vscode-core/vscode-core --version` (Settings: Rust core status), `sh` + `mods/vscode-settings/native/install.sh` → `cargo` (Build Rust core, only when you click it)
 - On a remote space's machine: `uname`, `test` (is the editor installed), the bundle's `vsedit.sh` and `vsedit` (the editor), and, after you confirm, `hc exec -i --on <machine>` from here running `mkdir`, `mktemp`, `cat`, `sha256sum`, `tar`, `chmod`, `mv`, `rm` inside `~/.local/share/herdr-vscode/` there (Windows: `powershell` with `Get-FileHash`, `tar.exe`, `Move-Item` inside `%LOCALAPPDATA%\herdr-vscode`)
 - Inline suggestions: HTTP to the provider (Ollama at `http://127.0.0.1:11434` or LM Studio at `http://127.0.0.1:1234` by default, either at an address you set, or the paid Codestral or Mercury FIM APIs with your key from the macOS keychain; `node`'s `fetch`, or `curl` from the Rust editor), only after typing pauses and never for files like `.env` or keys; `editor.inlineSuggest.provider: "off"` turns it off
+- Memo: `hc run --bg` with `env VSEDIT_SETTINGS=… sh mods/vscode-viewer/editor/vsedit.sh <folder>/.herdr/memo.md` (the editor, off screen), `sh -c mkdir -p … && touch …`, `git check-ignore -q .herdr/memo.md` and `sh -c printf … >> .gitignore` (only when the folder has a `.gitignore` that doesn't ignore the memo), `hc kill` (memo editors of folders no space has)
 - `code` (Open in VS Code), `open` (Finder, Reveal in Finder, System Default)
 - `stat`, `cp`, `sips`, `qlmanage` (image and video preview: copies the image, or a Quick Look still of the video, into `mods/vscode-viewer/.cache/`, kept under 1 GB); from a remote space, `hc exec --on <machine>` running `stat` and `dd` there to fetch the image or video (up to 200 MB) into that cache first; `open` (a video's Open in Player)
 - `node` + `codex app-server` (Codex usage and limit resets, with your Codex login: it reads every 5 min and redeems a reset only when you click Use a reset and confirm)
