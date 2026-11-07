@@ -103,6 +103,39 @@ test("dropped files and folders are copied in under free names, never moved or o
   rmSync(d, { recursive: true });
 });
 
+test("a paste and a drop answer where each copy went, so the tree can show it", async () => {
+  const d = tmp(), { ops } = machine(null), to = join(d, "to");
+  mkdirSync(to);
+  writeFileSync(join(d, "a.txt"), "a");
+  assert.deepEqual(await ops.drop([join(d, "a.txt"), join(d, "a.txt")], to), [join(to, "a.txt"), join(to, "a copy.txt")]);
+  assert.equal(await ops.paste({ path: join(to, "a.txt"), dir: false, cut: true, on: null }, to), null, "cut into its own folder");
+  rmSync(d, { recursive: true });
+});
+
+test("a dragged item moves into a folder under its own name, never over another, never into itself", async () => {
+  const d = tmp(), { ops } = machine("box"), to = join(d, "to");
+  mkdirSync(join(to, "sub"), { recursive: true });
+  writeFileSync(join(d, "a b.txt"), "new");
+  assert.equal(await ops.moveInto(join(d, "a b.txt"), to), join(to, "a b.txt"));
+  assert.ok(!existsSync(join(d, "a b.txt")));
+  writeFileSync(join(d, "a b.txt"), "other");
+  await assert.rejects(ops.moveInto(join(d, "a b.txt"), to), /already exists in to/);
+  assert.equal(readFileSync(join(to, "a b.txt"), "utf8"), "new");
+  assert.equal(readFileSync(join(d, "a b.txt"), "utf8"), "other");
+  assert.equal(await ops.moveInto(join(to, "a b.txt"), to), null, "already there: nothing happens");
+  await assert.rejects(ops.moveInto(to, join(to, "sub")), /into itself/);
+  await assert.rejects(ops.moveInto(to, to), /into itself/);
+  rmSync(d, { recursive: true });
+});
+
+test("a dangling link counts as there: its name is taken", async () => {
+  const d = tmp(), { ops } = machine(null);
+  spawnSync("ln", ["-s", join(d, "gone"), join(d, "link")]);
+  assert.equal(await ops.exists(join(d, "link")), true);
+  assert.equal(await ops.exists(join(d, "gone")), false);
+  rmSync(d, { recursive: true });
+});
+
 test("a drop onto another machine's tree is refused before anything is copied", async () => {
   const { ops, calls } = machine("box");
   await assert.rejects(ops.drop(["/local/a.txt"], "/remote/to"), /not supported yet/);
