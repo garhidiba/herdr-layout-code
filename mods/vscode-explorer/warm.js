@@ -19,6 +19,15 @@ export const TIMING = "vscode-explorer.openTiming";
 export const PRELOAD_KEY = "workbench.editor.preloadEditor", TIMING_KEY = "workbench.editor.openTimingLog";
 // After a warm editor fails to start or ends by itself, the next try waits this long.
 export const RETRY_MS = 30000;
+// How often a pass compares the editor build with the one the warm editors started from.
+export const STAMP_MS = 10000;
+
+// The editor build: mtime and size of the Rust binary ($1) and of every file under the JS editor folder ($2), whichever
+// engine runs. Empty when stat fails (an unknown build: nothing is recycled).
+export const STAMP ='S() { stat -c "%Y %s" "$@" 2>/dev/null || stat -f "%m %z" "$@" 2>/dev/null; }; S "$1"; find "$2" -type f | while IFS= read -r f; do S "$f"; done';
+
+// The ids of warm editors started from another build than `stamp` (an entry or stamp without one is left alone).
+export const staleIds = (all, stamp) => !stamp ? [] : Object.keys(all).filter(id => all[id].stamp && all[id].stamp !== stamp);
 
 // Hands file and folder to the warm editor of <key> ($1): written to <key>, then SIGUSR2 to the pid in <key>.pid,
 // which the editor writes once it can take one. Fails (nonzero) when it isn't ready or is gone.
@@ -39,9 +48,13 @@ export function createWarmPool({ hc, run, exec, spaces, panes, terminals, machin
     exec("rm", ["-f", key, `${key}.pid`]).catch(() => {});
   };
   const live = (address) => terminals().some(t => t.address === address);
+  const readStamp = async () => {
+    const r = await exec("sh", ["-c", STAMP, "stamp", `${appHome()}/vscode-core/vsedit`, `${appHome()}/mods/vscode-viewer/editor`]).catch(() => null);
+    return r?.code === 0 && r.stdout.trim() ? r.stdout.trim() : null;
+  };
   const paneOf = (address) => panes().find(p => p.terminal === address);
   // enabled: as the last pass read it. broken: a warm editor showed up on screen: none start until a reload.
-  let filling = false, retryAt = 0, swept = false, enabled = true, broken = false;
+  let filling = false, retryAt = 0, checkAt = 0, swept = false, enabled = true, broken = false;
 
   // The id of the tab now showing `space`'s warm editor, handed tab.new `args` (the Explorer's local editor: paths.js
   // openArgs); null when there is none ready or args are another program's (the open goes on as before). One that
@@ -65,7 +78,8 @@ export function createWarmPool({ hc, run, exec, spaces, panes, terminals, machin
   function due() {
     if (filling) return null;
     const all = entries(), ids = new Set(spaces().map(s => s.id));
-    let later = !swept || (enabled && !broken && now() >= retryAt && spaces().some(s => !s.machine && !all[s.id]));
+    let later = !swept || (enabled && now() >= checkAt && Object.keys(all).length > 0) ||
+       (enabled && !broken && now() >= retryAt && spaces().some(s => !s.machine && !all[s.id]));
     for (const [id, w] of Object.entries(all)) {
       if (w.address && paneOf(w.address)) return 0;
       if (!ids.has(id) || (w.address && !live(w.address))) later = true;
@@ -73,7 +87,8 @@ export function createWarmPool({ hc, run, exec, spaces, panes, terminals, machin
     return later ? 500 : null;
   }
 
-  // One pass: reads the settings, ends warm editors that are off, on screen, gone or of a closed space (and, once this
+  // One pass: reads the settings, ends warm editors that are off, on screen, gone, of a closed space or started from an
+  // older editor build (a reinstall; handed-over editors are no longer in the pool, so they stay), (and, once this
   // computer's layout is read, ones left from before: after a restart), then starts one for each local space without.
   async function fill(cx) {
     if (filling) return;
@@ -81,6 +96,8 @@ export function createWarmPool({ hc, run, exec, spaces, panes, terminals, machin
     try {
       const settings = settingsOf(await readTextFile(`${appHome()}/vscode-settings.json`).catch(() => null));
       enabled = settings[PRELOAD_KEY] !== false;
+      const stamp = enabled ? await readStamp() : null;
+      checkAt = now() + STAMP_MS;
       if (shared(TIMING) !== (settings[TIMING_KEY] === true)) setShared(TIMING, settings[TIMING_KEY] === true);
       if (!swept && machines().find(m => m.name === null)?.layout === "ready") {
         swept = true;
@@ -95,27 +112,27 @@ export function createWarmPool({ hc, run, exec, spaces, panes, terminals, machin
           end({ address, key: key ?? `${dir()}/none` });
         }
       }
-      const ids = new Set(spaces().map(s => s.id));
+      const ids = new Set(spaces().map(s => s.id)), stale = new Set(staleIds(entries(), stamp));
       for (const [id, w] of Object.entries(entries())) {
         if (w.address && paneOf(w.address)) broken = true; // Herdr showed it: never again this session
-        else if (enabled && !broken && ids.has(id) && w.address && live(w.address)) continue;
+        else if (enabled && !broken && ids.has(id) && w.address && live(w.address) && !stale.has(id)) continue;
         end(w);
         put(id, null);
-        if (enabled && ids.has(id) && w.address && !live(w.address)) retryAt = now() + RETRY_MS; // it ended by itself
+        if (enabled && ids.has(id) && w.address && !stale.has(id) && !live(w.address)) retryAt = now() + RETRY_MS; // it ended by itself
       }
       if (!enabled || broken || now() < retryAt) return;
       for (const s of spaces()) {
         if (s.machine || entries()[s.id]) continue;
-        if (!(await start(s, cx))) { retryAt = now() + RETRY_MS; return; }
+        if (!(await start(s, cx, stamp))) { retryAt = now() + RETRY_MS; return; }
       }
     } finally { filling = false; }
   }
 
   // Starts `space`'s warm editor off screen (no herdr.space/herdr.tab labels), listed at once and claimable once Herdr
   // knows the terminal (terminal.keep fails before). False when it doesn't start or isn't known in time.
-  async function start(space, cx) {
+  async function start(space, cx, stamp) {
     const key = `${dir()}/${newId()}`;
-    put(space.id, { key, address: null });
+    put(space.id, { key, address: null, ...(stamp && { stamp }) });
     const argv = ["sh", launcher(), "--warm", key, "--close-on-exit"];
     const r = await hc(directRun({ folder: space.folder || home(), argv }, null, [`${WARM_LABEL}=1`, `vscode.key=${key}`])).catch(() => null);
     let address = null;
@@ -123,7 +140,7 @@ export function createWarmPool({ hc, run, exec, spaces, panes, terminals, machin
     if (!address) { put(space.id, null); return false; }
     for (let waited = 0; !live(address) && waited < wait; waited += step) await cx.sleep(step);
     if (!live(address) || paneOf(address)) { end({ address, key }); put(space.id, null); if (paneOf(address)) broken = true; return false; }
-    put(space.id, { key, address });
+    put(space.id, { key, address, ...(stamp && { stamp }) });
     return true;
   }
 

@@ -2,10 +2,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createWarmPool, WARM, WARM_LABEL, TIMING, RETRY_MS } from "../warm.js";
+import { createWarmPool, staleIds, STAMP, WARM, WARM_LABEL, TIMING, RETRY_MS } from "../warm.js";
 import { createOpenTab } from "../launch.js";
 import { openArgs, FILE_LABEL } from "../paths.js";
 
@@ -15,8 +15,8 @@ const editor = (file = "/p/a.ts") => openArgs(file, { appHome: APP, folder: "/p"
 // A fake Herdr: spaces with tabs, a shared store, hc that starts a core terminal Herdr knows (terminals()) after
 // `knownAfter` polls, terminal.keep that gives it a tab and pane after `keptAfter` polls (Infinity: never), and exec
 // for the handoff (`handoff`: its exit code) and rm. `real: true` runs exec for real.
-function world({ spaces = [{ id: "sp1", tabs: ["tbShell"] }], settings = "{}", knownAfter = 1, keptAfter = 1, hcCode = 0, handoff = 0, real = false, appHome = APP } = {}) {
-  const store = {}, calls = [], hcCalls = [], execCalls = [], file = { settings };
+function world({ spaces = [{ id: "sp1", tabs: ["tbShell"] }], settings = "{}", knownAfter = 1, keptAfter = 1, hcCode = 0, handoff = 0, real = false, appHome = APP, build = null } = {}) {
+  const store = {}, calls = [], hcCalls = [], execCalls = [], file = { settings }, stamp = { build }; // build: the editor build stat prints
   const live = spaces.map(s => ({ id: s.id, machine: s.machine ?? null, folder: s.folder ?? "/p", tabs: s.tabs.map((id, i) => ({ id, active: i === 0 })) }));
   const terms = [], panes = [], later = [];
   let ids = 0, polls = 0, now = 1000;
@@ -47,6 +47,7 @@ function world({ spaces = [{ id: "sp1", tabs: ["tbShell"] }], settings = "{}", k
     },
     exec: async (cmd, args) => {
       execCalls.push([cmd, args]);
+      if (args[2] === "stamp") return stamp.build ? { code: 0, stdout: `${stamp.build}\n`, stderr: "" } : { code: 1, stdout: "", stderr: "" };
       if (real) return new Promise(resolve => execFile(cmd, args, (e, stdout, stderr) => resolve({ code: e ? e.code ?? 1 : 0, stdout, stderr })));
       return { code: cmd === "sh" ? handoff : 0, stdout: "", stderr: "" };
     },
@@ -59,7 +60,7 @@ function world({ spaces = [{ id: "sp1", tabs: ["tbShell"] }], settings = "{}", k
     polls++;
     for (const l of later.filter(l => l.at <= polls)) { later.splice(later.indexOf(l), 1); l.run(); }
   } };
-  return { pool, cx, store, calls, hcCalls, execCalls, terms, live, file, panes, show, spaces: spacesFn, advance: (ms) => { now += ms; },
+  return { pool, cx, stamp, store, calls, hcCalls, execCalls, terms, live, file, panes, show, spaces: spacesFn, advance: (ms) => { now += ms; },
     // a warm terminal from before a restart
     orphan: () => { terms.push({ address: `t${++ids}`, argv: [], labels: { [WARM_LABEL]: "1", "vscode.key": `/h/.vscode-warm/old${ids}` }, known: true }); } };
 }
@@ -103,7 +104,7 @@ test("opening a file hands it over and gives the terminal a tab with terminal.ke
   const openTab = createOpenTab({ hc: async () => assert.fail("no hc run on a warm open"), run: (n, a) => w.calls.push([n, a]), spaces: w.spaces,
     panes: () => [], warm: w.pool.claim, log: (f) => logs.push(f) });
   await openTab(editor(), w.cx);
-  const [, args] = w.execCalls.find(c => c[0] === "sh");
+  const [, args] = w.execCalls.find(c => c[0] === "sh" && c[1][2] !== "stamp");
   assert.deepEqual(args.slice(2), ["warm", "/h/.vscode-warm/id1", "/p/a.ts", "/p"]);
   assert.deepEqual(w.calls, [["terminal.keep", { terminal: "t1", place: "tab" }],
     ["tab.rename", { id: "tbKt1", name: "a.ts" }], ["tab.select", { id: "tbKt1" }]]);
@@ -245,4 +246,48 @@ test("the handoff reaches a real warm editor (vsedit.cjs --warm), which then ope
   assert.equal(await exited, 1); // the editor without a terminal stops at its first check, past the wait
   assert.match(err, /needs a terminal/);
   assert.equal(existsSync(key) || existsSync(`${key}.pid`), false);
+});
+
+test("a new editor build ends the warm editors started from the old one, and the fill starts fresh ones; handed-over ones stay", async () => {
+  const w = world({ build: "100 5" });
+  await w.pool.fill(w.cx);
+  assert.deepEqual(w.store[WARM].sp1, { key: "/h/.vscode-warm/id1", address: "t1", stamp: "100 5" });
+  w.advance(10000);
+  assert.equal(w.pool.due(), 500, "the pass is due to compare");
+  await w.pool.fill(w.cx);
+  assert.ok(!w.hcCalls.some(a => a[0] === "kill"), "same build: kept");
+  assert.equal(await w.pool.claim(w.spaces()[0], editor(), w.cx), "tbKt1"); // t1 is the user's tab now
+  await w.pool.fill(w.cx);
+  assert.equal(w.store[WARM].sp1.address, "t2");
+  w.stamp.build = "200 5"; // reinstalled
+  w.advance(10000);
+  await w.pool.fill(w.cx);
+  assert.deepEqual(w.hcCalls.filter(a => a[0] === "kill").map(a => a[1]), ["t2"], "only the pool's warm editor, never t1");
+  assert.deepEqual(w.store[WARM].sp1, { key: "/h/.vscode-warm/id3", address: "t3", stamp: "200 5" });
+});
+
+test("an unreadable build stamp recycles nothing, and an entry without a stamp is left alone", async () => {
+  const w = world();
+  await w.pool.fill(w.cx);
+  w.stamp.build = "1 1";
+  w.advance(10000);
+  await w.pool.fill(w.cx);
+  assert.ok(!w.hcCalls.some(a => a[0] === "kill"), "started without a stamp: unknown build");
+  assert.deepEqual(staleIds({ a: { stamp: "1" }, b: { stamp: "2" }, c: {} }, "2"), ["a"]);
+  assert.deepEqual(staleIds({ a: { stamp: "1" } }, null), []);
+});
+
+test("the stamp command prints the same text until the editor files change", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "stamp-")), bin = join(dir, "vsedit"), ed = join(dir, "editor");
+  mkdirSync(ed);
+  writeFileSync(bin, "x");
+  writeFileSync(join(ed, "a.cjs"), "1");
+  const out = () => new Promise(res => execFile("sh", ["-c", STAMP, "stamp", bin, ed], (e, so) => res(so)));
+  const a = await out();
+  assert.match(a, /^\d+ 1\n\d+ 1\n$/);
+  assert.equal(await out(), a);
+  writeFileSync(join(ed, "a.cjs"), "22");
+  assert.notEqual(await out(), a, "an edited editor file changes it");
+  writeFileSync(bin, "xyz");
+  assert.notEqual(await out(), a, "so does a replaced binary");
 });
