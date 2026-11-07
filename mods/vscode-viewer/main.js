@@ -1,5 +1,6 @@
 // A file editor for a tab: props { file: absolute path, on?: machine, install?: true (the terminal editor isn't on that
-// machine yet: an Install Editor button asks the Explorer to install it, as its confirm dialog's yes does) }.
+// machine yet: an Install Editor button asks the Explorer to install it, as its confirm dialog's yes does), preview?: true
+// (shown as rendered markdown whatever its extension: the terminal editor's Markdown preview, editor/mdpreview.cjs) }.
 // Opens straight into Herdr's built-in editor (Atom One Dark colors, VS Code's file-type recognition from langs.json),
 // saves with Cmd+S ("vscode-viewer.save" in keys.json), flags changes on disk, and shows a VS Code-style status bar.
 // Images open as a preview, videos as a still with Open in Player (from another machine both are fetched first:
@@ -123,10 +124,12 @@ export default class Viewer extends View {
     this.text = null;          // what is on disk, as last read or written
     this.code = null; this.dirty = false; this.conflict = false; this.wrap = false;
     this.error = null; this.table = null; this.language = "Plain Text"; this.facts = null;
-    this.kind = kindOf(this.file ?? ""); this.preview = this.kind === "markdown"; this.img = null;
+    this.kind = p.preview ? "markdown" : kindOf(this.file ?? ""); this.preview = this.kind === "markdown"; this.img = null;
     this.autoSave = { mode: "off", delay: 1 }; this.autoToken = 0; this.hadFocus = false; this.restore = null; this.pane = null;
     this.load(cx);
-    cx.timer.every(3000, cx => this.load(cx));
+    // Every 3 s; a local markdown preview every second, so it follows the terminal editor's saves.
+    let tick = 0;
+    cx.timer.every(1000, cx => { if (++tick % 3 === 0 || (this.preview && !this.on)) this.load(cx); });
     cx.spawn(async cx => { for (;;) { const c = await nextCommand(); if (c === "save") await this.save(cx); } });
     // onFocusChange: save when this tab stops being the focused pane.
     cx.timer.every(500, cx => {
