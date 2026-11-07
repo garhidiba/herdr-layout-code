@@ -26,11 +26,16 @@ pub fn run(vscode: PathBuf) -> ! {
     println!("{}", json!({ "port": port }));
     let _ = std::io::stdout().flush();
     detach();
+    static CONNECTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     std::thread::spawn(|| {
         std::thread::sleep(Duration::from_secs(20));
-        std::process::exit(0); // nobody connected
+        if !CONNECTED.load(std::sync::atomic::Ordering::SeqCst) {
+            std::process::exit(0); // nobody connected
+        }
     });
-    match listener.accept() {
+    let accepted = listener.accept();
+    CONNECTED.store(true, std::sync::atomic::Ordering::SeqCst); // the 20 s watchdog is only for a client that never came
+    match accepted {
         Ok((stream, _)) => serve(stream, Server::new(vscode, index, theme)),
         Err(_) => std::process::exit(1),
     }
