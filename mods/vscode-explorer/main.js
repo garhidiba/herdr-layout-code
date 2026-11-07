@@ -493,13 +493,22 @@ export default class Files extends View {
     const context = this.context, dir = folder ? `${this.root}/${folder}` : this.root;
     cx.spawn(async cx => {
       try {
-        const to = [].concat(await job(createOps(exec, this.on), dir)).find(Boolean);
+        const to = [].concat(await job(createOps(exec, this.on, hc), dir)).find(Boolean);
         if (this.context !== context) return;
         if (to) this.reveal(to, cx);
         this.refresh(cx);
       } catch (err) { notify({ title: "Explorer", body: String(err?.message ?? err), level: "error" }); }
       cx.notify();
     });
+  }
+
+  // A drop onto a remote tree uploads (ops.js drop), which can take a while: said when it starts and when it is done.
+  async upload(ops, paths, dir) {
+    const n = paths.length === 1 ? paths[0].split("/").pop() : `${paths.length} items`, on = this.on;
+    notify({ title: "Explorer", body: `Uploading ${n} to ${on}…`, level: "info" });
+    const copies = await ops.drop(paths, dir);
+    notify({ title: "Explorer", body: `Uploaded ${n} to ${on}.`, level: "success" });
+    return copies;
   }
 
   // A key while the tree holds the keyboard (keys.js): arrows move the selection, the rest are the right-click menu's
@@ -560,8 +569,8 @@ export default class Files extends View {
     // Only the rows on screen are drawn (a tall screenful until the viewport's size is known), each at its scrolled y.
     const [first, end] = shown(top, height || 1600, count);
     const drag = this.pressed?.dragging ? this.pressed : null, keyboard = this.handle.is_focused();
-    // A drag from Finder (dragFromOutside) is lit where on_drop would put it; a remote tree refuses drops, so not there.
-    const outside = this.outside && !this.on ? { folder: dropFolder(rows, rowAt(top, this.outside.y, count)), at: this.outside } : null;
+    // A drag from Finder (dragFromOutside) is lit where on_drop would put it.
+    const outside = this.outside ? { folder: dropFolder(rows, rowAt(top, this.outside.y, count)), at: this.outside } : null;
     const target = drag?.folder ?? outside?.folder ?? null;
     const [hiFrom, hiTo] = target ? targetRange(rows, target) : [0, 0];
     const thumb = Math.max(24, height * height / (count * ROW || 1));
@@ -582,7 +591,7 @@ export default class Files extends View {
         .on_drop((e, cx) => {
           const i = this.hoverY == null ? -1 : rowAt(this.top, this.hoverY, count);
           this.outside = null; this.dropped = true; // the pointer still over the inactive window is no drag
-          if (this.root && e.paths?.length) this.place(dropFolder(rows, i), (ops, dir) => ops.drop(e.paths, dir), cx);
+          if (this.root && e.paths?.length) this.place(dropFolder(rows, i), (ops, dir) => this.on ? this.upload(ops, e.paths, dir) : ops.drop(e.paths, dir), cx);
         })
         .when(count > 0, el => el.child(div().id("explorer-rows").flex_1().min_h(0).relative().overflow_hidden()
           .when(target === "", el => el.bg(t.hover))

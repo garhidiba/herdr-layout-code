@@ -136,10 +136,63 @@ test("a dangling link counts as there: its name is taken", async () => {
   rmSync(d, { recursive: true });
 });
 
-test("a drop onto another machine's tree is refused before anything is copied", async () => {
-  const { ops, calls } = machine("box");
-  await assert.rejects(ops.drop(["/local/a.txt"], "/remote/to"), /not supported yet/);
-  assert.equal(calls.length, 0);
+// Herdr's hc() for a drop onto "box": `hc run` runs the upload here at once with a stand-in `hc` (found through $HOME,
+// as the script's PATH puts it) that logs each --on and runs `hc exec`'s program here; `hc wait` says it ended on the
+// second ask, as a long upload would.
+function uploader(d, beforeRun = () => {}) {
+  const bin = join(d, "home", ".local", "bin"), log = join(d, "on.log"), seen = [];
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, "hc"), `#!/bin/sh
+[ "$1" = exec ] || exit 9; shift
+while :; do case $1 in --on) echo "$2" >> "${log}"; shift 2;; --timeout) shift 2;; -i) shift;; --) shift; break;; *) exit 9;; esac; done
+exec "$@"
+`);
+  chmodSync(join(bin, "hc"), 0o755);
+  let done, waits = 0;
+  const hc = async (args) => {
+    seen.push(args[0]);
+    if (args[0] === "run") {
+      beforeRun();
+      const argv = args.slice(args.indexOf("--") + 1);
+      done = spawnSync(argv[0], argv.slice(1), { encoding: "utf8", env: { ...process.env, HOME: join(d, "home"), PATH: "/usr/bin:/bin" } });
+      return { code: 0, stdout: "", stderr: "" };
+    }
+    if (args[0] === "wait") return { code: 0, stdout: JSON.stringify(++waits < 2 ? { ended: false } : { ended: true, exit_code: done.status }), stderr: "" };
+    if (args[0] === "read") return { code: 0, stdout: `${done.stdout}${done.stderr}\n\n`, stderr: "" };
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  return { ops: createOps(runHere(), "box", hc), log, seen };
+}
+
+test("files and folders dropped onto another machine's tree upload under free names, executable bits kept", async () => {
+  const d = tmp(), { ops, log, seen } = uploader(d), to = join(d, "to"), src = join(d, "src");
+  mkdirSync(to); mkdirSync(join(src, "-dir", "sub"), { recursive: true });
+  writeFileSync(join(src, `it's "한글" $x.txt`), "new");
+  writeFileSync(join(to, `it's "한글" $x.txt`), "old");
+  writeFileSync(join(src, "-dir", "sub", "run.sh"), "#!/bin/sh\n");
+  chmodSync(join(src, "-dir", "sub", "run.sh"), 0o755);
+  const copies = await ops.drop([join(src, `it's "한글" $x.txt`), join(src, "-dir"), join(src, "-dir")], to);
+  assert.deepEqual(copies, [join(to, `it's "한글" $x copy.txt`), join(to, "-dir"), join(to, "-dir copy")]);
+  assert.equal(readFileSync(join(to, `it's "한글" $x.txt`), "utf8"), "old");
+  assert.equal(readFileSync(join(to, `it's "한글" $x copy.txt`), "utf8"), "new");
+  assert.ok(spawnSync("test", ["-x", join(to, "-dir copy", "sub", "run.sh")]).status === 0);
+  assert.ok(readFileSync(log, "utf8").trim().split("\n").every(m => m === "box"));
+  assert.deepEqual(spawnSync("ls", ["-A", to], { encoding: "utf8" }).stdout.split("\n").filter(Boolean).sort(),
+    [`it's "한글" $x copy.txt`, `it's "한글" $x.txt`, "-dir", "-dir copy"].sort(), "no temp folder left behind");
+  assert.deepEqual(seen, ["run", "wait", "wait", "rm"]);
+  rmSync(d, { recursive: true });
+});
+
+test("an upload never replaces an entry that appeared meanwhile, and says why it failed", async () => {
+  const d = tmp(), to = join(d, "to");
+  // the free name is picked first; an entry of that name shows up before the upload lands
+  const { ops } = uploader(d, () => writeFileSync(join(to, "a.txt"), "old"));
+  mkdirSync(to);
+  writeFileSync(join(d, "a.txt"), "new");
+  await assert.rejects(ops.drop([join(d, "a.txt")], to), /Upload to box failed: a.txt already exists/);
+  assert.equal(readFileSync(join(to, "a.txt"), "utf8"), "old");
+  assert.deepEqual(spawnSync("ls", ["-A", to], { encoding: "utf8" }).stdout, "a.txt\n", "no temp folder left behind");
+  rmSync(d, { recursive: true });
 });
 
 test("a machine that can't be reached rejects as unreachable; locally the error passes through as is", async () => {
