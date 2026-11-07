@@ -8,7 +8,7 @@
 // its tab from closing, so unsaved text is kept as a hot-exit backup in close() and offered back on the next open.
 import { View, div, image, PathBuilder, Background } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState, TextView } from "gpui-base";
-import { props, readTextFile, writeTextFile, exec, theme, appHome, nextCommand, focused, panes, run, setShared } from "herdr";
+import { props, readTextFile, writeTextFile, exec, theme, appHome, nextCommand, focused, panes, run, shared, setShared } from "herdr";
 import { FETCHED, POSTER, fetchFile, prune } from "./preview.js";
 // Herdr starts with PATH=/usr/bin:/bin, so Homebrew/user tools (node, code, codex, trash) are looked up here too.
 const userExec = (cmd, args, opts) => exec("sh", ["-c", 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; exec "$0" "$@"', cmd, ...args], opts);
@@ -134,6 +134,12 @@ export default class Viewer extends View {
       if (this.hadFocus && !now && this.autoSave.mode === "onFocusChange") this.save(cx);
       // The Explorer reveals the focused tab's file (its autoReveal).
       if (now && !this.hadFocus) setShared("vscode-viewer.focused", { pane: mine, file: this.file, on: this.on });
+      // Every viewer pane's file, for moving it to another tab (vscode-tabs' move.js VIEWER_FILES); gone panes dropped.
+      const files = shared("vscode-viewer.files") ?? {};
+      if (mine && (files[mine]?.file !== this.file || files[mine]?.on !== this.on)) {
+        const live = new Set(panes().map(p => p.pane));
+        setShared("vscode-viewer.files", { ...Object.fromEntries(Object.entries(files).filter(([k]) => live.has(k))), [mine]: { file: this.file, on: this.on } });
+      }
       this.hadFocus = now;
     });
   }

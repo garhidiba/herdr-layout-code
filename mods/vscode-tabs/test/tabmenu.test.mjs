@@ -3,7 +3,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { tabFileOf, editorTitleState, dirtyTabs, TAB_MENU, withDetails, DETAILS } from "../tabfile.js";
-import { tabMenuItems, moveRows, intoOf, closeArgs, fileTabs, splitArgs, clipboardCommand, revealCommand, menuHeight, DETAILS as EXPLORER_DETAILS } from "../../vscode-explorer/paths.js";
+import { tabMenuItems, moveRows, outRows, moveOf, closeArgs, fileTabs, splitArgs, clipboardCommand, revealCommand, menuHeight, DETAILS as EXPLORER_DETAILS } from "../../vscode-explorer/paths.js";
 
 const launcher = "/Users/me/.config/herdr-app/mods/vscode-viewer/editor/vsedit.sh";
 const space = { id: "s1", machine: null, folder: "/p", tabs: [{ id: "a" }, { id: "b" }, { id: "c" }, { id: "d" }] };
@@ -61,7 +61,7 @@ test("a remote editor whose terminals() row has no argv is a file tab with the e
 
 test("the menu is VS Code's tab menu, the items Herdr can do, with the OS's keys", () => {
   assert.deepEqual(labels(tabMenuItems({ remote: false, os: "mac" })), ["Close", "Close Others", "Close to the Right", "Close Saved", "Close All", "Copy Path",
-    "Copy Relative Path", "Reopen Editor With…", "Reveal in Finder", "Reveal in Explorer View", "Split Right", "Move into Tab…", "Move to New Tab"]);
+    "Copy Relative Path", "Reopen Editor With…", "Reveal in Finder", "Reveal in Explorer View", "Split Right", "Move into Tab…", "Move to New Tab…"]);
   const hint = (os, action) => tabMenuItems({ remote: false, os }).find(r => r[1] === action)[2] ?? "";
   assert.deepEqual(["mac", "win", "linux"].map(os => hint(os, "close")), ["⌘W", "Ctrl+F4", "Ctrl+W"]);
   assert.deepEqual(["mac", "win", "linux"].map(os => hint(os, "closeOthers")), ["⌥⌘T", "", ""]);
@@ -79,7 +79,7 @@ test("a remote file's Reveal in Finder is disabled, every other item stays", () 
 });
 
 test("the tab bar opens the popup at the menu's own height on every OS", () => {
-  for (const os of ["mac", "win", "linux"]) for (const remote of [false, true]) for (const flag of [{}, { lone: true, alone: true }, { viewer: true }]) {
+  for (const os of ["mac", "win", "linux"]) for (const remote of [false, true]) for (const flag of [{}, { lone: true, alone: true }]) {
     assert.equal(menuHeight(tabMenuItems({ remote, os, ...flag })), TAB_MENU.height, `${os} remote=${remote} ${JSON.stringify(flag)}`);
   }
 });
@@ -89,16 +89,25 @@ test("Move into Tab… lists the other tabs in place, right of then below, and r
   const rows = moveRows(named, "b", [{ tab: "a", title: "✳ Claude Code" }]);
   assert.deepEqual(rows, [["Right of ✳ Claude Code", "into:right:a"], ["Right of x", "into:right:box/c"], "-",
     ["Below ✳ Claude Code", "into:down:a"], ["Below x", "into:down:box/c"]]);
-  assert.deepEqual(intoOf("into:down:box/c"), { place: "down", into: "box/c" });
-  for (const other of ["close", "into:left:a", "into:right:", null]) assert.equal(intoOf(other), null, String(other));
+  assert.deepEqual(moveOf("into:down:box/c", { terminal: "t2" }, []), { terminal: "t2", into: "box/c", place: "down" });
+  assert.deepEqual(moveOf("into:right:a", { pane: "p3" }, []), { pane: "p3", into: "a", place: "right" }, "a viewer");
+  for (const other of ["close", "into:left:a", "into:right:", "out:gone", null]) assert.equal(moveOf(other, { terminal: "t2" }, []), null, String(other));
 });
 
-test("the moves are disabled when there is nowhere to go, and for a viewer", () => {
+test("Move to New Tab… lists the tab's panes in place, by file, and moves the picked one out", () => {
+  const shared = [{ pane: "p1", tab: "a", terminal: "t1", title: "✳ Claude Code" }, { pane: "p5", tab: "a", terminal: "t5", title: "● b.go — vsedit" },
+    { pane: "p6", tab: "a", terminal: null, mod: "vscode-viewer", title: "vscode-viewer" }, { pane: "p2", tab: "b", terminal: "t2" }];
+  assert.deepEqual(outRows("a", shared, { p6: { file: "/p/icon.png" } }), [["Move ✳ Claude Code to New Tab", "out:p1"],
+    ["Move b.go to New Tab", "out:p5"], ["Move icon.png to New Tab", "out:p6"]]);
+  assert.deepEqual(moveOf("out:p5", { terminal: "t2" }, shared), { terminal: "t5", into: null, place: "tab" });
+  assert.deepEqual(moveOf("out:p6", { terminal: "t2" }, shared), { pane: "p6", into: null, place: "tab" });
+});
+
+test("the moves are disabled when there is nowhere to go", () => {
   const off = (flags) => tabMenuItems({ remote: false, os: "mac", ...flags }).filter(r => r !== "-" && r[3]).map(r => r[1]);
   assert.deepEqual(off({}), []);
   assert.deepEqual(off({ lone: true }), ["moveInto"]);
   assert.deepEqual(off({ alone: true }), ["moveOut"]);
-  assert.deepEqual(off({ viewer: true }), ["moveInto", "moveOut"]);
 });
 
 test("a tab holding several panes: its focused editor gets the menu, and it is a file tab only with no shell in it", () => {

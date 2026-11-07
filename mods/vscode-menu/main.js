@@ -23,7 +23,7 @@ async function checkout(folder, on) {
   return common.stdout.trim() === `${top.stdout.trim()}/.git` ? "main" : "linked";
 }
 
-// vscode-tabs' move.js MOVE_REQUEST: the tab bar moves a terminal between tabs ({ terminal, into, place, name?, at }).
+// vscode-tabs' move.js MOVE_REQUEST: the tab bar moves a pane between tabs ({ terminal | pane, into, place, name?, at }).
 const MOVE = "vscode-tabs.move";
 // "Move into tab…": the "move" rows below (Menu.list shows them in place), for terminal `terminal` now in tab `from`,
 // when its space has another tab.
@@ -31,6 +31,9 @@ function moveInto(terminal, from) {
   const space = spaces().find((s) => s.tabs.some((c) => c.id === from));
   return space && space.tabs.length > 1 ? [["Move into tab…", "move.list", { terminal, from, space: space.id }]] : [];
 }
+
+// A pane as a menu names it: an editor's file (its title "● a.ts — vsedit"), else its title or program.
+const paneTitle = (x) => /^(?:● )?(.+?) — vsedit/.exec(x.title ?? "")?.[1] ?? (x.title || x.program?.name || "pane");
 
 function items(p, git) {
   p = p ?? {};
@@ -60,19 +63,21 @@ function items(p, git) {
         // tab of its own again, named after an editor's file. Sub-agents go back under their parent instead.
         ...(term && !parent ? moveInto(term.address, pane?.tab) : []),
         ...(term && !parent && panes().filter((x) => x.tab === pane?.tab).length > 1
-          ? [["Move to new tab", MOVE, { terminal: term.address, into: null, place: "tab", name: /^(?:● )?(.+) — vsedit/.exec(pane.title ?? "")?.[1] ?? null }]]
+          ? [["Move to new tab", MOVE, { terminal: term.address, into: null, place: "tab" }]]
           : []),
         ...(cwd && !String(tg.pane).includes("/") ? [["Open in VS Code", "vscode.open", { folder: cwd }], ["Open in Finder", "finder.open", { folder: cwd }]] : []),
         ["Close pane", "pane.close", { pane: tg.pane }],
       ];
     }
     case "tab": {
-      // A tab of one terminal can join another tab as a pane (several panes would lose their layout).
+      // A tab of one terminal can join another tab as a pane (several panes would lose their layout); a tab of several
+      // (moved together) can give each its own tab again. vscode-tabs sizes the popup for these rows.
       const mine = panes().filter((x) => x.tab === tg.id);
       return [
         ["Rename", "tab.rename", { id: tg.id }],
         ["New tab", "tab.new", { space: tg.space }],
         ...(mine.length === 1 && mine[0].terminal ? moveInto(mine[0].terminal, tg.id) : []),
+        ...(mine.length > 1 ? mine.map((x) => [`Move ${paneTitle(x)} to new tab`, MOVE, { ...(x.terminal ? { terminal: x.terminal } : { pane: x.pane }), into: null, place: "tab" }]) : []),
         ["Close", "tab.close", { id: tg.id }],
       ];
     }

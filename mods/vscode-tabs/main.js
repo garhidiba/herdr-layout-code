@@ -3,17 +3,8 @@ import { h_flex } from "gpui-base";
 import { spaces, panes, terminals, run, openOverlay, closeOverlay, props, theme, window, shared, setShared, layout, settings, hc, exec } from "herdr";
 import { tabFileOf, dirtyTabs, TAB_MENU, withDetails, DETAILS } from "./tabfile.js";
 import { createTabCloser, signalCommand, CLOSE_REQUEST } from "./close.js";
-import { createMover, MOVE_REQUEST } from "./move.js";
-import { dragStarted, contentRect, dropZone, zoneRect, dragTerminal } from "./drag.js";
-
-function find(node, id) {
-  if (node?.id === id) return node;
-  for (const child of node?.children ?? []) {
-    const found = find(child, id);
-    if (found) return found;
-  }
-  return null;
-}
+import { createMover, MOVE_REQUEST, VIEWER_FILES } from "./move.js";
+import { find, dragStarted, panesRect, dropZone, zoneRect, dragSource } from "./drag.js";
 
 // Asks the editor in terminal `address` to close (close.js): its first process from hc, signalled on its machine.
 async function requestClose(address) {
@@ -27,11 +18,11 @@ async function requestClose(address) {
   }
 }
 const closeTabs = createTabCloser({ run, panes, requestClose });
-const moveTerminal = createMover({ run, panes, spaces });
+const movePane = createMover({ run, panes, spaces, viewers: () => shared(VIEWER_FILES) });
 
-// The drag of a tab once it left the bar (drag.js): a full-window, frameless overlay of this mod ({ drag: { terminal,
-// into, title, bar } }) that follows the pointer over the shown tab, shows where the tab will land and moves it there
-// on release. Escape, a release outside the content or any new press cancels.
+// The drag of a tab once it left the bar (drag.js): a full-window, frameless overlay of this mod ({ drag: { source,
+// into, title, bar } }) that follows the pointer over the shown tab's panes, shows where the tab will land and moves
+// it there on release. Escape, a release outside the panes or any new press cancels.
 class DragOverlay {
   constructor(cx) {
     this.drag = props().drag;
@@ -43,11 +34,13 @@ class DragOverlay {
 
   end() { closeOverlay(props().overlay); }
 
-  zone(pos) { return this.win ? dropZone(contentRect(this.drag.bar, this.win), pos) : null; }
+  rect() { return this.win ? panesRect(this.drag.bar, this.win, layout()) : null; }
+
+  zone(pos) { return dropZone(this.rect(), pos); }
 
   render() {
     const t = theme(), d = this.drag, zone = this.pos && this.zone(this.pos);
-    const area = zone && zoneRect(contentRect(d.bar, this.win), zone);
+    const area = zone && zoneRect(this.rect(), zone);
     const box = (r) => div().absolute().left(r.x).top(r.y).w(r.width).h(r.height);
     return div().id("tab-drag").size_full().relative().track_focus(this.handle)
       .on_size_change((size) => { this.win = size; })
@@ -55,7 +48,7 @@ class DragOverlay {
       .on_mouse_move((e, cx) => { this.pos = e.position; cx.notify(); })
       .on_mouse_up("left", (e) => {
         const place = this.zone(e.position);
-        if (place) setShared(MOVE_REQUEST, { terminal: d.terminal, into: d.into, place, at: Date.now() });
+        if (place) setShared(MOVE_REQUEST, { ...d.source, into: d.into, place, at: Date.now() });
         this.end();
       })
       .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.end(); })
@@ -91,23 +84,24 @@ export default class Tabs extends View {
     this.closeList(ask.tabs, cx);
   }
 
-  // The menus' Move into Tab / Move to New Tab (vscode-explorer's tab menu, vscode-menu) leave a move here, the same way.
+  // The menus' Move into Tab / Move to New Tab (vscode-explorer's tab menu, vscode-menu), the pane header's (vscode-pane)
+  // and the drag leave a move here, the same way.
   moveAsked(cx) {
     const ask = shared(MOVE_REQUEST);
-    if (typeof ask?.terminal !== "string" || ask.at === this.moveAt || Date.now() - ask.at > 5000) return;
+    if ((typeof ask?.terminal !== "string" && typeof ask?.pane !== "string") || ask.at === this.moveAt || Date.now() - ask.at > 5000) return;
     this.moveAt = ask.at;
-    cx.spawn(async (cx) => moveTerminal(ask, (ms) => cx.sleep(ms)));
+    cx.spawn(async (cx) => movePane(ask, (ms) => cx.sleep(ms)));
   }
 
   // The side panel (Explorer / Source Control) is one global state: switching spaces leaves it as it is.
 
-  // A press dragged out of the bar: the overlay takes it over when the tab has one terminal to move into the shown tab.
+  // A press dragged out of the bar: the overlay takes it over when the tab has one pane to move into the shown tab.
   dragOut(space) {
     const p = this.press, active = space?.tabs.find(c => c.active)?.id;
     this.press = null; this.pressed = null; this.dragging = false;
-    const terminal = p && this.bar ? dragTerminal(p.id, active, panes()) : null;
-    if (terminal) openOverlay({ mod: "vscode-tabs", kind: "window", frame: "none", at: { x: 0, y: 0 }, width: 1, height: 1,
-      props: { drag: { terminal, into: active, title: p.title, bar: this.bar } } });
+    const source = p && this.bar ? dragSource(p.id, active, panes()) : null;
+    if (source) openOverlay({ mod: "vscode-tabs", kind: "window", frame: "none", at: { x: 0, y: 0 }, width: 1, height: 1,
+      props: { drag: { source, into: active, title: p.title, bar: this.bar } } });
   }
 
   render(cx) {
@@ -143,9 +137,11 @@ export default class Tabs extends View {
         .on_mouse_down("right", (_e, cx) => {
           cx.stop_propagation();
           const file = tabFileOf(c.id, space, panes(), withDetails(terminals(), shared(DETAILS)), shared("vscode-viewer.focused"));
-          const movable = shown.length > 1 && dragTerminal(c.id, null, panes());
+          // Its rows: Rename, New tab, Move into tab… (a tab of one terminal), Move ‹pane› to new tab for each of several panes, Close.
+          const mine = panes().filter(p => p.tab === c.id), movable = shown.length > 1 && mine.length === 1 && mine[0].terminal;
+          const rows = 3 + (movable ? 1 : 0) + (mine.length > 1 ? mine.length : 0);
           openOverlay(file ? { mod: "vscode-explorer", kind: "popup", ...TAB_MENU, props: { tabMenu: { ...file, dirty: [...dirty] } } }
-            : { mod: "vscode-menu", kind: "popup", width: 220, height: movable ? 143 : 112, props: { tab: "tab", target: { id: c.id, space: space.id } } });
+            : { mod: "vscode-menu", kind: "popup", width: 240, height: 19 + 31 * rows, props: { tab: "tab", target: { id: c.id, space: space.id } } });
         })
         .when(Boolean(program?.icon), el => el.child(program.tint ? svg(program.icon).size(14).text_color(t.muted) : image(program.icon).size(14)))
         .child(div().max_w(170).truncate().child(c.zoomed ? `${name} Z` : name))

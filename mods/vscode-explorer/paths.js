@@ -177,8 +177,8 @@ const REVEAL_LABEL = { mac: "Reveal in Finder", win: "Reveal in File Explorer", 
 // reveal is disabled (the file manager only sees this computer), not hidden, so the menu's height never changes
 // (vscode-tabs opens the popup at a fixed size, its TAB_MENU, which its test checks against this). The moves
 // (vscode-tabs' move.js) are disabled the same way: Move into Tab with no other tab in the space (`lone`), Move to New
-// Tab while the editor has its tab to itself (`alone`), both for a viewer (`viewer`: a mod pane, which Herdr can't move).
-export function tabMenuItems({ remote, os, lone = false, alone = false, viewer = false }) {
+// Tab while the file has its tab to itself (`alone`).
+export function tabMenuItems({ remote, os, lone = false, alone = false }) {
   const key = (id) => TAB_KEYS[id][os] ?? "";
   const groups = [
     [["Close", "close", key("close")], ["Close Others", "closeOthers", key("closeOthers")], ["Close to the Right", "closeRight"],
@@ -187,23 +187,35 @@ export function tabMenuItems({ remote, os, lone = false, alone = false, viewer =
     [["Reopen Editor With…", "reopenWith"]],
     [[REVEAL_LABEL[os], "reveal", key("reveal"), remote], ["Reveal in Explorer View", "revealExplorer"]],
     [["Split Right", "split", key("split")]],
-    [["Move into Tab…", "moveInto", "", lone || viewer], ["Move to New Tab", "moveOut", "", alone || viewer]],
+    [["Move into Tab…", "moveInto", "", lone], ["Move to New Tab…", "moveOut", "", alone]],
   ];
   return groups.flatMap((g, i) => (i ? ["-", ...g] : g));
 }
 
 // Move into Tab…'s rows, in place of the menu's: "Right of ‹tab›", then "Below ‹tab›", for each other tab of `space`
-// (a tab's name, else its first pane's title), actions "into:<place>:<tab id>" (intoOf reads them back).
+// (a tab's name, else its first pane's title), actions "into:<place>:<tab id>" (moveOf reads them back).
 export function moveRows(space, from, panes) {
   const others = (space?.tabs ?? []).filter(c => c.id !== from);
   const title = (c) => (c.named ? c.name : panes.find(p => p.tab === c.id)?.title || c.name);
   const rows = (place, word) => others.map(c => [`${word} ${title(c)}`, `into:${place}:${c.id}`]);
   return [...rows("right", "Right of"), "-", ...rows("down", "Below")];
 }
-export const intoOf = (action) => {
-  const m = /^into:(right|down):(.+)$/.exec(action ?? "");
-  return m ? { place: m[1], into: m[2] } : null;
-};
+// Move to New Tab…'s rows, in place too: each pane of tab `tab` (it holds several), named as a menu names it (an
+// editor's file, a viewer's file name from `viewers`, vscode-viewer's { [pane]: { file } }; else its title), actions
+// "out:<pane id>".
+export function outRows(tab, panes, viewers = {}) {
+  const title = (p) => baseName(viewers?.[p.pane]?.file ?? "") || /^(?:● )?(.+?) — vsedit/.exec(p.title ?? "")?.[1] || p.title || p.program?.name || "pane";
+  return panes.filter(p => p.tab === tab).map(p => [`Move ${title(p)} to New Tab`, `out:${p.pane}`]);
+}
+
+// The move.js request a pick of moveRows / outRows means (`panes`: Herdr's, for the picked pane's terminal), less its
+// `at`; null for any other action. `source`: the menu's own pane, { terminal } or { pane } (a viewer).
+export function moveOf(action, source, panes) {
+  const into = /^into:(right|down):(.+)$/.exec(action ?? ""), out = /^out:(.+)$/.exec(action ?? "");
+  if (into) return { ...source, into: into[2], place: into[1] };
+  const p = out && panes.find(x => x.pane === out[1]);
+  return p ? { ...(p.terminal ? { terminal: p.terminal } : { pane: p.pane }), into: null, place: "tab" } : null;
+}
 
 // The tabs of `space` showing files only (VS Code's editors): every pane an editor terminal or a vscode-viewer pane
 // (several, once moved together: vscode-tabs' move.js). A tab with a shell or an agent in it is never one.

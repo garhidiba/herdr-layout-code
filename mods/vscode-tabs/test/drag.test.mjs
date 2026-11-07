@@ -1,12 +1,19 @@
 // node --test mods/vscode-tabs/test/drag.test.mjs
-// Dragging a tab into the shown tab (drag.js): when a press is a drag, the content area, its drop zones and preview.
+// Dragging a tab into the shown tab (drag.js): when a press is a drag, the panes' area, its drop zones and preview.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { dragStarted, contentRect, dropZone, zoneRect, dragTerminal, STATUS } from "../drag.js";
+import { readFileSync } from "node:fs";
+import { dragStarted, panesRect, dropZone, zoneRect, dragSource, find } from "../drag.js";
 
-const bar = { x: 300, y: 0, width: 800, height: 40 };
-const win = { width: 1100, height: 724 };
-const rect = contentRect(bar, win); // x 300..1100, y 40..700
+// layouts/vscode.json as shipped: work-body padding 8, gap 8; the side panel 368px, shown; the status bar 28px.
+const shipped = JSON.parse(readFileSync(new URL("../../../layouts/vscode.json", import.meta.url), "utf8"));
+const bar = { x: 268, y: 0, width: 1012, height: 42 }; // the work column, right of the 268px sidebar
+const win = { width: 1280, height: 800 };
+const withPanel = (panel) => {
+  const tree = structuredClone(shipped);
+  Object.assign(find(tree, "panel"), panel);
+  return tree;
+};
 
 test("a press becomes a drag past 4 px, not before", () => {
   assert.equal(dragStarted({ x: 10, y: 10 }, { x: 13, y: 10 }), false);
@@ -14,41 +21,49 @@ test("a press becomes a drag past 4 px, not before", () => {
   assert.equal(dragStarted({ x: 10, y: 10 }, { x: 10, y: 15 }), true);
 });
 
-test("the content area is below the bar, as wide, down to the status bar", () => {
-  assert.deepEqual(rect, { x: 300, y: 40, width: 800, height: 724 - 40 - STATUS });
-  assert.equal(contentRect(bar, { width: 10, height: 10 }).height, 0);
+test("the panes are below the bar, left of the side panel while it shows, above the status bar, inside the padding", () => {
+  // x 276 .. 1280-8-368-8 = 896; y 50 .. 800-28-8 = 764
+  assert.deepEqual(panesRect(bar, win, shipped), { x: 276, y: 50, width: 1012 - 16 - 376, height: 714 });
+  assert.deepEqual(panesRect(bar, win, withPanel({ hidden: true })), { x: 276, y: 50, width: 996, height: 714 });
+  assert.equal(panesRect(bar, win, withPanel({ size: { px: 500 } })).width, 1012 - 16 - 508, "a dragged-wider panel");
+  // The sidebar collapsed: the bar (and the work column) start further left; the panes follow it.
+  assert.equal(panesRect({ ...bar, x: 44, width: 1236 }, win, shipped).x, 52);
 });
 
-test("the nearest edge picks the zone: left, right, up, down", () => {
-  assert.equal(dropZone(rect, { x: 320, y: 370 }), "left");
-  assert.equal(dropZone(rect, { x: 1080, y: 370 }), "right");
-  assert.equal(dropZone(rect, { x: 700, y: 60 }), "up");
-  assert.equal(dropZone(rect, { x: 700, y: 690 }), "down");
-  assert.equal(dropZone(rect, { x: 800, y: 370 }), "right", "right of the middle");
+test("with no layout tree, the panes are the whole area below the bar", () => {
+  assert.deepEqual(panesRect(bar, win, null), { x: 268, y: 42, width: 1012, height: 758 });
+  assert.equal(panesRect(bar, { width: 10, height: 10 }, shipped).height, 0);
 });
 
-test("outside the content (the bar, the sidebar, past the bottom) there is no zone", () => {
-  for (const pos of [{ x: 700, y: 20 }, { x: 100, y: 370 }, { x: 700, y: 710 }]) assert.equal(dropZone(rect, pos), null, JSON.stringify(pos));
-  assert.equal(dropZone({ ...rect, height: 0 }, { x: 700, y: 40 }), null);
+test("over the side panel there is no zone; over the panes, the nearest edge", () => {
+  const rect = panesRect(bar, win, shipped); // x 276..896, y 50..764
+  assert.equal(dropZone(rect, { x: 1000, y: 400 }), null, "the Explorer");
+  assert.equal(dropZone(rect, { x: 880, y: 400 }), "right");
+  assert.equal(dropZone(rect, { x: 290, y: 400 }), "left");
+  assert.equal(dropZone(rect, { x: 586, y: 60 }), "up");
+  assert.equal(dropZone(rect, { x: 586, y: 750 }), "down");
+  for (const pos of [{ x: 586, y: 20 }, { x: 100, y: 400 }, { x: 586, y: 790 }]) assert.equal(dropZone(rect, pos), null, JSON.stringify(pos));
+  assert.equal(dropZone({ ...rect, height: 0 }, { x: 586, y: 50 }), null);
   assert.equal(dropZone(null, { x: 1, y: 1 }), null);
 });
 
-test("the preview covers the zone's half", () => {
-  assert.deepEqual(zoneRect(rect, "left"), { ...rect, width: 400 });
-  assert.deepEqual(zoneRect(rect, "right"), { ...rect, x: 700, width: 400 });
+test("the preview covers the zone's half of the panes, never the side panel", () => {
+  const rect = panesRect(bar, win, shipped);
+  assert.deepEqual(zoneRect(rect, "right"), { ...rect, x: rect.x + rect.width / 2, width: rect.width / 2 });
+  assert.ok(zoneRect(rect, "right").x + zoneRect(rect, "right").width <= 1280 - 8 - 368 - 8);
+  assert.deepEqual(zoneRect(rect, "left"), { ...rect, width: rect.width / 2 });
   assert.deepEqual(zoneRect(rect, "up"), { ...rect, height: rect.height / 2 });
-  assert.deepEqual(zoneRect(rect, "down"), { ...rect, y: 40 + rect.height / 2, height: rect.height / 2 });
+  assert.deepEqual(zoneRect(rect, "down"), { ...rect, y: rect.y + rect.height / 2, height: rect.height / 2 });
   assert.equal(zoneRect(rect, null), null);
 });
 
-test("a dragged tab moves its one terminal; not the shown tab, a mod pane or a tab of several panes", () => {
+test("a dragged tab moves its one pane, a terminal or a viewer; not the shown tab or a tab of several panes", () => {
   const panes = [
     { pane: "p1", tab: "a", terminal: "t1" }, { pane: "p2", tab: "b", terminal: "t2" },
     { pane: "p3", tab: "c", terminal: null, mod: "vscode-viewer" }, { pane: "p4", tab: "d", terminal: "t4" }, { pane: "p5", tab: "d", terminal: "t5" },
+    { pane: "p6", tab: "e", terminal: null, mod: "other-mod" },
   ];
-  assert.equal(dragTerminal("b", "a", panes), "t2");
-  assert.equal(dragTerminal("a", "a", panes), null);
-  assert.equal(dragTerminal("c", "a", panes), null);
-  assert.equal(dragTerminal("d", "a", panes), null);
-  assert.equal(dragTerminal("gone", "a", panes), null);
+  assert.deepEqual(dragSource("b", "a", panes), { terminal: "t2" });
+  assert.deepEqual(dragSource("c", "a", panes), { pane: "p3" });
+  for (const id of ["a", "d", "e", "gone"]) assert.equal(dragSource(id, "a", panes), null, id);
 });

@@ -6,7 +6,7 @@ import { exec, hc, run, spaces, panes, terminals, machines, props, openOverlay, 
 import { createOpenTab } from "./launch.js";
 import { createWarmPool, TIMING } from "./warm.js";
 import { menuItems, menuHeight, openWith, baseName, parentOf, relativeTo, nameProblem, vscodeRemoteArgs, isMarkdown, editorPaneOf,
-  tabMenuItems, moveRows, intoOf, closeArgs, fileTabs, splitArgs, clipboardCommand, revealCommand, withDetails, deleteTitle, extraLines, DETAILS } from "./paths.js";
+  tabMenuItems, moveRows, outRows, moveOf, closeArgs, fileTabs, splitArgs, clipboardCommand, revealCommand, withDetails, deleteTitle, extraLines, DETAILS } from "./paths.js";
 import { createOps } from "./ops.js";
 import { createRemote, createOpenFile, keysOs, ROOT, INSTALL_COMMAND, INSTALL_REQUEST } from "./remote.js";
 
@@ -54,6 +54,8 @@ export const REVEAL = "vscode-explorer.reveal";
 const TAB_CLOSE = "vscode-tabs.close";
 // Move into Tab / Move to New Tab ask the tab bar too (vscode-tabs' move.js MOVE_REQUEST).
 const MOVE = "vscode-tabs.move";
+// vscode-viewer's { [pane]: { file, on } } (vscode-tabs' move.js VIEWER_FILES): names a viewer pane in Move to New Tab….
+const VIEWER_FILES = "vscode-viewer.files";
 
 // Herdr starts with PATH=/usr/bin:/bin; Homebrew/user tools (code, trash) live elsewhere.
 const sh = (script, ...args) => exec("sh", ["-c", 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; ' + script, "explorer", ...args]);
@@ -180,15 +182,16 @@ export class TabMenu extends ExplorerMenu {
     // Reopen offers the other editor: the same one would find this tab open (openFile's showOpen) and only select it.
     if (this.withList) return openWith(!!t.on).slice(0, 2).filter(r => r[1] !== (t.argv ? "editor" : "viewer"));
     const space = spaces().find(s => s.tabs.some(x => x.id === t.tab));
-    if (this.moving) return moveRows(space, t.tab, panes());
-    return tabMenuItems({ remote: !!t.on, os: os(), lone: (space?.tabs.length ?? 0) < 2, alone: panes().filter(p => p.tab === t.tab).length < 2, viewer: !t.argv });
+    if (this.moving === "into") return moveRows(space, t.tab, panes());
+    if (this.moving === "out") return outRows(t.tab, panes(), shared(VIEWER_FILES));
+    return tabMenuItems({ remote: !!t.on, os: os(), lone: (space?.tabs.length ?? 0) < 2, alone: panes().filter(p => p.tab === t.tab).length < 2 });
   }
 
   choose(action, cx) {
     const t = this.target;
     if (action === "reopenWith") { this.withList = true; this.at = -1; return cx.notify(); }
-    // Move into Tab… lists the tabs in place (a popup opened from this one didn't show).
-    if (action === "moveInto") { this.moving = true; this.at = -1; return cx.notify(); }
+    // Move into Tab… / Move to New Tab… list the tabs or the tab's panes in place (a popup opened from this one didn't show).
+    if (action === "moveInto" || action === "moveOut") { this.moving = action === "moveInto" ? "into" : "out"; this.at = -1; return cx.notify(); }
     // Reopen: the new tab first (closing the old one first could close the space), then the old one.
     if (action === "editor" || action === "viewer") return !this.opening && (this.opening = true) && cx.spawn(async cx => {
       try { await openFile(t.file, { on: t.on, how: action, folder: t.root ?? undefined }, cx); run("tab.close", { id: t.tab }); } finally { this.close(); }
@@ -213,11 +216,11 @@ export class TabMenu extends ExplorerMenu {
         return setShared(REVEAL, { file: t.file, on: t.on, at: Date.now() });
       case "split": return run("pane.split", splitArgs(t));
     }
-    // vscode-tabs' move.js moves the editor's terminal: into the tab picked from moveRows, or out to a new tab.
-    const terminal = panes().find(p => p.pane === t.pane)?.terminal, into = intoOf(action);
-    if (terminal && (into || action === "moveOut")) {
-      setShared(MOVE, { terminal, ...(into ?? { into: null, place: "tab", name: baseName(t.file) }), at: Date.now() });
-    }
+    // vscode-tabs' move.js moves the pane: this file's into the tab picked from moveRows, or the one picked from outRows
+    // out to a new tab. A terminal (the editor) or a viewer pane (`argv` null).
+    const terminal = panes().find(p => p.pane === t.pane)?.terminal;
+    const move = moveOf(action, t.argv ? { terminal } : { pane: t.pane }, panes());
+    if (move && (move.terminal || move.pane)) setShared(MOVE, { ...move, at: Date.now() });
   }
 }
 
