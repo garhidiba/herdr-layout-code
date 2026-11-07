@@ -439,30 +439,11 @@ export default class Files extends View {
       return;
     }
     const p = this.pressed;
-    if (!p && !window()?.active && !this.dropped) return this.dragFromOutside(e.local_position, cx);
-    if (this.outside) { this.outside = null; cx.notify(); }
     if (!p?.row || (!p.dragging && !dragStarted(p.from, e.local_position))) return;
     if (!p.dragging) { p.dragging = true; this.handle.focus(); }
     p.at = e.local_position;
     p.folder = dragTarget(p.row, rows, rowAt(this.top, p.at.y, rows.length));
     cx.notify();
-  }
-
-  // A drag from Finder over the tree: Herdr reports it only as pointer moves, like a hover, and nothing says a file is
-  // dragged. Finder holds the keyboard then, so moves over this window while it is inactive are taken for one: render()
-  // highlights where it would land. Cleared by the drop, the pointer leaving the tree, the window becoming active, or
-  // 1s without a move (macOS keeps reporting a drag held still). A plain hover over the inactive window shows it too.
-  dragFromOutside(at, cx) {
-    this.outside = { ...at, time: Date.now() };
-    cx.notify();
-    if (this.outsideTimer) return;
-    this.outsideTimer = true;
-    const check = (cx) => {
-      if (this.outside && Date.now() - this.outside.time < 1000) return cx.timer.after(1000, check);
-      this.outsideTimer = false; this.outside = null;
-      cx.notify();
-    };
-    cx.timer.after(1000, check);
   }
 
   // A drag let go on a folder moves the row there (with Alt/Option, copies it); a press let go on the row it began on
@@ -569,9 +550,9 @@ export default class Files extends View {
     // Only the rows on screen are drawn (a tall screenful until the viewport's size is known), each at its scrolled y.
     const [first, end] = shown(top, height || 1600, count);
     const drag = this.pressed?.dragging ? this.pressed : null, keyboard = this.handle.is_focused();
-    // A drag from Finder (dragFromOutside) is lit where on_drop would put it.
-    const outside = this.outside ? { folder: dropFolder(rows, rowAt(top, this.outside.y, count)), at: this.outside } : null;
-    const target = drag?.folder ?? outside?.folder ?? null;
+    // A drag from Finder isn't lit: Herdr tells it from a hover over an inactive window only by guesswork, and a wrong
+    // guess lit the tree on plain hovers.
+    const target = drag?.folder ?? null;
     const [hiFrom, hiTo] = target ? targetRange(rows, target) : [0, 0];
     const thumb = Math.max(24, height * height / (count * ROW || 1));
     return v_flex().id("explorer").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
@@ -590,7 +571,6 @@ export default class Files extends View {
         // drop names no position, so the last one the pointer reported over the rows says where; elsewhere the root.
         .on_drop((e, cx) => {
           const i = this.hoverY == null ? -1 : rowAt(this.top, this.hoverY, count);
-          this.outside = null; this.dropped = true; // the pointer still over the inactive window is no drag
           if (this.root && e.paths?.length) this.place(dropFolder(rows, i), (ops, dir) => this.on ? this.upload(ops, e.paths, dir) : ops.drop(e.paths, dir), cx);
         })
         .when(count > 0, el => el.child(div().id("explorer-rows").flex_1().min_h(0).relative().overflow_hidden()
@@ -607,7 +587,7 @@ export default class Files extends View {
           })
           .on_mouse_move((e, cx) => this.pointerMove(e, rows, cx))
           .on_mouse_up("left", (e, cx) => this.release(e, rows, cx))
-          .on_hover((on, cx) => { if (!on) { this.hoverY = null; this.outside = null; this.dropped = false; this.cancelDrag(cx); cx.notify(); } })
+          .on_hover((on, cx) => { if (!on) { this.hoverY = null; this.cancelDrag(cx); cx.notify(); } })
           .children(rows.slice(first, end).map((r, k) => this.row(r, t, first + k >= hiFrom && first + k < hiTo, keyboard).absolute().left(0).top((first + k) * ROW - top)))
           .when(over > 0 && height > 0, el => el.child(div().absolute().right(1).top((height - thumb) * top / over).w(6).h(thumb).rounded(3).bg(t.dim).opacity(0.45)
             .on_mouse_down("left", (e, cx) => { cx.stop_propagation(); this.thumb = { y: e.position.y, top: this.top, ratio: over / (height - thumb) }; })))
@@ -618,9 +598,7 @@ export default class Files extends View {
               .bg(t.popover).border_1().border_color(t.border).text_size(12)
               .child(icon ? image(`mods/vscode-explorer/icons/${icon}.svg`).w(16).h(16).flex_none() : div())
               .child(drag.row.name));
-          })
-          .when(Boolean(outside), el => el.child(div().absolute().left(outside.at.x + 14).top(outside.at.y + 6).h(ROW).px(8).flex().items_center()
-            .rounded(4).bg(t.popover).border_1().border_color(t.border).text_size(12).child("Copy here")))))
+          })))
         .when(Boolean(this.error) || !this.entries.get("")?.length, el => el.child(div().p(8).text_size(12).text_color(t.dim).child(this.error || (this.loading ? "Loading files…" : this.root ? "No files" : "No folder"))))
         .when(this.limited, el => el.child(div().p(8).text_size(11).text_color(t.dim).child("File list limited to 500 entries per folder and 5,000 total"))));
   }
