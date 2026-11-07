@@ -9,7 +9,7 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { theme, props, run, exec, hc, spaces, appHome, readTextFile, writeTextFile, closeOverlay, keys } from "herdr";
 import { FILE, normalize, parse, loose, withSetting, withDefaults, rewrite, updateFile, stepDelay, coreStatus, coreCurrent, DEFAULTS,
-  PAGE_FILE, requestedPage, editorStatus, editorCurrent, HOSTED_PROVIDERS, modelChoices, chosenModel, keyLine, LOCAL_PROVIDERS, endpointProblem, withProvider, withOwn, ownValue } from "./settings.js";
+  PAGE_FILE, requestedPage, editorStatus, editorCurrent, HOSTED_PROVIDERS, modelChoices, chosenModel, defaultModel, modelStatus, installHint, modelWarning, keyLine, LOCAL_PROVIDERS, endpointProblem, withProvider, withOwn, ownValue } from "./settings.js";
 import { FILE as KB_FILE, fromHerdr, label, matchesRow, conflicts, parseFile, serializeFile, withKey, withoutKey, withReset,
   hasUserEntries, herdrRoute, withPassthrough, recordStep } from "./keybindings.js";
 import { createOpenTab } from "./launch.js";
@@ -51,7 +51,11 @@ export default class Settings extends View {
     // Save / Remove / Test said; the key field is masked and emptied once saved.
     this.inl = { source: null, provider: null, listed: null, key: null, note: null, busy: false };
     this.modelInput = InputState.new({ placeholder: "Another model name, then Enter" });
-    this.modelInput.on("submit", (_e, cx) => { const m = this.modelInput.value().trim(); if (m) { this.setOwn("model", m, cx); this.modelInput.set_value(""); } });
+    this.modelInput.on("submit", (_e, cx) => {
+      const m = this.modelInput.value().trim();
+      if (m && modelStatus(this.v[PROVIDER], m, this.inl.listed) !== "missing") { this.setOwn("model", m, cx); this.modelInput.set_value(""); }
+    });
+    this.modelInput.on("change", (_e, cx) => cx.notify()); // the note under the field follows the typed name
     // A local provider's server address: checked as it is typed, written on Enter or blur when valid.
     this.urlInput = InputState.new({ placeholder: "Empty: the default address" });
     this.url = { focused: false, problem: null };
@@ -494,22 +498,24 @@ export default class Settings extends View {
 
   modelRow(t) {
     const p = this.v[PROVIDER], listed = this.inl.listed, current = ownValue(this.v, p, "model"), chosen = chosenModel(current, listed);
+    const warning = modelWarning(p, this.modelInput.value().trim() || current || defaultModel(listed), listed);
     const desc = p === "ollama" ? "The models pulled there (ollama list) and recommended ones. Pick a base model: an instruct / chat one answers in prose."
       : p === "lmstudio" ? "The models LM Studio serves and recommended ones. Pick a base / coder model with a FIM template (Qwen2.5-Coder, DeepSeek Coder, StarCoder): an instruct / chat one answers in prose."
         : "The provider's code completion models.";
     const chips = !listed ? div().text_size(11.5).text_color(t.dim).child("Loading models…")
       : listed.error ? div().text_size(11.5).text_color(t.ansi3).child(`Cannot list models: ${listed.error}`)
-        : h_flex().flex_wrap().gap(6).children(modelChoices(current, listed).map(([value, label]) => {
-          const on = value === chosen;
-          return div().id(`model-${value || "default"}`).h(24).px(10).flex().items_center().rounded(4).text_size(12).cursor_pointer()
+        : h_flex().flex_wrap().gap(6).children(modelChoices(current, listed, p).map(([value, label]) => {
+          const on = value === chosen, name = value || defaultModel(listed), missing = modelStatus(p, name, listed) === "missing";
+          return div().id(`model-${value || "default"}`).h(24).px(10).flex().items_center().rounded(4).text_size(12)
             .role("radio_button").accessibility_label(label).border_1().border_color(on ? t.accent : t.input)
-            .bg(on ? t.accent : t.background).text_color(on ? t.accent_foreground : t.muted)
-            .when(!on, (e) => e.hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click((_e, cx) => this.setOwn("model", value, cx)))
+            .bg(on ? t.accent : t.background).text_color(on ? t.accent_foreground : missing ? t.dim : t.muted)
+            .when(missing, (e) => e.tooltip(`Not installed. ${installHint(p, name)}`))
+            .when(!on && !missing, (e) => e.cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click((_e, cx) => this.setOwn("model", value, cx)))
             .child(label);
         }));
     return this.row(t, "Editor", "Inline Suggestion Model", desc,
-      div().w(220).h(28).px(8).flex().items_center().rounded(4).border_1().border_color(t.input).bg(t.background).text_size(12).child(Input.new(this.modelInput).w_full()),
-      chips);
+      div().w(220).h(28).px(8).flex().items_center().rounded(4).border_1().border_color(warning ? t.ansi3 : t.input).bg(t.background).text_size(12).child(Input.new(this.modelInput).w_full()),
+      v_flex().gap(6).when(Boolean(warning), (el) => el.child(div().text_size(11.5).text_color(t.ansi3).child(warning))).child(chips));
   }
 
   // A hosted API's key, or a local server's optional one (its Test is the Server row's).

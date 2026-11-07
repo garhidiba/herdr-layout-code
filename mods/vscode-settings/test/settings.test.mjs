@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { DEFAULTS, parse, normalize, coreEngine, editorEngine, withSetting, withDefaults, serialize, updateFile, stepDelay, coreStatus, coreCurrent,
-  editorStatus, editorCurrent, modelChoices, chosenModel, keyLine, endpointProblem, withProvider, withOwn, ownValue, ownKey } from "../settings.js";
+  editorStatus, editorCurrent, modelChoices, chosenModel, modelStatus, modelWarning, keyLine, endpointProblem, withProvider, withOwn, ownValue, ownKey } from "../settings.js";
 
 // An in-memory file with writeTextFile's contract: writes only when `expected` still matches.
 function memoryFile(text, { raceOnce = null } = {}) {
@@ -134,7 +134,7 @@ test("inline suggestions: on unless set off, the provider one of the editor's, R
 test("the Inline Suggestion Model row: the default first, base models recommended, pulled or not, the file's own model", () => {
   const ollama = { models: ["qwen2.5-coder:1.5b-base", "qwen2.5-coder:7b-base", "qwen2.5-coder:7b"],
     recommended: ["qwen2.5-coder:1.5b-base", "qwen2.5-coder:7b-base"], pulled: ["qwen2.5-coder:7b-base", "qwen2.5-coder:7b"] };
-  assert.deepEqual(modelChoices("", ollama), [["", "qwen2.5-coder:1.5b-base (default, not pulled)"],
+  assert.deepEqual(modelChoices("", ollama, "ollama"), [["", "qwen2.5-coder:1.5b-base (default, not installed)"],
     ["qwen2.5-coder:7b-base", "qwen2.5-coder:7b-base (recommended)"], ["qwen2.5-coder:7b", "qwen2.5-coder:7b"]]);
   assert.deepEqual(modelChoices("starcoder2:3b", ollama).at(-1), ["starcoder2:3b", "starcoder2:3b"]);
   assert.deepEqual(modelChoices("", { models: ["codestral-latest", "codestral-2508"], recommended: ["codestral-latest"] }),
@@ -144,6 +144,28 @@ test("the Inline Suggestion Model row: the default first, base models recommende
   assert.deepEqual(modelChoices("", null), [["", "Default"]]);
   assert.equal(withSetting({}, "editor.inlineSuggest.model", " codestral-2508 ")["editor.inlineSuggest.model"], "codestral-2508");
   assert.throws(() => withSetting({}, "editor.inlineSuggest.model", 3));
+});
+
+test("a local model is checked against the server's models; Ollama's foo is foo:latest", () => {
+  const ollama = { models: ["a:latest", "b:7b"], recommended: [], pulled: ["a:latest", "b:7b"] };
+  assert.equal(modelStatus("ollama", "a", ollama), "ok");
+  assert.equal(modelStatus("ollama", "b", ollama), "missing", "only :latest may be left out");
+  assert.equal(modelStatus("ollama", "b:7b", ollama), "ok");
+  assert.equal(modelStatus("lmstudio", "a", { pulled: ["a:latest"] }), "missing", "LM Studio ids compare exactly");
+  assert.equal(modelStatus("ollama", "a", null), null, "still listing: no verdict");
+  assert.equal(modelStatus("ollama", "a", { error: "node: not found" }), null, "the listing failed: unknown");
+  assert.equal(modelStatus("ollama", "a", { models: ["x"], recommended: ["x"], pulled: null }), "unreachable");
+  assert.equal(modelStatus("codestral", "a", { models: ["x"], recommended: ["x"] }), null, "a hosted catalog isn't checked");
+});
+
+test("the Model field's note says how to get a missing model, or that the server can't be reached", () => {
+  assert.equal(modelWarning("ollama", "foo", { pulled: [] }), "Not on this server. Run: ollama pull foo");
+  assert.match(modelWarning("lmstudio", "foo", { pulled: [] }), /^Not on this server\. Download foo in LM Studio/);
+  assert.equal(modelWarning("ollama", "foo", { pulled: null }), "Server unreachable: cannot check the model.");
+  assert.equal(modelWarning("ollama", "foo", { pulled: ["foo:latest"] }), null);
+  assert.equal(modelWarning("ollama", "foo", null), null);
+  // unreachable: chips aren't marked, since nothing is known
+  assert.deepEqual(modelChoices("", { models: ["x", "y"], recommended: ["x", "y"], pulled: null }, "ollama"), [["", "x (default)"], ["y", "y (recommended)"]]);
 });
 
 test("the API Key row shows where the key is and only its ends, or how to add one", () => {

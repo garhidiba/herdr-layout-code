@@ -108,10 +108,10 @@ export const HOSTED_PROVIDERS = ["codestral", "mercury"];
 export const LOCAL_PROVIDERS = { ollama: "http://127.0.0.1:11434", lmstudio: "http://127.0.0.1:1234" };
 // The Model row's choices [value, label]: the provider's default first (value "": none in the file), the models it
 // lists (Ollama: the pulled ones, base models recommended), and the file's model when it is none of them.
-export function modelChoices(current, listed) {
-  const { models = [], recommended = [], pulled = null } = listed ?? {};
-  const def = recommended[0] ?? models[0];
-  const tag = (m) => [recommended.includes(m) && m !== def && "recommended", pulled && !pulled.includes(m) && "not pulled"].filter(Boolean).join(", ");
+export function modelChoices(current, listed, provider) {
+  const { models = [], recommended = [] } = listed ?? {};
+  const def = defaultModel(listed);
+  const tag = (m) => [recommended.includes(m) && m !== def && "recommended", modelStatus(provider, m, listed) === "missing" && "not installed"].filter(Boolean).join(", ");
   const label = (m, extra = []) => { const t = [...extra, tag(m)].filter(Boolean).join(", "); return t ? `${m} (${t})` : m; };
   const rows = def ? [["", label(def, ["default"])]] : [["", "Default"]];
   for (const m of models) if (m !== def) rows.push([m, label(m)]);
@@ -119,7 +119,27 @@ export function modelChoices(current, listed) {
   return rows;
 }
 // Which choice the file's model picks (the default's own name picks the default).
-export const chosenModel = (current, listed) => (current === (listed?.recommended?.[0] ?? listed?.models?.[0]) ? "" : current);
+export const chosenModel = (current, listed) => (current === defaultModel(listed) ? "" : current);
+// The model the "" choice stands for.
+export const defaultModel = (listed) => listed?.recommended?.[0] ?? listed?.models?.[0];
+// Whether a local server's model name is this one: Ollama's `foo` is `foo:latest`; other names compare exactly.
+const sameModel = (provider, a, b) => a === b || (provider === "ollama" && a.replace(/:latest$/, "") === b.replace(/:latest$/, ""));
+// A model on a local server (`listed.pulled`: its models, null when it didn't answer): "ok", "missing", "unreachable",
+// or null when unknown (still listing, the listing failed, or a hosted provider's catalog).
+export function modelStatus(provider, model, listed) {
+  if (!model || !listed || listed.error || listed.pulled === undefined) return null;
+  if (!Array.isArray(listed.pulled)) return "unreachable";
+  return listed.pulled.some((m) => sameModel(provider, m, model)) ? "ok" : "missing";
+}
+// How to get a model the server doesn't have.
+export const installHint = (provider, model) =>
+  provider === "lmstudio" ? `Download ${model} in LM Studio and load it.` : `Run: ollama pull ${model}`;
+// The note under the Model field for a model (the typed one, else the file's or the default): null when it is there
+// or not known yet.
+export function modelWarning(provider, model, listed) {
+  const s = modelStatus(provider, model, listed);
+  return s === "missing" ? `Not on this server. ${installHint(provider, model)}` : s === "unreachable" ? "Server unreachable: cannot check the model." : null;
+}
 // The API Key row's line from `inline.cjs --key` (a stored key shows only its ends); optional: a local server's key,
 // none being the usual case.
 export function keyLine(r, optional = false) {
