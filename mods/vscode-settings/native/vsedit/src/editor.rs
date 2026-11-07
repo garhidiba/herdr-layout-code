@@ -1650,7 +1650,7 @@ impl Editor {
         None
     }
     /// Shows `file` (loading it once), optionally at `at`; `record` remembers where we were for Go Back.
-    fn open(&mut self, file: &Path, at: Option<Pos>, record: bool) -> bool {
+    pub fn open(&mut self, file: &Path, at: Option<Pos>, record: bool) -> bool {
         let file = crate::normalize(file);
         if record {
             self.push_nav();
@@ -2538,7 +2538,7 @@ pub fn selected_chars(text: &str) -> usize {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -2555,7 +2555,7 @@ mod tests {
     use std::fs;
 
     /// Settings, keybindings and backups in a temp folder (once per test run), the repository's grammars.
-    fn scratch() -> &'static PathBuf {
+    pub(crate) fn scratch() -> &'static PathBuf {
         static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
         DIR.get_or_init(|| {
             let d = std::env::temp_dir().join(format!("vsedit-unit-{}", std::process::id()));

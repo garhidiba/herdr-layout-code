@@ -29,6 +29,11 @@ pub fn wake() {
     }
 }
 
+/// Sends wake() to `fd`, for a loop without a terminal (serve.rs).
+pub fn wake_to(fd: RawFd) {
+    WAKE_FD.store(fd, Ordering::Relaxed);
+}
+
 extern "C" fn on_signal(sig: libc::c_int) {
     if sig == libc::SIGWINCH {
         RESIZED.store(1, Ordering::Relaxed);

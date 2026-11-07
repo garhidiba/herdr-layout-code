@@ -1,6 +1,6 @@
 //! vsedit: the terminal editor of the herdr-layout-vscode mods (mods/vscode-viewer/editor/vsedit.cjs) in Rust.
 //! usage: vsedit <file> [--close-on-exit] [--vscode <dir>] [--fallback <vsedit.cjs>]
-//!        vsedit --serve [--vscode <dir>]   (the tokenizer for the native editor mod: serve.rs)
+//!        vsedit --serve [--vscode <dir>]   (the editor for the native editor mod, over a socket: serve.rs)
 //! When it can't start (no grammars, no raw mode) it execs `node <vsedit.cjs>` with the same arguments before
 //! touching the terminal (the launcher, vsedit.sh, passes the path); without --fallback it exits 86 then.
 
@@ -15,6 +15,7 @@ mod errorpage;
 mod file;
 mod find;
 mod folding;
+mod frame;
 mod gitgutter;
 mod hexview;
 mod highlight;
@@ -72,6 +73,16 @@ fn vscode_dir(arg: Option<String>) -> PathBuf {
     exe.join("../mods/vscode-viewer/vscode")
 }
 
+/// Loads the shared key table; returns the grammar index and the theme (Null when it can't be read).
+fn setup(vscode: &Path) -> Result<(serde_json::Value, serde_json::Value), String> {
+    commands::load_commands(&vscode.join("../editor/keymap.json"))?;
+    let Ok(index) = std::fs::read_to_string(vscode.join("index.json")).map_err(|e| e.to_string()).and_then(|t| serde_json::from_str::<serde_json::Value>(&t).map_err(|e| e.to_string())) else {
+        return Err("no grammars at --vscode".into());
+    };
+    let theme = std::fs::read_to_string(vscode.join("theme.json")).ok().and_then(|t| vscode_textmate::parse_jsonc(&t).ok()).unwrap_or(serde_json::Value::Null);
+    Ok((index, theme))
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let (mut file, mut vscode, mut js, mut rest, mut serve) = (None, None, None, vec![], false);
@@ -113,13 +124,8 @@ fn main() {
     let cwd = std::env::current_dir().unwrap_or_default();
     let file = normalize(&cwd.join(arg));
     let vscode = vscode_dir(vscode);
-    if let Err(e) = commands::load_commands(&vscode.join("../editor/keymap.json")) {
-        fallback(&e); // a table this binary doesn't know (or none): the JS editor reads it
-    }
-    let Ok(index) = std::fs::read_to_string(vscode.join("index.json")).map_err(|e| e.to_string()).and_then(|t| serde_json::from_str::<serde_json::Value>(&t).map_err(|e| e.to_string())) else {
-        fallback("no grammars at --vscode");
-    };
-    let theme = std::fs::read_to_string(vscode.join("theme.json")).ok().and_then(|t| vscode_textmate::parse_jsonc(&t).ok()).unwrap_or(serde_json::Value::Null);
+    // a key table this binary doesn't know (or none), no grammars: the JS editor
+    let (index, theme) = setup(&vscode).unwrap_or_else(|e| fallback(&e));
     let colors = theme.get("colors").cloned().unwrap_or(serde_json::Value::Null);
 
     let Ok(mut term) = Term::new() else { fallback("no raw mode") };

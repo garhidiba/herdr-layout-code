@@ -22,10 +22,10 @@ use std::time::{Duration, Instant};
 const WORD_DELAY: Duration = Duration::from_millis(250);
 
 /// Occurrences to highlight and their colors.
-struct Hits {
-    list: Vec<Hit>,
+pub struct Hits {
+    pub list: Vec<Hit>,
     /// documentHighlight: which of `list` write (their colors are the strong ones); empty for plain occurrences.
-    writes: Vec<bool>,
+    pub writes: Vec<bool>,
     bg: String,
     ruler: String,
 }
@@ -444,7 +444,7 @@ impl Editor {
     }
 
     /// The bracket at the cursor and its partner, brackets in strings and comments not counting.
-    fn bracket_pair(&self) -> Vec<Pos> {
+    pub fn bracket_pair(&self) -> Vec<Pos> {
         let code = self.is_code();
         decorations::match_bracket(&self.buf.lines, self.head(), &code, 20000, false).map_or(vec![], |(a, b)| vec![a, b])
     }
@@ -464,7 +464,7 @@ impl Editor {
 
     /// Exact matches of a one-line selection, else whole-word matches of the resting word: the whole file up to
     /// 20,000 lines (for the overview ruler), else the visible lines.
-    fn highlights(&mut self, height: usize) -> Option<Hits> {
+    pub fn highlights(&mut self, height: usize) -> Option<Hits> {
         let (s, e) = self.range();
         let sel = (!self.empty() && s.line == e.line).then(|| self.buf.text(s, e)).filter(|t| !t.trim().is_empty());
         let word = self.resting_word();
