@@ -219,7 +219,7 @@ const gripArea = (edge, el) => el[`cursor_${CURSORS[edge]}_resize`]().on_mouse_d
 // stays where that press put it.
 function title() {
   const t = theme(), space = spaces().find(s => s.active), pinned = shared(PINNED) === true, inner = CORNER - GRIP;
-  const tool = (id, tip, on, child, action) => div().id(id).size(22).flex_none().flex().items_center().justify_center().rounded(5)
+  const tool = (id, tip, on, child, action) => div().id(id).size(26).flex_none().flex().items_center().justify_center().rounded(5)
     .cursor_pointer().tooltip(tip).text_color(on ? t.accent : t.muted).when(on, el => el.bg(t.selected))
     .hover(s => s.bg(t.hover).text_color(on ? t.accent : t.foreground))
     .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); action(); }).child(child);
@@ -233,8 +233,8 @@ function title() {
     .child(svg(ICON).size(14).flex_none().text_color(t.muted))
     .child(div().flex_none().font_semibold().child("Memo"))
     .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(space?.name ?? ""))
-    .child(tool("memo-pin", pinned ? "Unpin memo" : "Pin memo", pinned, svg(PIN).size(14), () => setShared(PINNED, !pinned)))
-    .child(tool("memo-close", "Close", false, "×", () => closePanel()))
+    .child(tool("memo-pin", pinned ? "Unpin memo" : "Pin memo", pinned, svg(PIN).size(16), () => setShared(PINNED, !pinned)))
+    .child(tool("memo-close", "Close", false, svg("mods/pane/close.svg").size(16), () => closePanel()))
     .child(gripArea("nw", div().id("memo-corner-nw").absolute().top(0).left(0).size(inner)))
     .child(gripArea("ne", div().id("memo-corner-ne").absolute().top(0).right(0).size(inner)));
 }
