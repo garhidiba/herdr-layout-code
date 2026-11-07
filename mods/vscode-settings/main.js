@@ -427,6 +427,8 @@ export default class Settings extends View {
         this.stepper(t, "files.autoSaveDelay", stepDelay)))
       .child(this.row(t, "Files", "Trim Trailing Whitespace", "Remove trailing whitespace when saving.", this.toggle(t, "files.trimTrailingWhitespace", "Trim Trailing Whitespace")))
       .child(this.row(t, "Files", "Insert Final Newline", "End the file with a newline when saving.", this.toggle(t, "files.insertFinalNewline", "Insert Final Newline")))
+      .child(this.section(t, "Explorer"))
+      .child(this.row(t, "Explorer", "Auto Reveal", "Reveal and select the active editor's file in the Explorer: its folders open and the tree scrolls to it.", this.toggle(t, "explorer.autoReveal", "Auto Reveal")))
       .child(this.section(t, "Editor"))
       .child(this.row(t, "Editor", "Format On Save", "Format the file when saving (needs a formatter for the language).", this.toggle(t, "editor.formatOnSave", "Format On Save")))
       .child(this.row(t, "Editor", "Tab Size", "Spaces a tab equals, for files with no indentation to detect (1–16).",

@@ -19,6 +19,7 @@ export const DEFAULTS = {
   "editor.wordWrap": "off",           // "off" | "on" | "wordWrapColumn" | "bounded" (mods/vscode-viewer/editor/wrap.cjs)
   "editor.wordWrapColumn": 80,        // 1-500
   "editor.wrappingIndent": "same",    // "none" | "same" | "indent" | "deepIndent"
+  "explorer.autoReveal": true,        // the Explorer reveals and highlights the active editor's file (vscode-explorer)
 };
 export const CHOICES = { "core.engine": ["js", "rust"], "editor.engine": ["js", "rust"], "files.autoSave": ["off", "afterDelay", "onFocusChange"],
   "editor.inlineSuggest.provider": ["ollama", "codestral", "deepseek", "mercury", "off"],

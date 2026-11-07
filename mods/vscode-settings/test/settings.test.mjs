@@ -160,3 +160,11 @@ test("word wrap: VS Code's modes and indents, the column clamped to 1-500, off /
   assert.equal(normalize({ "editor.wordWrap": "wrap" })["editor.wordWrap"], "off");
   assert.deepEqual(withSetting({}, "editor.wordWrapColumn", 0), { "editor.wordWrapColumn": 1 });
 });
+
+test("explorer.autoReveal: on by default, a boolean the toggle writes, anything else reads as on", () => {
+  assert.equal(normalize({})["explorer.autoReveal"], true);
+  assert.equal(normalize({ "explorer.autoReveal": false })["explorer.autoReveal"], false);
+  assert.equal(normalize({ "explorer.autoReveal": "no" })["explorer.autoReveal"], true);
+  assert.deepEqual(withSetting({ "my.key": 1 }, "explorer.autoReveal", false), { "my.key": 1, "explorer.autoReveal": false });
+  assert.throws(() => withSetting({}, "explorer.autoReveal", "off"));
+});

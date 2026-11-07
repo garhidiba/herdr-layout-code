@@ -17,6 +17,8 @@
   // Applied on every save (manual or auto).
   "files.trimTrailingWhitespace": false,
   "files.insertFinalNewline": false,
+  // The Explorer reveals and highlights the active editor's file (opens its folders, scrolls to it).
+  "explorer.autoReveal": true,
   // The top line: folders › file › the symbols around the cursor (false: the file name only).
   "breadcrumbs.enabled": true,
   // The hover (type and docs, problems) after the mouse pointer rests 300 ms on a word; ⌘K ⌘I / Ctrl+K Ctrl+I shows it either way.
