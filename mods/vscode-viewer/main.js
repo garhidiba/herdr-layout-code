@@ -8,8 +8,9 @@
 // its tab from closing, so unsaved text is kept as a hot-exit backup in close() and offered back on the next open.
 import { View, div, image, PathBuilder, Background } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState, TextView } from "gpui-base";
-import { props, readTextFile, writeTextFile, exec, theme, appHome, nextCommand, focused, panes, run, shared, setShared } from "herdr";
+import { props, readTextFile, writeTextFile, exec, theme, appHome, nextCommand, focused, panes, spaces, run, shared, setShared } from "herdr";
 import { FETCHED, POSTER, fetchFile, prune } from "./preview.js";
+import { ownPane } from "./pane.js";
 // Herdr starts with PATH=/usr/bin:/bin, so Homebrew/user tools (node, code, codex, trash) are looked up here too.
 const userExec = (cmd, args, opts) => exec("sh", ["-c", 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; exec "$0" "$@"', cmd, ...args], opts);
 
@@ -123,16 +124,13 @@ export default class Viewer extends View {
     this.code = null; this.dirty = false; this.conflict = false; this.wrap = false;
     this.error = null; this.table = null; this.language = "Plain Text"; this.facts = null;
     this.kind = kindOf(this.file ?? ""); this.preview = this.kind === "markdown"; this.img = null;
-    this.autoSave = { mode: "off", delay: 1 }; this.autoToken = 0; this.hadFocus = false; this.restore = null; this.pane = null; this.clicked = 0;
+    this.autoSave = { mode: "off", delay: 1 }; this.autoToken = 0; this.hadFocus = false; this.restore = null; this.pane = null;
     this.load(cx);
     cx.timer.every(3000, cx => this.load(cx));
     cx.spawn(async cx => { for (;;) { const c = await nextCommand(); if (c === "save") await this.save(cx); } });
     // onFocusChange: save when this tab stops being the focused pane.
     cx.timer.every(500, cx => {
-      // Its own pane: Herdr gives a tab's mod no props().pane, so a click inside it (render: on_mouse_down) focuses its
-      // pane and the focused pane is it, read once the focus has settled; else the only viewer pane there is.
-      const f = focused()?.pane;
-      if (!this.pane && Date.now() - this.clicked < 2000 && panes().some(p => p.pane === f && p.mod === "vscode-viewer")) this.pane = f;
+      // Its own pane: props().pane (Herdr gives a tab's mod none), else learnPane's, else the only viewer pane there is.
       const mine = props().pane ?? this.pane ?? (panes().filter(p => p.mod === "vscode-viewer").length === 1 ? panes().find(p => p.mod === "vscode-viewer").pane : null);
       const now = !!mine && focused()?.pane === mine;
       if (this.hadFocus && !now && this.autoSave.mode === "onFocusChange") this.save(cx);
@@ -146,6 +144,18 @@ export default class Viewer extends View {
       }
       this.hadFocus = now;
     });
+  }
+
+  // Learns its own pane while on screen (pane.js ownPane: laid out or under the pointer means in the shown tab) and shares
+  // its file for moving it to another tab at once (vscode-tabs' move.js VIEWER_FILES; gone panes dropped).
+  learnPane(bounds) {
+    if (this.pane || props().pane) return;
+    const tab = spaces().find(s => s.active)?.tabs.find(t => t.active)?.id;
+    const pane = ownPane({ panes: panes(), tab, bounds, headers: shared("vscode-pane.bounds") });
+    const files = shared("vscode-viewer.files") ?? {}, live = new Set(panes().map(p => p.pane));
+    if (!pane || (files[pane] && files[pane].file !== this.file)) return; // another viewer's, as its opener recorded it
+    this.pane = pane;
+    setShared("vscode-viewer.files", { ...Object.fromEntries(Object.entries(files).filter(([k]) => live.has(k))), [this.pane]: { file: this.file, on: this.on } });
   }
 
   // Herdr calls this when the tab closes: keep unsaved text as a hot-exit backup (bounded: one stat and one write).
@@ -306,7 +316,8 @@ export default class Viewer extends View {
       .when(Boolean(this.icon), el => el.child(image(`mods/vscode-explorer/icons/${this.icon}.svg`).w(15).h(15).flex_none()))
       .child(div().flex_none().text_color(t.foreground).child(name));
     return v_flex().id("viewer").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
-      .on_mouse_down("left", () => { this.clicked = Date.now(); }) // tells the focus timer which pane is its own
+      .on_size_change(() => this.learnPane(null)).on_mouse_move((e) => this.learnPane(e.bounds))
+      .on_mouse_down("left", (e) => this.learnPane(e.bounds ?? null))
       .child(h_flex().h(30).flex_none().pl(16).pr(10).gap(6).items_center()
         .child(crumbs)
         .when(this.dirty, el => el.child(div().size(8).rounded(4).bg("#e5c07b").flex_none()))
