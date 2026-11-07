@@ -152,10 +152,10 @@ export default class Settings extends View {
   inlineSource() { return `${this.v[PROVIDER]} ${ownValue(this.v, this.v[PROVIDER], "endpoint")}`; }
   loadInline(cx) {
     const p = this.v[PROVIDER], source = this.inlineSource();
-    this.inl = { source, provider: p, listed: null, key: null, note: null, busy: false };
+    this.inl = { source, provider: p, listed: null, key: null, note: null, keyNote: null, busy: false };
     if (p === "off") return;
     cx.spawn(async (cx) => {
-      const [listed, key] = await Promise.all([this.inlineCli(["--models", p, ownValue(this.v, p, "endpoint")]), HOSTED_PROVIDERS.includes(p) ? this.inlineCli(["--key", p]) : null]);
+      const [listed, key] = await Promise.all([this.inlineCli(["--models", p, ownValue(this.v, p, "endpoint")]), this.inlineCli(["--key", p])]);
       if (this.inl.source !== source) return;
       Object.assign(this.inl, { listed, key });
       cx.notify();
@@ -177,8 +177,8 @@ export default class Settings extends View {
         if (r.error) throw new Error(r.error);
         this.keyInput.set_value("");
         this.inl.key = r;
-        this.inl.note = null;
-      } catch (e) { this.inl.note = `Cannot save the key: ${e.message}`; }
+        this.inl.keyNote = null;
+      } catch (e) { this.inl.keyNote = `Cannot save the key: ${e.message}`; }
       await exec("rm", ["-rf", dir]).catch(() => {});
       this.inl.busy = false;
       cx.notify();
@@ -188,7 +188,7 @@ export default class Settings extends View {
     const p = this.inl.provider;
     cx.spawn(async (cx) => {
       const r = await this.inlineCli(["--remove-key", p]);
-      this.inl.note = r.error ? `Cannot remove the key: ${r.error}` : "Removed from the keychain and vscode-secrets.json.";
+      this.inl.keyNote = r.error ? `Cannot remove the key: ${r.error}` : "Removed from the keychain and vscode-secrets.json.";
       this.inl.key = await this.inlineCli(["--key", p]);
       cx.notify();
     });
@@ -475,8 +475,7 @@ export default class Settings extends View {
       .child(this.row(t, "Editor", "Inline Suggestion Provider", "Ollama and LM Studio run a model on this machine or another one you set, free. Codestral (Mistral) and Mercury (Inception) are paid APIs with your key; they get the code around the cursor, 2,000 requests a day by default, and the status bar shows the cost.",
         this.segmented(t, PROVIDER, [["ollama", "Ollama"], ["lmstudio", "LM Studio"], ["codestral", "Codestral"], ["mercury", "Mercury"], ["off", "Off"]])))
       .when(Boolean(LOCAL_PROVIDERS[this.v[PROVIDER]]), (el) => el.child(this.serverRow(t)))
-      .when(this.v[PROVIDER] !== "off", (el) => el.child(this.modelRow(t)))
-      .when(HOSTED_PROVIDERS.includes(this.v[PROVIDER]), (el) => el.child(this.apiKeyRow(t)));
+      .when(this.v[PROVIDER] !== "off", (el) => el.child(this.modelRow(t)).child(this.apiKeyRow(t)));
   }
 
   // A note under a row: red when something failed.
@@ -513,17 +512,20 @@ export default class Settings extends View {
       chips);
   }
 
+  // A hosted API's key, or a local server's optional one (its Test is the Server row's).
   apiKeyRow(t) {
-    const stored = Boolean(this.inl.key?.from && this.inl.key.from !== "env");
-    return this.row(t, "Editor", "API Key", "Saved in the macOS keychain (herdr-vscode-<provider>), elsewhere in vscode-secrets.json (mode 600); never in settings.json. Test sends one short completion.",
+    const stored = Boolean(this.inl.key?.from && this.inl.key.from !== "env"), hosted = HOSTED_PROVIDERS.includes(this.v[PROVIDER]);
+    const where = "Saved in the macOS keychain (herdr-vscode-<provider>), elsewhere in vscode-secrets.json (mode 600); never in settings.json.";
+    return this.row(t, "Editor", "API Key", hosted ? `${where} Test sends one short completion.` : `Optional: only if the server asks for a key (a proxy or a protected server). ${where}`,
       h_flex().gap(6).items_center()
         .child(div().w(200).h(28).px(8).flex().items_center().rounded(4).border_1().border_color(t.input).bg(t.background).text_size(12).child(Input.new(this.keyInput).w_full()))
         .child(this.button(t, "key-save", this.inl.busy ? "Saving…" : "Save", (_e, cx) => this.saveKey(cx), true))
         .when(stored, (el) => el.child(this.button(t, "key-remove", "Remove", (_e, cx) => this.removeKey(cx))))
-        .when(Boolean(this.inl.key?.from), (el) => el.child(this.button(t, "key-test", "Test", (_e, cx) => this.testProvider(cx)))),
+        .when(hosted && Boolean(this.inl.key?.from), (el) => el.child(this.button(t, "key-test", "Test", (_e, cx) => this.testProvider(cx)))),
       v_flex().gap(3)
-        .child(div().text_size(11.5).text_color(this.inl.key?.from ? t.done : t.dim).child(keyLine(this.inl.key)))
-        .when(Boolean(this.inl.note), (el) => el.child(this.note(t, this.inl.note))));
+        .child(div().text_size(11.5).text_color(this.inl.key?.from ? t.done : t.dim).child(keyLine(this.inl.key, !hosted)))
+        .when(Boolean(this.inl.keyNote), (el) => el.child(this.note(t, this.inl.keyNote)))
+        .when(hosted && Boolean(this.inl.note), (el) => el.child(this.note(t, this.inl.note))));
   }
 
   pageTab(t, page, text) {

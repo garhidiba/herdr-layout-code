@@ -119,14 +119,15 @@ export function modelChoices(current, listed) {
 }
 // Which choice the file's model picks (the default's own name picks the default).
 export const chosenModel = (current, listed) => (current === (listed?.recommended?.[0] ?? listed?.models?.[0]) ? "" : current);
-// The API Key row's line from `inline.cjs --key` (a stored key shows only its ends).
-export function keyLine(r) {
+// The API Key row's line from `inline.cjs --key` (a stored key shows only its ends); optional: a local server's key,
+// none being the usual case.
+export function keyLine(r, optional = false) {
   if (!r) return "Checking for a key…";
   if (r.error) return `Cannot check the key: ${r.error}`;
   if (r.from === "keychain") return `Saved in the macOS keychain: ${r.masked}`;
   if (r.from === "file") return `Saved in vscode-secrets.json (mode 600): ${r.masked}`;
   if (r.from === "env") return `From the environment: ${r.masked}. Editors Herdr opens may not see it; save it here.`;
-  return `No key yet${r.loose ? " (vscode-secrets.json is readable by others: chmod 600 it)" : ""}. Paste it and Save: it goes to the macOS keychain (elsewhere vscode-secrets.json, mode 600), never to settings.json.`;
+  return `${optional ? "No key (none needed unless the server asks for one)" : "No key yet"}${r.loose ? " (vscode-secrets.json is readable by others: chmod 600 it)" : ""}. Paste it and Save: it goes to the macOS keychain (elsewhere vscode-secrets.json, mode 600), never to settings.json.`;
 }
 
 // vsedit.sh's RUST_READY: the Rust editor has every JS editor feature, so without "editor.engine" it follows the core.

@@ -153,6 +153,9 @@ test("the API Key row shows where the key is and only its ends, or how to add on
   assert.match(keyLine({ from: null, loose: true }), /^No key yet \(vscode-secrets.json is readable by others: chmod 600 it\)\. .*never to settings.json/);
   assert.equal(keyLine(null), "Checking for a key…");
   assert.match(keyLine({ error: "node: not found" }), /Cannot check the key: node: not found/);
+  // a local server's key is optional: none is no warning
+  assert.match(keyLine({ from: null }, true), /^No key \(none needed unless the server asks for one\)\. .*never to settings.json/);
+  assert.equal(keyLine({ from: "keychain", masked: "••••" }, true), "Saved in the macOS keychain: ••••");
 });
 
 test("word wrap: VS Code's modes and indents, the column clamped to 1-500, off / 80 / same by default", () => {
