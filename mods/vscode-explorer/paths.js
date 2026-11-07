@@ -27,6 +27,32 @@ export function openArgs(file, { on = null, appHome, how = "auto", folder = pare
   return { name, folder, argv: ["exec", "sh", `${appHome}/${EDITOR}`, file, "--close-on-exit"] };
 }
 
+// The file an editor tab shows: the argument after the launcher (EDITOR, or remote.js's copy: both end in vsedit.sh) in
+// its terminal's argv, however Herdr wrapped it; null for any other program.
+export function editorFileOf(argv) {
+  const i = Array.isArray(argv) ? argv.findIndex(a => /(^|[\\/])vsedit\.sh$/.test(a)) : -1;
+  const file = i >= 0 ? argv[i + 1] : null;
+  return typeof file === "string" && file && !file.startsWith("-") ? file : null;
+}
+
+// VS Code's explorer.autoReveal in vscode-settings.json (comments and trailing commas allowed, as vscode-settings'
+// loose()): on unless it is false.
+export function autoRevealOf(text) {
+  try {
+    return JSON.parse(String(text ?? "").replace(/^﻿/, "").replace(/("(?:[^"\\]|\\.)*")|\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, (m, str) => str ?? "").replace(/,(\s*[}\]])/g, "$1"))?.["explorer.autoReveal"] !== false;
+  } catch { return true; }
+}
+
+// Where the tree reveals `file`: its path below `root` and the folders to open above it, outermost first; null for a
+// file outside the root (or the root itself), which leaves the tree as it is.
+export function revealPath(root, file) {
+  if (!root || !file) return null;
+  const base = root.endsWith("/") ? root : `${root}/`;
+  if (!file.startsWith(base) || file.length === base.length) return null;
+  const path = file.slice(base.length), parts = path.split("/");
+  return { path, folders: parts.slice(0, -1).map((_, i) => parts.slice(0, i + 1).join("/")) };
+}
+
 export const relativeTo = (root, abs) => (abs === root ? "." : abs.startsWith(root + "/") ? abs.slice(root.length + 1) : abs);
 
 // True when `target` is `dir` itself or below it (a folder can't be pasted into itself).

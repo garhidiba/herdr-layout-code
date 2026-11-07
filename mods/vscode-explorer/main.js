@@ -1,13 +1,15 @@
 // A lazy file explorer for the focused pane's folder, with Material Icon Theme icons.
 // Click a file to edit it in a new terminal tab (vsedit, on the remote machine for a remote space once installed
 // there); images open in the vscode-viewer mod tab. Cmd+click opens it in VS Code. Right-click opens a VS Code-style menu
-// (menu.js), which runs as an overlay of this same mod.
+// (menu.js), which runs as an overlay of this same mod. The active editor's file is revealed and highlighted in the tree
+// (VS Code's explorer.autoReveal).
 import { View, div, svg, image } from "gpui-kit";
-import { v_flex, h_flex } from "gpui-base";
-import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, window, appHome, props, shared, setShared, notify, nextCommand } from "herdr";
+import { v_flex, h_flex, Scrollbar, v_virtual_list, VirtualListScrollHandle } from "gpui-base";
+import { spaces, panes, focused, terminals, exec, readTextFile, watchFolder, theme, window, appHome, props, shared, setShared, notify, nextCommand } from "herdr";
 import { freshRoot, encode, decode } from "./cache.js";
 import { ExplorerMenu, ExplorerDialog, openMenu, openInCode, refreshKey, openFile, remote } from "./menu.js";
 import { createCore } from "./core.js";
+import { editorFileOf, autoRevealOf, revealPath } from "./paths.js";
 // Herdr starts with PATH=/usr/bin:/bin, so Homebrew/user tools (node, code, codex, trash) are looked up here too.
 const userExec = (cmd, args, opts) => exec("sh", ["-c", 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; exec "$0" "$@"', cmd, ...args], opts);
 
@@ -23,7 +25,20 @@ function location() {
   return lastRoot[space?.id] ?? freshRoot(space, panes());
 }
 const key = () => JSON.stringify(location());
-const PER_FOLDER = 500, TOTAL = 5000;
+const PER_FOLDER = 500, TOTAL = 5000, ROW = 22;
+
+// The file the focused tab shows, { file, on }: an editor terminal's (its argv), or a viewer tab's (it shares its file
+// when focused). null for any other tab; undefined while the focused terminal isn't listed yet.
+const VIEWER_FOCUS = "vscode-viewer.focused"; // vscode-viewer's
+function activeFile(f, viewer) {
+  if (f?.terminal) {
+    const term = terminals().find(t => t.address === f.terminal);
+    if (!term) return undefined;
+    const file = editorFileOf(term.argv);
+    return file && { file, on: f.terminal.includes("/") ? f.terminal.split("/")[0] : null };
+  }
+  return f?.pane && viewer?.pane === f.pane && viewer.file ? { file: viewer.file, on: viewer.on ?? null } : null;
+}
 // Other spaces' trees load in the background: 3s after start, 2 at a time, again every 10 minutes
 // (and when a space appears), skipping ones loaded in the last 2 minutes.
 const CACHE = "vscode-explorer.cache", FRESH = 120000, PRELOAD_EVERY = 600000, SAVE_EVERY = 60000, REMOTE_POLL = 3000;
@@ -115,6 +130,7 @@ export default class Files extends View {
     Object.assign(lastRoot, restored.lastRoot);
     this.entries = new Map(); this.folders = new Set(); this.pending = new Set(); this.marks = {}; this.dirty = new Map();
     this.icons = null;
+    this.scroll = VirtualListScrollHandle.new();
     cx.spawn(async cx => {
       try { this.icons = JSON.parse(await readTextFile(`${appHome()}/mods/vscode-explorer/icons.json`)); } catch {}
       cx.notify();
@@ -225,7 +241,7 @@ export default class Files extends View {
       const saved = this.saved.get(next);
       this.context = { key: next, cwd, on }; this.root = cwd; this.on = on; this.entries = new Map(saved?.entries); this.folders = new Set(saved?.folders);
       this.pending = new Set(); this.marks = saved?.marks ?? {}; this.dirty = new Map(saved?.dirty); this.watched = null; this.error = null; this.limited = false;
-      this.loading = false;
+      this.loading = false; this.active = null; this.revealing = null;
     }
     if (!cwd || this.loading) return;
     const context = this.context;
@@ -258,19 +274,56 @@ export default class Files extends View {
         this.folders.delete(folder);
         this.entries.delete(folder);
       }
-    } else {
-      this.folders.add(path);
-      if (!this.entries.has(path) && !this.pending.has(path)) {
-        const context = this.context;
-        this.pending.add(path);
-        cx.spawn(async cx => {
-          try { await this.loadFolder(path, context); }
-          catch (e) { if (this.current(context)) this.error = String(e); }
-          finally { if (this.context === context) this.pending.delete(path); cx.notify(); }
-        });
-      }
-    }
+    } else this.expand(path, cx);
     cx.notify();
+  }
+
+  // Opens a folder, listing it unless it is listed or being listed.
+  expand(path, cx) {
+    this.folders.add(path);
+    if (this.entries.has(path) || this.pending.has(path)) return;
+    const context = this.context;
+    this.pending.add(path);
+    cx.spawn(async cx => {
+      try { await this.loadFolder(path, context); }
+      catch (e) { if (this.current(context)) this.error = String(e); }
+      finally { if (this.context === context) this.pending.delete(path); cx.notify(); }
+    });
+  }
+
+  // Once per focused tab (and tree): an editor's file below the root gets its folders opened, its row highlighted and
+  // scrolled to (render() does that once the row is listed). Any other tab or file keeps the last highlight, as VS
+  // Code does. The setting is read then, so turning it off in Settings applies from the next tab.
+  autoReveal(cx) {
+    const f = focused(), viewer = shared(VIEWER_FOCUS);
+    const sig = JSON.stringify([this.context?.key, f?.terminal, f?.pane, viewer]);
+    if (sig === this.revealSig || !this.root) return;
+    const active = activeFile(f, viewer);
+    if (active === undefined) return;
+    this.revealSig = sig;
+    if (!active || active.on !== this.on) return;
+    const context = this.context;
+    cx.spawn(async cx => {
+      const on = autoRevealOf(await readTextFile(`${appHome()}/vscode-settings.json`).catch(() => null));
+      if (this.context !== context || this.revealSig !== sig) return;
+      const target = on ? revealPath(this.root, active.file) : null;
+      if (!on) this.active = null;
+      if (target) {
+        this.active = target.path; this.revealing = target;
+        for (const folder of target.folders) this.expand(folder, cx);
+      }
+      cx.notify();
+    });
+  }
+
+  // Scrolls to the revealed row once it is listed (nothing moves when it is on screen already); gives up when its
+  // folders are listed without it.
+  scrollToRevealed(rows) {
+    const target = this.revealing;
+    if (!target) return;
+    const i = rows.findIndex(r => r.path === target.path);
+    if (i >= 0) this.scroll.scroll_to_item(i);
+    if (i >= 0 || target.folders.every(f => !this.pending.has(f))) this.revealing = null;
   }
 
   open(path, cx) {
@@ -284,28 +337,39 @@ export default class Files extends View {
     if (this.root) openMenu({ path: abs, root: this.root, dir, on: this.on });
   }
 
-  // `inherited` is "U" below an untracked folder: git lists the folder once, its files are untracked too.
-  rows(prefix, depth, out, t, inherited = null) {
+  // The shown rows as data (the virtual list draws the visible ones). `inherited` is "U" below an untracked folder:
+  // git lists the folder once, its files are untracked too.
+  rows(prefix, depth, out, inherited = null) {
     if (out.length >= TOTAL || depth > 40) return out;
     for (const entry of this.entries.get(prefix) ?? []) {
       if (out.length >= TOTAL) break;
       const path = prefix ? `${prefix}/${entry.name}` : entry.name, abs = `${this.root}/${path}`, open = this.folders.has(path), own = this.marks[abs];
-      const status = own ?? (entry.dir ? this.dirty.get(abs) : null) ?? inherited, color = GIT_COLOR[status], icon = this.icon(entry.name, entry.dir, open);
-      out.push(h_flex().id(`file-${path}`).h(22).flex_none().pl(6 + depth * 12).pr(8).gap(5).items_center().rounded(4).cursor_pointer().hover(s => s.bg(t.hover))
-        .on_mouse_down("right", (_e, cx) => this.menu(abs, entry.dir, cx))
-        .on_click((e, cx) => {
-          if (entry.dir) return this.toggle(path, cx);
-          if (e.modifiers.platform && !this.on) userExec("code", [abs]).catch(() => {});
-          else if (e.modifiers.platform) openInCode(abs, this.on).catch(err => notify({ title: "Explorer", body: String(err?.message ?? err), level: "error" }));
-          else this.open(path, cx);
-        })
-        .child(entry.dir ? svg(`mods/vscode-explorer/chevron-${open ? "down" : "right"}.svg`).size(12).flex_none().text_color(t.dim) : div().w(12).flex_none())
-        .child(icon ? image(`mods/vscode-explorer/icons/${icon}.svg`).w(16).h(16).flex_none() : div().w(16).flex_none())
-        .child(div().flex_1().min_w(0).truncate().text_color(color ?? t.foreground).child(entry.name))
-        .when(Boolean(status), el => el.child(entry.dir ? div().size(6).rounded(3).bg(color).flex_none() : div().text_size(11).text_color(color).child(status))));
-      if (entry.dir && open) this.rows(path, depth + 1, out, t, own === "U" ? "U" : inherited);
+      const status = own ?? (entry.dir ? this.dirty.get(abs) : null) ?? inherited;
+      out.push({ path, abs, depth, open, status, name: entry.name, dir: entry.dir });
+      if (entry.dir && open) this.rows(path, depth + 1, out, own === "U" ? "U" : inherited);
     }
     return out;
+  }
+
+  // The active editor's file takes the selection color (VS Code's list.inactiveSelectionBackground).
+  row(r, t) {
+    const color = GIT_COLOR[r.status], icon = this.icon(r.name, r.dir, r.open), active = r.path === this.active;
+    return h_flex().w_full().h(ROW).flex_none().pl(6 + r.depth * 12).pr(8).gap(5).items_center().rounded(4).cursor_pointer()
+      .when(active, el => el.bg(t.selected)).when(!active, el => el.hover(s => s.bg(t.hover)))
+      .child(r.dir ? svg(`mods/vscode-explorer/chevron-${r.open ? "down" : "right"}.svg`).size(12).flex_none().text_color(t.dim) : div().w(12).flex_none())
+      .child(icon ? image(`mods/vscode-explorer/icons/${icon}.svg`).w(16).h(16).flex_none() : div().w(16).flex_none())
+      .child(div().flex_1().min_w(0).truncate().text_color(color ?? t.foreground).child(r.name))
+      .when(Boolean(r.status), el => el.child(r.dir ? div().size(6).rounded(3).bg(color).flex_none() : div().text_size(11).text_color(color).child(r.status)));
+  }
+
+  // Virtual list rows take no handlers of their own: the list reports the clicked row, and the tree's mouse-down
+  // (which comes first) remembers whether Cmd was held.
+  click(r, cx) {
+    if (!r) return;
+    if (r.dir) return this.toggle(r.path, cx);
+    if (this.platform && !this.on) userExec("code", [r.abs]).catch(() => {});
+    else if (this.platform) openInCode(r.abs, this.on).catch(err => notify({ title: "Explorer", body: String(err?.message ?? err), level: "error" }));
+    else this.open(r.path, cx);
   }
 
   render(cx) {
@@ -314,13 +378,22 @@ export default class Files extends View {
     // A file operation from the menu asks for a reload.
     const asked = shared(refreshKey);
     if (asked !== this.asked) { if (this.asked !== undefined) this.refresh(cx); this.asked = asked; }
-    const t = theme();
+    this.autoReveal(cx);
+    const t = theme(), rows = this.rows("", 0, []), byPath = new Map(rows.map(r => [r.path, r]));
+    this.scrollToRevealed(rows);
     return v_flex().id("explorer").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
       .child(h_flex().h(36).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .child(div().font_semibold().child("Explorer"))
         .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim).child(this.root?.split(/[\\/]/).pop() ?? "")))
-      .child(v_flex().id("explorer-tree").flex_1().min_h(0).overflow_y_scrollbar().p(4)
-        .on_mouse_down("right", (_e, cx) => this.menu(this.root, true, cx)).children(this.rows("", 0, [], t))
+      .child(v_flex().id("explorer-tree").flex_1().min_h(0).p(4)
+        .on_mouse_down("left", e => { this.platform = Boolean(e.modifiers?.platform); })
+        .on_mouse_down("right", (_e, cx) => this.menu(this.root, true, cx))
+        .when(rows.length > 0, el => el.child(div().flex_1().min_h(0).relative()
+          .child(v_virtual_list("explorer-rows", rows.length, ROW, i => rows[i].path, range => rows.slice(range.start, range.end).map(r => this.row(r, t)))
+            .size_full().track_scroll(this.scroll)
+            .on_item_click((path, cx) => this.click(byPath.get(path), cx))
+            .on_item_secondary_click((path, _e, cx) => { const r = byPath.get(path); if (r) this.menu(r.abs, r.dir, cx); }))
+          .child(Scrollbar.vertical("explorer-rows").viewport_from_layout().absolute().inset_0())))
         .when(Boolean(this.error) || !this.entries.get("")?.length, el => el.child(div().p(8).text_size(12).text_color(t.dim).child(this.error || (this.loading ? "Loading files…" : this.root ? "No files" : "No folder"))))
         .when(this.limited, el => el.child(div().p(8).text_size(11).text_color(t.dim).child("File list limited to 500 entries per folder and 5,000 total"))));
   }

@@ -1,7 +1,7 @@
 // node --test mods/vscode-explorer/test/paths.test.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
-import { openArgs, wantsEditor, isMarkdown, relativeTo, within, copyName, freeName, nameProblem, menuItems, menuHeight, parentOf, openWith, vscodeRemoteArgs } from "../paths.js";
+import { openArgs, wantsEditor, isMarkdown, relativeTo, within, copyName, freeName, nameProblem, menuItems, menuHeight, parentOf, openWith, vscodeRemoteArgs, editorFileOf, autoRevealOf, revealPath } from "../paths.js";
 
 const home = "/Users/me/.config/herdr-app";
 
@@ -104,4 +104,34 @@ test("VS Code opens a remote path through Remote-SSH on plain ssh machines only"
   assert.equal(vscodeRemoteArgs({ ...box, via: "fly ssh console" }, "/srv", true), null);
   assert.equal(vscodeRemoteArgs({ ...box, target: "a b/c" }, "/srv", true), null);
   assert.equal(vscodeRemoteArgs(null, "/srv", true), null);
+});
+
+test("an editor tab's file is the argument after the vsedit launcher, wrapped or not; other programs have none", () => {
+  const local = openArgs("/p/src/a.ts", { appHome: home }).argv;
+  assert.equal(editorFileOf(local), "/p/src/a.ts");
+  assert.equal(editorFileOf(["/bin/zsh", "-lic", '"$@"; exec "$0" -li', ...local]), "/p/src/a.ts"); // inside Herdr's shell
+  assert.equal(editorFileOf(["/bin/sh", "-c", "find", "sh", "/home/me/.herdr-vscode/3/vsedit.sh", "/srv/x.go", "--close-on-exit", "--os", "linux"]), "/srv/x.go");
+  for (const argv of [["/bin/zsh", "-l"], ["claude"], ["sh", "/a/vsedit.sh"], ["sh", "/a/vsedit.sh", "--help"], [], null, undefined]) {
+    assert.equal(editorFileOf(argv), null, JSON.stringify(argv));
+  }
+});
+
+test("revealing a file opens every folder above it, outermost first", () => {
+  assert.deepEqual(revealPath("/p", "/p/src/lib/a.ts"), { path: "src/lib/a.ts", folders: ["src", "src/lib"] });
+  assert.deepEqual(revealPath("/p", "/p/README.md"), { path: "README.md", folders: [] });
+  assert.deepEqual(revealPath("/", "/etc/hosts"), { path: "etc/hosts", folders: ["etc"] });
+});
+
+test("a file outside the tree's root (another folder, a settings file) leaves the tree as it is", () => {
+  for (const file of ["/other/a.ts", "/project-b/a.ts", "/p", "/p/", "/Users/me/.config/herdr-app/vscode-settings.json", "", null]) {
+    assert.equal(revealPath("/p", file), null, String(file));
+  }
+  assert.equal(revealPath(null, "/p/a.ts"), null);
+});
+
+test("explorer.autoReveal is on unless the settings file turns it off", () => {
+  for (const text of [null, "", "{}", '{ "explorer.autoReveal": true }', "{ broken", '{ "explorer.autoReveal": "no" }']) {
+    assert.equal(autoRevealOf(text), true, String(text));
+  }
+  assert.equal(autoRevealOf('// mine\n{ "explorer.autoReveal": false, /* x */ }'), false);
 });

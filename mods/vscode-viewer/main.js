@@ -128,6 +128,8 @@ export default class Viewer extends View {
       const mine = props().pane ?? (panes().filter(p => p.mod === "vscode-viewer").length === 1 ? panes().find(p => p.mod === "vscode-viewer").pane : null);
       const now = !!mine && focused()?.pane === mine;
       if (this.hadFocus && !now && this.autoSave.mode === "onFocusChange") this.save(cx);
+      // The Explorer reveals the focused tab's file (its autoReveal).
+      if (now && !this.hadFocus) setShared("vscode-viewer.focused", { pane: mine, file: this.file, on: this.on });
       this.hadFocus = now;
     });
   }
