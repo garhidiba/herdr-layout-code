@@ -1,7 +1,7 @@
 // node --test mods/vscode-explorer/test/paths.test.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
-import { openArgs, wantsEditor, isMarkdown, relativeTo, within, copyName, freeName, nameProblem, menuItems, menuHeight, parentOf, openWith, vscodeRemoteArgs, editorFileOf, autoRevealOf, revealPath, normalPath, editorTabOf, editorPaneOf, deleteTitle, extraLines } from "../paths.js";
+import { openArgs, wantsEditor, isMarkdown, relativeTo, within, copyName, freeName, nameProblem, menuItems, menuHeight, parentOf, openWith, vscodeRemoteArgs, editorFileOf, autoRevealOf, revealPath, normalPath, editorTabOf, editorPaneOf, deleteTitle, extraLines, closesForDeleted } from "../paths.js";
 
 test("a dialog grows by the lines a long file name wraps onto, and not for a short one", () => {
   assert.equal(deleteTitle("/p/Invoice-44K7PLUN-0001 copy 2.pdf"), "Are you sure you want to delete 'Invoice-44K7PLUN-0001 copy 2.pdf'?");
@@ -179,4 +179,37 @@ test("a file open in an editor tab of the space is found there, on its machine o
   const shared = [...panes, { pane: "p6", tab: "tb1", terminal: "t6" }], more = [...terminals, editor("t6", "/p/b.go")];
   assert.deepEqual(editorPaneOf("/p/b.go", null, space, shared, more), { pane: "p6", tab: "tb1", terminal: "t6" });
   assert.equal(editorTabOf("/p/b.go", null, space, shared, more), "tb1");
+});
+
+test("deleting a file or a folder closes the panes showing it, and their tab when nothing else is in it", () => {
+  const editor = (address, file) => ({ address, argv: ["sh", `${home}/mods/vscode-viewer/editor/vsedit.sh`, file, "--close-on-exit"] });
+  const spaces = [{ id: "s1", tabs: [{ id: "a" }, { id: "b" }, { id: "c" }, { id: "d" }, { id: "e" }] }, { id: "s2", tabs: [{ id: "f" }] }];
+  const panes = [
+    { pane: "pa", tab: "a", terminal: "ta", title: "x.ts — vsedit" },     // /p/src/x.ts alone
+    { pane: "pb", tab: "b", terminal: "tb", title: "y.ts — vsedit" },     // /p/src/sub/y.ts beside a shell
+    { pane: "pb2", tab: "b", terminal: "tsh", title: "zsh" },
+    { pane: "pc", tab: "c", terminal: "tc", title: "● z.ts — vsedit" },   // unsaved
+    { pane: "pd", tab: "d", terminal: null, mod: "vscode-viewer" },       // cat.png viewer
+    { pane: "pe", tab: "e", terminal: "te", title: "x.ts — vsedit" },     // another folder's x.ts
+    { pane: "pf", tab: "f", terminal: "box/tf", title: "x.ts — vsedit" }, // /p/src/x.ts on box
+  ];
+  const terminals = [editor("ta", "/p/src/x.ts"), editor("tb", "/p/src/sub/y.ts"), { address: "tsh", argv: ["/bin/zsh"] },
+    editor("tc", "/p/src/z.ts"), editor("te", "/p/srcx/x.ts"), editor("box/tf", "/p/src/x.ts")];
+  const viewers = { pd: { file: "/p/src/cat.png", on: null } };
+  const of = (path, on = null, more = {}) => closesForDeleted(path, on, { spaces, panes, terminals, viewers, ...more });
+
+  assert.deepEqual(of("/p/src/x.ts"), [["tab.close", { id: "a" }]], "its editor's tab; the same path on box stays");
+  assert.deepEqual(of("/p/src/sub/y.ts"), [["pane.close", { pane: "pb" }]], "the shell beside it keeps the tab");
+  assert.deepEqual(of("/p/src/z.ts"), [], "an unsaved editor stays");
+  assert.deepEqual(of("/p/src/z.ts", null, { panes: panes.map(p => (p.pane === "pc" ? { ...p, title: "z.ts — vsedit (closing)" } : p)) }), [],
+    "one asking Save / Don't Save stays too");
+  assert.deepEqual(of("/p/src/cat.png"), [["tab.close", { id: "d" }]], "a viewer");
+  assert.deepEqual(of("/p//src/"), [["tab.close", { id: "a" }], ["tab.close", { id: "d" }], ["pane.close", { pane: "pb" }]],
+    "a folder: everything below it, not /p/srcx");
+  assert.deepEqual(of("/p/src/x.ts", "box"), [["tab.close", { id: "f", confirmed: true }]], "on its machine; its space's last tab is confirmed");
+  assert.deepEqual(of("/p/src/cat.png", null, { viewers: { pd: { file: "/p/src/cat.png", dirty: true } } }), [], "an unsaved viewer stays");
+  assert.deepEqual(of("/p/src/cat.png", null, { viewers: {}, focusedViewer: { pane: "pd", file: "/p/src/cat.png", on: null } }),
+    [["tab.close", { id: "d" }]], "a viewer known only as the focused one");
+  assert.deepEqual(of("/p/src/cat.png", "box"), [], "a viewer of this computer's file, not box's");
+  assert.deepEqual(of("/p/none.ts"), []);
 });

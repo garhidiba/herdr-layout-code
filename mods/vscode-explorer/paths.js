@@ -240,6 +240,37 @@ export function closeArgs(action, tabs, id, files, dirty = new Set()) {
   return picked.map((t, i) => (picked.length === tabs.length && i === picked.length - 1 ? { id: t.id, confirmed: true } : { id: t.id }));
 }
 
+// What closes once `path` (a file, or a folder: everything below it) is deleted on machine `on` (null: this computer):
+// [command, args] pairs for every pane showing it in any space, an editor terminal (editorFileOf) or a viewer pane
+// (`viewers`: vscode-viewer's { [pane]: { file, on, dirty } }, plus the last focused one, `focusedViewer`). An editor
+// with unsaved changes (its title's ●) stays, as VS Code keeps a deleted file's dirty editor, and so does a dirty viewer.
+// A tab left with nothing else closes whole (confirmed when it is its space's last: the space stays as a gray row, as
+// closeArgs); otherwise only the pane closes, so a tab holding other panes (vscode-tabs' move.js) keeps them.
+export function closesForDeleted(path, on, { spaces, panes, terminals, viewers = {}, focusedViewer = null }) {
+  const gone = normalPath(path), term = new Map(terminals.map(t => [t.address, t]));
+  const hit = (file) => typeof file === "string" && within(normalPath(file), gone);
+  const machine = (address) => (address.includes("/") ? address.split("/")[0] : null);
+  const unsaved = (title) => isEditorTitle(title) && (title.startsWith("● ") || title.endsWith(" (closing)"));
+  const viewerOf = (pane) => viewers?.[pane] ?? (focusedViewer?.pane === pane ? focusedViewer : null);
+  const closes = (p) => {
+    if (p.terminal) {
+      const t = term.get(p.terminal);
+      return machine(p.terminal) === (on ?? null) && hit(editorFileOf(t?.argv, t?.labels)) && !unsaved(p.title);
+    }
+    const v = p.mod === "vscode-viewer" && viewerOf(p.pane);
+    return Boolean(v) && (v.on ?? null) === (on ?? null) && hit(v.file) && !v.dirty;
+  };
+  const closing = new Set(panes.filter(closes).map(p => p.pane));
+  const out = [];
+  for (const space of spaces ?? []) {
+    const whole = space.tabs.filter(t => panes.some(p => p.tab === t.id) && panes.every(p => p.tab !== t.id || closing.has(p.pane)));
+    whole.forEach((t, i) => out.push(["tab.close", whole.length === space.tabs.length && i === whole.length - 1 ? { id: t.id, confirmed: true } : { id: t.id }]));
+    const shut = new Set(whole.map(t => t.id)), mine = new Set(space.tabs.map(t => t.id));
+    for (const p of panes) if (closing.has(p.pane) && mine.has(p.tab) && !shut.has(p.tab)) out.push(["pane.close", { pane: p.pane }]);
+  }
+  return out;
+}
+
 // pane.split args showing the tab's file again on the right: the editor launcher with the same arguments (`argv` from
 // the launcher on; in a remote space it runs on that machine), or a viewer pane.
 export const splitArgs = ({ pane, argv, file, on }) => (argv

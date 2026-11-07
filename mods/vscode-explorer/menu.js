@@ -6,7 +6,7 @@ import { exec, hc, run, spaces, panes, terminals, machines, props, openOverlay, 
 import { createOpenTab, noteViewer } from "./launch.js";
 import { createWarmPool, TIMING } from "./warm.js";
 import { menuItems, menuHeight, openWith, baseName, parentOf, relativeTo, nameProblem, vscodeRemoteArgs, isMarkdown, editorPaneOf,
-  tabMenuItems, moveRows, outRows, moveOf, closeArgs, fileTabs, splitArgs, clipboardCommand, revealCommand, withDetails, deleteTitle, extraLines, DETAILS } from "./paths.js";
+  tabMenuItems, moveRows, outRows, moveOf, closeArgs, fileTabs, splitArgs, clipboardCommand, revealCommand, withDetails, deleteTitle, extraLines, closesForDeleted, DETAILS } from "./paths.js";
 import { createOps } from "./ops.js";
 import { createSplitOpen } from "./split.js";
 import { createRemote, createOpenFile, keysOs, ROOT, INSTALL_COMMAND, INSTALL_REQUEST } from "./remote.js";
@@ -33,6 +33,9 @@ const rememberViewer = (pane, file) => {
   const live = new Set(panes().map(p => p.pane));
   setShared(VIEWER_FILES, { ...Object.fromEntries(Object.entries(shared(VIEWER_FILES) ?? {}).filter(([k]) => live.has(k))), [pane]: file });
 };
+// A deleted file's or folder's tabs and panes close, but not unsaved editors (paths.js closesForDeleted).
+const closeDeleted = (path, on) => closesForDeleted(path, on, { spaces: spaces(), panes: panes(), terminals: terminalRows(),
+  viewers: shared(VIEWER_FILES), focusedViewer: shared("vscode-viewer.focused") }).forEach(([name, args]) => run(name, args));
 const openTab = createOpenTab({ hc, run, exec, spaces, panes, warm: warm.claim, log: logOpen, remember: rememberViewer });
 // The editor on a remote space's machine (remote.js): installing it is asked on each open with the shipped confirm dialog,
 // whose yes runs INSTALL_COMMAND for the tree (main.js), naming the machine in the shared value INSTALL_REQUEST.
@@ -262,11 +265,15 @@ export class ExplorerDialog {
   async apply(cx) {
     const s = this.spec, ops = createOps(exec, s.on ?? null);
     if (s.kind === "delete") {
-      if (!(await ops.exists(s.path))) return; // gone already (a stale row): submit() refreshes the tree, no error
-      if (s.on) return ops.remove(s.path);
-      const r = await sh(TRASH, s.path);
-      if (r.code !== 0) throw new Error(r.stderr.trim() || "Could not move to Trash");
-      return;
+      // Gone already (a stale row): no error, submit() refreshes the tree; its tabs close all the same.
+      if (await ops.exists(s.path)) {
+        if (s.on) await ops.remove(s.path);
+        else {
+          const r = await sh(TRASH, s.path);
+          if (r.code !== 0) throw new Error(r.stderr.trim() || "Could not move to Trash");
+        }
+      }
+      return closeDeleted(s.path, s.on ?? null);
     }
     const name = this.input.value().trim();
     const folder = s.kind === "rename" ? parentOf(s.path) : s.folder, target = `${folder}/${name}`;
