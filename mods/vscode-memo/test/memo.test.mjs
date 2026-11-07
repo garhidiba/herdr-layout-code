@@ -1,7 +1,7 @@
 // node --test mods/vscode-memo/test/memo.test.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MEMO, MIN, MEMO_SETTINGS, DEFAULT_POS, buttonRect, buttonPos, closesOnPress, memoTarget, clampRect, dragRect, panelRect, gitignoreAddition, dragStarted, memoSettings } from "../memo.js";
+import { MEMO, MIN, MEMO_SETTINGS, GRIP, CORNER, FOOT, panelLayout, closesOnPress, memoTarget, clampRect, dragRect, panelRect, gitignoreAddition, dragStarted, memoSettings } from "../memo.js";
 
 const panes = [
   { pane: "p1", tab: "t1", terminal: null, mod: "vscode-viewer", cwd: null },
@@ -40,20 +40,6 @@ test("dragging moves, and an edge or corner resizes with the opposite side fixed
   assert.ok(dragStarted({ x: 0, y: 0 }, { x: 4, y: 3 }));
 });
 
-test("the button starts bottom right, above the status bar, and keeps its corner as the window resizes", () => {
-  const win = { width: 1200, height: 800 };
-  assert.deepEqual(buttonRect(null, win), { x: 1144, y: 716, width: 40, height: 40 });
-  assert.deepEqual(buttonPos(buttonRect(null, win), win), DEFAULT_POS);
-  // Dragged to (300, 100): kept as offsets, so a wider, shorter window keeps it as far from the bottom-right corner.
-  const pos = buttonPos({ x: 300, y: 100, width: 40, height: 40 }, win);
-  assert.deepEqual(pos, { right: 860, bottom: 660 });
-  assert.deepEqual(buttonRect(pos, { width: 1400, height: 760 }), { x: 500, y: 60, width: 40, height: 40 });
-  // A window too small for that offset: kept inside it.
-  assert.deepEqual(buttonRect(pos, { width: 600, height: 400 }), { x: 0, y: 0, width: 40, height: 40 });
-  // A spot saved by the first version ({ x, y }) is used as is.
-  assert.deepEqual(buttonRect({ x: 216, y: 3 }, win), { x: 216, y: 3, width: 40, height: 40 });
-});
-
 test("a press outside closes the unpinned panel; inside, on the button or pinned it doesn't", () => {
   const panel = { x: 100, y: 100, width: 400, height: 300 }, button = { x: 900, y: 700, width: 40, height: 40 };
   const at = (x, y, pinned = false) => closesOnPress({ x, y }, { panel, button, pinned });
@@ -67,12 +53,34 @@ test("a press outside closes the unpinned panel; inside, on the button or pinned
   assert.ok(!closesOnPress({ x: 50, y: 50 }, { panel: null, button, pinned: false })); // no panel
 });
 
-test("the panel opens where it was left, else above the button and to its left", () => {
-  const win = { width: 1200, height: 800 }, button = buttonRect(null, win);
-  assert.deepEqual(panelRect(null, button, win), { x: 744, y: 368, width: 440, height: 340 });
+test("the panel opens where it was left, else above the button and to its left, else in the middle", () => {
+  const win = { width: 1200, height: 800 }, button = { x: 1150, y: 730, width: 34, height: 34 };
+  assert.deepEqual(panelRect(null, button, win), { x: 744, y: 382, width: 440, height: 340 });
   assert.deepEqual(panelRect({ x: 1000, y: 700, width: 300, height: 200 }, button, win), { x: 900, y: 600, width: 300, height: 200 });
   // A button near the top left: the panel stays in the window.
   assert.deepEqual(panelRect(null, { x: 0, y: 0, width: 40, height: 40 }, win), { x: 0, y: 0, width: 440, height: 340 });
+  // Opened by the toggle command before the button was ever pointed at.
+  assert.deepEqual(panelRect(null, null, win), { x: 380, y: 230, width: 440, height: 340 });
+});
+
+test("the panel's corners resize from CORNER px along both sides; its edges are GRIP px", () => {
+  const body = { type: "block", content: { terminal: "t1" } };
+  const [left, middle, right] = panelLayout("vscode-memo", body).children;
+  // A grip block as [edge, px] (null: it takes the rest).
+  const strip = (n) => n.children.map(c => [c.content.props.edge, c.size?.px ?? null]);
+  // The sides: GRIP px wide, a corner CORNER px tall at each end.
+  assert.equal(left.size.px, GRIP); assert.equal(right.size.px, GRIP);
+  assert.deepEqual(strip(left), [["nw", CORNER], ["w", null], ["sw", CORNER]]);
+  assert.deepEqual(strip(right), [["ne", CORNER], ["e", null], ["se", CORNER]]);
+  // The top (GRIP px) and bottom (FOOT px) strips: the corners go on CORNER px from the outside edge.
+  const [top, title, editor, bottom] = middle.children;
+  assert.equal(top.size.px, GRIP); assert.equal(bottom.size.px, FOOT);
+  assert.deepEqual(strip(top), [["nw", CORNER - GRIP], ["n", null], ["ne", CORNER - GRIP]]);
+  assert.deepEqual(strip(bottom), [["sw", CORNER - GRIP], ["s", null], ["se", CORNER - GRIP]]);
+  assert.ok(CORNER >= 14 && CORNER <= 16 && GRIP <= 6);
+  // Then the title bar (it fills the top corners' inside with its own grips) and the editor.
+  assert.equal(title.content.props.role, "title");
+  assert.equal(editor, body);
 });
 
 test(".gitignore gets the memo once, keeping its newline", () => {

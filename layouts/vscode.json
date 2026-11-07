@@ -16,16 +16,6 @@
     "width": 1,
     "color": "border"
   },
-  "floating": [
-    {
-      "id": "memo",
-      "content": {
-        "mod": "vscode-memo"
-      },
-      "edge": "bottom",
-      "align": "end"
-    }
-  ],
   "children": [
     {
       "id": "sidebar",
@@ -113,6 +103,16 @@
           "type": "row",
           "padding": 8,
           "gap": 8,
+          "floating": [
+            {
+              "id": "memo",
+              "content": {
+                "mod": "vscode-memo"
+              },
+              "edge": "bottom",
+              "align": "end"
+            }
+          ],
           "children": [
             {
               "id": "main",

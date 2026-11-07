@@ -1,12 +1,11 @@
-// The memo's pure rules: where a space's memo lives, the button's and the panel's rects (window coordinates, logical
-// px) while they are dragged, moved or resized, and the .gitignore line that keeps the memo out of git. No Herdr
+// The memo's pure rules: where a space's memo lives, the panel's rect (window coordinates, logical px) as it opens and
+// while it is moved or resized, its window's layout, and the .gitignore line that keeps the memo out of git. No Herdr
 // imports, so node tests load it.
 
 // Each space's memo, under its folder.
 export const MEMO = ".herdr/memo.md";
 
-// The button's size; the panel's default and smallest size.
-export const BUTTON = 40;
+// The panel's default and smallest size.
 export const PANEL = { width: 440, height: 340 };
 export const MIN = { width: 260, height: 160 };
 
@@ -35,7 +34,7 @@ export function clampRect(r, win) {
   };
 }
 
-// `r` after the pointer moved by (dx, dy) holding `edge`: "move" (the title bar, the button), or the border's side or
+// `r` after the pointer moved by (dx, dy) holding `edge`: "move" (the title bar), or the border's side or
 // corner ("n", "se", …). The opposite side stays put; no smaller than `min`.
 export function dragRect(r, edge, dx, dy, min = { width: 0, height: 0 }) {
   if (edge === "move") return { ...r, x: r.x + dx, y: r.y + dy };
@@ -47,26 +46,36 @@ export function dragRect(r, edge, dx, dy, min = { width: 0, height: 0 }) {
   return { x, y, width, height };
 }
 
-// The button's spot is kept as its distance from the window's right and bottom edges, so it stays in its corner as
-// the window resizes. First: 16 px in from the right, 16 px above the status bar (layouts/vscode.json: 28 px).
-export const DEFAULT_POS = { right: 16, bottom: 28 + 16 };
-// The button's rect in window `win` for its spot `pos` ({ right, bottom }; an older { x, y } as is), inside the window.
-export function buttonRect(pos, win) {
-  const p = pos?.right != null || pos?.x != null ? pos : DEFAULT_POS;
-  const x = p.right != null ? win.width - p.right - BUTTON : p.x, y = p.bottom != null ? win.height - p.bottom - BUTTON : p.y;
-  return clampRect({ x, y, width: BUTTON, height: BUTTON }, win);
-}
-// The spot to keep for a button at `r`.
-export const buttonPos = (r, win) => ({ right: Math.round(win.width - r.x - r.width), bottom: Math.round(win.height - r.y - r.height) });
-
 const inside = (r, p) => !!r && p.x >= r.x && p.x < r.x + r.width && p.y >= r.y && p.y < r.y + r.height;
 // Whether a press at `pos` closes the panel: an unpinned one, pressed outside it and outside the button (which toggles
 // it itself). Its title bar and border are inside: moving and resizing never close it.
 export const closesOnPress = (pos, { panel, button, pinned }) => !pinned && !!panel && !inside(panel, pos) && !inside(button, pos);
 
-// Where the panel opens: where it was left, else above the button and to its left, its right edge at the button's.
+// Where the panel opens: where it was left, else above the button (its bounds) and to its left, its right edge at the
+// button's; with neither known, in the middle of the window.
 export function panelRect(saved, button, win) {
-  return clampRect(saved ?? { x: button.x + button.width - PANEL.width, y: button.y - 8 - PANEL.height, ...PANEL }, win);
+  const fresh = button ? { x: button.x + button.width - PANEL.width, y: button.y - 8 - PANEL.height }
+    : { x: ((win?.width ?? PANEL.width) - PANEL.width) / 2, y: ((win?.height ?? PANEL.height) - PANEL.height) / 2 };
+  return clampRect(saved ?? { ...fresh, ...PANEL }, win);
+}
+
+// The panel window's layout: the title bar over `body` (the editor's terminal block), framed by grips of `mod` (role
+// "grip", props.edge) that resize it: GRIP px edges, and corners CORNER px along both sides; the title bar fills the
+// top corners' inside (its own grips), so they take a CORNER px square, and the bottom strip is FOOT px tall.
+export const GRIP = 5, CORNER = 16, TITLE = 30, FOOT = 12;
+export function panelLayout(mod, body) {
+  const grip = (edge, px) => ({ type: "block", ...(px ? { size: { px } } : {}), content: { mod, props: { role: "grip", edge } } });
+  const side = (top, edge, bottom) => ({ type: "column", size: { px: GRIP }, children: [grip(top, CORNER), grip(edge), grip(bottom, CORNER)] });
+  return { type: "row", children: [
+    side("nw", "w", "sw"),
+    { type: "column", children: [
+      { type: "row", size: { px: GRIP }, children: [grip("nw", CORNER - GRIP), grip("n"), grip("ne", CORNER - GRIP)] },
+      { type: "block", size: { px: TITLE }, content: { mod, props: { role: "title" } } },
+      body,
+      { type: "row", size: { px: FOOT }, children: [grip("sw", CORNER - GRIP), grip("s"), grip("se", CORNER - GRIP)] },
+    ] },
+    side("ne", "e", "se"),
+  ] };
 }
 
 // Lines that already ignore the memo when git can't say (no git, not a repo).
