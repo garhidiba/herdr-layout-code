@@ -4,13 +4,14 @@
 // (menu.js), which runs as an overlay of this same mod. The active editor's file is revealed and highlighted in the tree
 // (VS Code's explorer.autoReveal).
 import { View, div, svg, image } from "gpui-kit";
-import { v_flex, h_flex, Scrollbar, v_virtual_list, VirtualListScrollHandle } from "gpui-base";
+import { v_flex, h_flex } from "gpui-base";
 import { spaces, panes, focused, terminals, exec, hc, readTextFile, watchFolder, theme, window, appHome, props, shared, setShared, notify, nextCommand } from "herdr";
 import { freshRoot, encode, decode } from "./cache.js";
 import { ExplorerMenu, ExplorerDialog, TabMenu, openMenu, openInCode, refreshKey, openFile, remote, warm, REVEAL, terminalRows } from "./menu.js";
 import { WARM } from "./warm.js";
 import { createCore } from "./core.js";
-import { editorFileOf, autoRevealOf, revealPath, DETAILS } from "./paths.js";
+import { editorFileOf, autoRevealOf, revealPath, within, DETAILS } from "./paths.js";
+import { ROW, clampTop, rowAt, shown, scrollToShow, dragStarted, dropFolder, dragTarget, targetRange } from "./dnd.js";
 import { createDesktop } from "./desktop.js";
 import { createDetails } from "./details.js";
 import { createOps } from "./ops.js";
@@ -33,7 +34,7 @@ const key = () => JSON.stringify(location());
 const desktop = createDesktop({ hc, exec, appHome, notify });
 // Remote editors' argv and labels for terminalRows() (details.js), shared so vscode-tabs reads them too.
 const details = createDetails({ hc, publish: (d) => setShared(DETAILS, d) });
-const PER_FOLDER = 500, TOTAL = 5000, ROW = 22;
+const PER_FOLDER = 500, TOTAL = 5000;
 
 // The file the focused tab shows, { file, on }: an editor terminal's (its argv or label), or a viewer tab's (it shares its file
 // when focused). null for any other tab; undefined while the focused terminal isn't listed yet.
@@ -139,7 +140,10 @@ export default class Files extends View {
     Object.assign(lastRoot, restored.lastRoot);
     this.entries = new Map(); this.folders = new Set(); this.pending = new Set(); this.marks = {}; this.dirty = new Map();
     this.icons = null;
-    this.scroll = VirtualListScrollHandle.new();
+    // The tree scrolls itself (dnd.js): `top` pixels scrolled, `height` the viewport's. The handle takes the keyboard
+    // while a row is dragged, for Escape.
+    this.top = 0; this.height = 0;
+    this.handle = cx.focus_handle();
     cx.spawn(async cx => {
       try { this.icons = JSON.parse(await readTextFile(`${appHome()}/mods/vscode-explorer/icons.json`)); } catch {}
       cx.notify();
@@ -294,13 +298,17 @@ export default class Files extends View {
   }
 
   toggle(path, cx) {
-    if (this.folders.has(path)) {
-      for (const folder of [...this.folders]) if (folder === path || folder.startsWith(path + "/")) {
-        this.folders.delete(folder);
-        this.entries.delete(folder);
-      }
-    } else this.expand(path, cx);
+    if (this.folders.has(path)) this.forget(path);
+    else this.expand(path, cx);
     cx.notify();
+  }
+
+  // Closes the folder at `path` and every folder below it (collapsed, or moved away).
+  forget(path) {
+    for (const folder of [...this.folders]) if (within(folder, path)) {
+      this.folders.delete(folder);
+      this.entries.delete(folder);
+    }
   }
 
   // Opens a folder, listing it unless it is listed or being listed.
@@ -358,12 +366,13 @@ export default class Files extends View {
 
   // Scrolls to the revealed row once it is listed (nothing moves when it is on screen already); gives up when its
   // folders are listed without it.
+  // A reveal waits for the viewport's size, and for a reload under way (a copy shows up only once its folder is relisted).
   scrollToRevealed(rows) {
     const target = this.revealing;
-    if (!target) return;
+    if (!target || !this.height) return;
     const i = rows.findIndex(r => r.path === target.path);
-    if (i >= 0) this.scroll.scroll_to_item(i);
-    if (i >= 0 || target.folders.every(f => !this.pending.has(f))) this.revealing = null;
+    if (i >= 0) this.top = scrollToShow(this.top, i, this.height);
+    if (i >= 0 || (!this.loading && target.folders.every(f => !this.pending.has(f)))) this.revealing = null;
   }
 
   open(path, cx) {
@@ -377,7 +386,7 @@ export default class Files extends View {
     if (this.root) openMenu({ path: abs, root: this.root, dir, on: this.on });
   }
 
-  // The shown rows as data (the virtual list draws the visible ones). `inherited` is "U" below an untracked folder:
+  // The shown rows as data (render() draws the ones on screen). `inherited` is "U" below an untracked folder:
   // git lists the folder once, its files are untracked too.
   rows(prefix, depth, out, inherited = null) {
     if (out.length >= TOTAL || depth > 40) return out;
@@ -391,19 +400,78 @@ export default class Files extends View {
     return out;
   }
 
-  // The active editor's file takes the selection color (VS Code's list.inactiveSelectionBackground).
-  row(r, t) {
+  // The active editor's file takes the selection color (VS Code's list.inactiveSelectionBackground); the folder a drag
+  // would land in, and the rows below it, the hover color.
+  row(r, t, target) {
     const color = GIT_COLOR[r.status], icon = this.icon(r.name, r.dir, r.open), active = r.path === this.active;
     return h_flex().w_full().h(ROW).flex_none().pl(6 + r.depth * 12).pr(8).gap(5).items_center().rounded(4).cursor_pointer()
-      .when(active, el => el.bg(t.selected)).when(!active, el => el.hover(s => s.bg(t.hover)))
+      .when(active, el => el.bg(t.selected)).when(!active && target, el => el.bg(t.hover)).when(!active, el => el.hover(s => s.bg(t.hover)))
       .child(r.dir ? svg(`mods/vscode-explorer/chevron-${r.open ? "down" : "right"}.svg`).size(12).flex_none().text_color(t.dim) : div().w(12).flex_none())
       .child(icon ? image(`mods/vscode-explorer/icons/${icon}.svg`).w(16).h(16).flex_none() : div().w(16).flex_none())
       .child(div().flex_1().min_w(0).truncate().text_color(color ?? t.foreground).child(r.name))
       .when(Boolean(r.status), el => el.child(r.dir ? div().size(6).rounded(3).bg(color).flex_none() : div().text_size(11).text_color(color).child(r.status)));
   }
 
-  // Virtual list rows take no handlers of their own: the list reports the clicked row, and the tree's mouse-down
-  // (which comes first) remembers whether Cmd was held.
+  // A press on the rows: on a row it may become a drag (pointerMove), otherwise its release is a click (release).
+  press(e, rows) {
+    if (!e.local_position) return;
+    this.platform = Boolean(e.modifiers?.platform); // Cmd+click opens in VS Code
+    const i = rowAt(this.top, e.local_position.y, rows.length);
+    this.pressed = { i, row: rows[i], from: e.local_position, at: e.local_position, dragging: false, folder: null };
+  }
+
+  pointerMove(e, rows, cx) {
+    this.hoverY = e.local_position.y; // where a drop from Finder lands (render's on_drop)
+    if (this.thumb) {
+      const top = clampTop(this.thumb.top + (e.position.y - this.thumb.y) * this.thumb.ratio, rows.length, this.height);
+      if (top !== this.top) { this.top = top; cx.notify(); }
+      return;
+    }
+    const p = this.pressed;
+    if (!p?.row || (!p.dragging && !dragStarted(p.from, e.local_position))) return;
+    if (!p.dragging) { p.dragging = true; this.handle.focus(); }
+    p.at = e.local_position;
+    p.folder = dragTarget(p.row, rows, rowAt(this.top, p.at.y, rows.length));
+    cx.notify();
+  }
+
+  // A drag let go on a folder moves the row there (with Alt/Option, copies it); a press let go on the row it began on
+  // is a click.
+  release(e, rows, cx) {
+    const p = this.pressed;
+    this.pressed = null; this.thumb = null;
+    if (!p || !e.local_position) return cx.notify();
+    const i = rowAt(this.top, e.local_position.y, rows.length);
+    if (!p.dragging) return i >= 0 && i === p.i ? this.click(rows[i], cx) : undefined;
+    const folder = dragTarget(p.row, rows, i), r = p.row;
+    if (folder !== null) this.place(folder, e.modifiers?.alt
+      ? (ops, dir) => ops.paste({ path: r.abs, dir: r.dir, cut: false, on: this.on }, dir)
+      : async (ops, dir) => { const to = await ops.moveInto(r.abs, dir); if (to && r.dir) this.forget(r.path); return to; }, cx);
+    cx.notify();
+  }
+
+  // Ends a drag (or a scrollbar drag) without doing anything: Escape, or the pointer leaving the tree.
+  cancelDrag(cx) {
+    if (!this.pressed && !this.thumb) return;
+    this.pressed = null; this.thumb = null;
+    cx.notify();
+  }
+
+  // Runs a drop's or a drag's file operation into `folder` (below the root, "" for it), then shows the result: its
+  // folder opened, the first new entry selected and scrolled to. A failure is a toast.
+  place(folder, job, cx) {
+    const context = this.context, dir = folder ? `${this.root}/${folder}` : this.root;
+    cx.spawn(async cx => {
+      try {
+        const to = [].concat(await job(createOps(exec, this.on), dir)).find(Boolean);
+        if (this.context !== context) return;
+        if (to) this.reveal(to, cx);
+        this.refresh(cx);
+      } catch (err) { notify({ title: "Explorer", body: String(err?.message ?? err), level: "error" }); }
+      cx.notify();
+    });
+  }
+
   click(r, cx) {
     if (!r) return;
     if (r.dir) return this.toggle(r.path, cx);
@@ -431,27 +499,53 @@ export default class Files extends View {
     if (editorOn !== this.editorOn) { this.editorOn = editorOn; cx.spawn(() => desktop.mark(editorOn)); }
     const due = warm.due(); // a space without its warm editor (one was just used), or one to end
     if (due !== null) this.warmFill(cx, due);
-    const t = theme(), rows = this.rows("", 0, []), byPath = new Map(rows.map(r => [r.path, r]));
+    const t = theme(), rows = this.rows("", 0, []), count = rows.length;
     this.scrollToRevealed(rows);
+    const height = this.height, top = (this.top = clampTop(this.top, count, height)), over = count * ROW - height;
+    // Only the rows on screen are drawn (a tall screenful until the viewport's size is known), each at its scrolled y.
+    const [first, end] = shown(top, height || 1600, count);
+    const drag = this.pressed?.dragging ? this.pressed : null;
+    const [hiFrom, hiTo] = drag?.folder ? targetRange(rows, drag.folder) : [0, 0];
+    const thumb = Math.max(24, height * height / (count * ROW || 1));
     return v_flex().id("explorer").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
       .child(h_flex().h(36).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .child(div().font_semibold().child("Explorer"))
         .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim).child(this.root?.split(/[\\/]/).pop() ?? "")))
-      .child(v_flex().id("explorer-tree").flex_1().min_h(0).p(4)
-        .on_mouse_down("left", e => { this.platform = Boolean(e.modifiers?.platform); })
+      .child(v_flex().id("explorer-tree").flex_1().min_h(0).p(4).track_focus(this.handle)
+        .on_key_down((e, cx) => { if (e.key === "escape" && this.pressed) { cx.stop_propagation(); this.cancelDrag(cx); } })
         .on_mouse_down("right", (_e, cx) => this.menu(this.root, true, cx))
-        // Files dropped from Finder are copied into the tree's folder (ops.js drop). The drop names no row, so they
-        // land in the root wherever they are let go; the folder watch shows them.
+        // Files dropped from Finder are copied into the folder under the pointer (dnd.js dropFolder; ops.js drop): the
+        // drop names no position, so the last one the pointer reported over the rows says where; elsewhere the root.
         .on_drop((e, cx) => {
-          const [folder, on] = [this.root, this.on];
-          if (folder && e.paths?.length) cx.spawn(() => createOps(exec, on).drop(e.paths, folder).catch(err => notify({ title: "Explorer", body: String(err?.message ?? err), level: "error" })));
+          const i = this.hoverY == null ? -1 : rowAt(this.top, this.hoverY, count);
+          if (this.root && e.paths?.length) this.place(dropFolder(rows, i), (ops, dir) => ops.drop(e.paths, dir), cx);
         })
-        .when(rows.length > 0, el => el.child(div().flex_1().min_h(0).relative()
-          .child(v_virtual_list("explorer-rows", rows.length, ROW, i => rows[i].path, range => rows.slice(range.start, range.end).map(r => this.row(r, t)))
-            .size_full().track_scroll(this.scroll)
-            .on_item_click((path, cx) => this.click(byPath.get(path), cx))
-            .on_item_secondary_click((path, _e, cx) => { const r = byPath.get(path); if (r) this.menu(r.abs, r.dir, cx); }))
-          .child(Scrollbar.vertical("explorer-rows").viewport_from_layout().absolute().inset_0())))
+        .when(count > 0, el => el.child(div().id("explorer-rows").flex_1().min_h(0).relative().overflow_hidden()
+          .when(drag?.folder === "", el => el.bg(t.hover))
+          .on_size_change((s, cx) => { if (s.height !== this.height) { this.height = s.height; cx.notify(); } })
+          .on_scroll_wheel((e, cx) => {
+            const next = clampTop(this.top - (e.delta_lines ? e.delta_lines.y * ROW : e.delta.y), count, this.height);
+            if (next !== this.top) { this.top = next; cx.notify(); }
+          })
+          .on_mouse_down("left", e => this.press(e, rows))
+          .on_mouse_down("right", (e, cx) => {
+            const r = e.local_position ? rows[rowAt(this.top, e.local_position.y, count)] : null;
+            if (r) this.menu(r.abs, r.dir, cx);
+          })
+          .on_mouse_move((e, cx) => this.pointerMove(e, rows, cx))
+          .on_mouse_up("left", (e, cx) => this.release(e, rows, cx))
+          .on_hover((on, cx) => { if (!on) { this.hoverY = null; this.cancelDrag(cx); } })
+          .children(rows.slice(first, end).map((r, k) => this.row(r, t, first + k >= hiFrom && first + k < hiTo).absolute().left(0).top((first + k) * ROW - top)))
+          .when(over > 0 && height > 0, el => el.child(div().absolute().right(1).top((height - thumb) * top / over).w(6).h(thumb).rounded(3).bg(t.dim).opacity(0.45)
+            .on_mouse_down("left", (e, cx) => { cx.stop_propagation(); this.thumb = { y: e.position.y, top: this.top, ratio: over / (height - thumb) }; })))
+          // What is dragged, by the pointer: its icon and name.
+          .when(Boolean(drag), el => {
+            const icon = this.icon(drag.row.name, drag.row.dir, false);
+            return el.child(h_flex().absolute().left(drag.at.x + 14).top(drag.at.y + 6).h(ROW).px(8).gap(5).items_center().rounded(4)
+              .bg(t.popover).border_1().border_color(t.border).text_size(12)
+              .child(icon ? image(`mods/vscode-explorer/icons/${icon}.svg`).w(16).h(16).flex_none() : div())
+              .child(drag.row.name));
+          })))
         .when(Boolean(this.error) || !this.entries.get("")?.length, el => el.child(div().p(8).text_size(12).text_color(t.dim).child(this.error || (this.loading ? "Loading files…" : this.root ? "No files" : "No folder"))))
         .when(this.limited, el => el.child(div().p(8).text_size(11).text_color(t.dim).child("File list limited to 500 entries per folder and 5,000 total"))));
   }
