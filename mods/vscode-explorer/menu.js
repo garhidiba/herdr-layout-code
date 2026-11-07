@@ -6,7 +6,7 @@ import { exec, hc, run, spaces, panes, terminals, machines, props, openOverlay, 
 import { createOpenTab } from "./launch.js";
 import { createWarmPool, TIMING } from "./warm.js";
 import { menuItems, menuHeight, openWith, baseName, parentOf, relativeTo, nameProblem, vscodeRemoteArgs, isMarkdown, editorTabOf,
-  tabMenuItems, closeArgs, fileTabs, splitArgs, clipboardCommand, revealCommand, withDetails, DETAILS } from "./paths.js";
+  tabMenuItems, closeArgs, fileTabs, splitArgs, clipboardCommand, revealCommand, withDetails, deleteTitle, extraLines, DETAILS } from "./paths.js";
 import { createOps } from "./ops.js";
 import { createRemote, createOpenFile, keysOs, ROOT, INSTALL_COMMAND, INSTALL_REQUEST } from "./remote.js";
 
@@ -117,7 +117,7 @@ export class ExplorerMenu {
     if (action === "preview") return open("viewer");
     if (action === "editor" || action === "viewer") return open(action);
     this.close();
-    const fail = (e) => e?.unreachable ? toast(e) : dialog({ kind: "error", text: String(e?.message ?? e) }, 150);
+    const fail = (e) => e?.unreachable ? toast(e) : dialog({ kind: "error", text: String(e?.message ?? e) }, 150 + extraLines(String(e?.message ?? e), 50, 18));
     switch (action) {
       case "code": return openInCode(t.path, t.on, t.dir).catch(fail);
       case "system": return exec("open", [t.path]).catch(fail);
@@ -128,8 +128,9 @@ export class ExplorerMenu {
       case "copyPath": return copyText(t.path);
       case "copyRelative": return copyText(relativeTo(t.root, t.path));
       case "newFile": case "newFolder": return dialog({ kind: action, folder, root: t.root, on: t.on });
-      case "rename": return dialog({ kind: "rename", path: t.path, root: t.root, on: t.on });
-      case "delete": return dialog({ kind: "delete", path: t.path, dir: t.dir, on: t.on }, 170);
+      // Room for the name-taken error under the field, which names the file.
+      case "rename": return dialog({ kind: "rename", path: t.path, root: t.root, on: t.on }, 196 + extraLines(nameProblem(baseName(t.path), true), 56, 16, 2));
+      case "delete": return dialog({ kind: "delete", path: t.path, dir: t.dir, on: t.on }, 170 + extraLines(deleteTitle(t.path), 40, 20));
     }
   }
 
@@ -225,6 +226,7 @@ export class ExplorerDialog {
   async apply(cx) {
     const s = this.spec, ops = createOps(exec, s.on ?? null);
     if (s.kind === "delete") {
+      if (!(await ops.exists(s.path))) return; // gone already (a stale row): submit() refreshes the tree, no error
       if (s.on) return ops.remove(s.path);
       const r = await sh(TRASH, s.path);
       if (r.code !== 0) throw new Error(r.stderr.trim() || "Could not move to Trash");
@@ -258,7 +260,7 @@ export class ExplorerDialog {
   render(cx) {
     const t = theme(), s = this.spec;
     const title = { newFile: "New File", newFolder: "New Folder", rename: "Rename", error: "Explorer" }[s.kind]
-      ?? `Are you sure you want to delete '${baseName(s.path)}'?`;
+      ?? deleteTitle(s.path);
     const detail = s.kind === "delete" ? (s.on ? `On ${s.on} it goes to the Trash when trash or gio is installed there; otherwise it is deleted for good.`
       : `You can restore this ${s.dir ? "folder" : "file"} from the Trash.`) : s.kind === "error" ? s.text : null;
     const yes = s.kind === "delete" ? (s.on ? "Delete" : "Move to Trash") : s.kind === "error" ? "OK" : s.kind === "rename" ? "Rename" : "Create";
@@ -272,7 +274,8 @@ export class ExplorerDialog {
         else return;
         cx.stop_propagation();
       })
-      .child(h_flex().items_center().child(div().flex_1().text_size(15).font_semibold().text_color(t.foreground).child(title))
+      // min_w(0) lets a long title (a file name) wrap instead of running past the dialog's edge.
+      .child(h_flex().items_start().gap(8).child(div().flex_1().min_w(0).text_size(15).font_semibold().text_color(t.foreground).child(title))
         .child(div().text_size(11).text_color(t.dim).child("Esc")))
       .when(Boolean(detail), el => el.child(div().text_color(t.muted).child(detail)))
       .when(Boolean(this.input), el => el.child(Input.new(this.input).h(34).px(10).rounded(8).border_1()

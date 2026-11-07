@@ -110,6 +110,11 @@ export async function freeName(name, exists, dir = false) {
   throw new Error(`No free name for ${name}`);
 }
 
+export const deleteTitle = (path) => `Are you sure you want to delete '${baseName(path)}'?`;
+// The height `text` adds past its first `lines` lines when it wraps at about `perLine` characters, `lineH` px a line: a
+// dialog's size is fixed when it opens, so a long file name in it is measured up front.
+export const extraLines = (text, perLine, lineH, lines = 1) => Math.max(0, Math.ceil(text.length / perLine) - lines) * lineH;
+
 // Why a new name can't be used, or null.
 export function nameProblem(name, taken) {
   if (!name.trim()) return "A file or folder name must be provided.";

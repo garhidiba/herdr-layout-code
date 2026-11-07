@@ -1,7 +1,15 @@
 // node --test mods/vscode-explorer/test/paths.test.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
-import { openArgs, wantsEditor, isMarkdown, relativeTo, within, copyName, freeName, nameProblem, menuItems, menuHeight, parentOf, openWith, vscodeRemoteArgs, editorFileOf, autoRevealOf, revealPath, normalPath, editorTabOf } from "../paths.js";
+import { openArgs, wantsEditor, isMarkdown, relativeTo, within, copyName, freeName, nameProblem, menuItems, menuHeight, parentOf, openWith, vscodeRemoteArgs, editorFileOf, autoRevealOf, revealPath, normalPath, editorTabOf, deleteTitle, extraLines } from "../paths.js";
+
+test("a dialog grows by the lines a long file name wraps onto, and not for a short one", () => {
+  assert.equal(deleteTitle("/p/Invoice-44K7PLUN-0001 copy 2.pdf"), "Are you sure you want to delete 'Invoice-44K7PLUN-0001 copy 2.pdf'?");
+  assert.equal(extraLines(deleteTitle("/p/a.txt"), 40, 20), 0);
+  assert.equal(extraLines(deleteTitle("/p/Invoice-44K7PLUN-0001 copy 2.pdf"), 40, 20), 20);
+  assert.equal(extraLines("x".repeat(120), 40, 20), 40);
+  assert.equal(extraLines("x".repeat(100), 56, 16, 2), 0, "the lines the dialog already has room for");
+});
 
 const home = "/Users/me/.config/herdr-app";
 

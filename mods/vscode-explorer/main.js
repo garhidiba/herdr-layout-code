@@ -270,9 +270,12 @@ export default class Files extends View {
       const saved = this.saved.get(next);
       this.context = { key: next, cwd, on }; this.root = cwd; this.on = on; this.entries = new Map(saved?.entries); this.folders = new Set(saved?.folders);
       this.pending = new Set(); this.marks = saved?.marks ?? {}; this.dirty = new Map(saved?.dirty); this.watched = null; this.error = null; this.limited = false;
-      this.loading = false; this.active = null; this.revealing = null;
+      this.loading = false; this.again = false; this.active = null; this.revealing = null;
     }
-    if (!cwd || this.loading) return;
+    if (!cwd) return;
+    // A file operation's refresh during a load runs once that load ends: the load may have listed the folder before the
+    // change, and a row left for a deleted file would offer to delete it again.
+    if (this.loading) { this.again = true; return; }
     const context = this.context;
     this.loading = true;
     this.limited = false;
@@ -285,7 +288,8 @@ export default class Files extends View {
           this.limited = fast.limited;
         } else for (const path of ["", ...this.folders]) {
           if (!this.current(context)) return;
-          await this.loadFolder(path, context);
+          // An open folder that is gone (deleted, moved) closes, as preload() drops it.
+          await this.loadFolder(path, context).catch(e => { if (!path) throw e; this.forget(path); });
         }
         const marks = fast?.marks ?? await gitMarks(cwd, on);
         if (!this.current(context)) return;
@@ -293,7 +297,10 @@ export default class Files extends View {
         this.saved.set(context.key, { folders: this.folders, entries: this.entries, marks, dirty: this.dirty, at: Date.now() });
         this.changed(cx);
       } catch (e) { if (this.current(context)) this.error = String(e); }
-      finally { if (this.context === context) this.loading = false; cx.notify(); }
+      finally {
+        if (this.context === context) { this.loading = false; if (this.again) { this.again = false; this.refresh(cx); } }
+        cx.notify();
+      }
     });
   }
 
