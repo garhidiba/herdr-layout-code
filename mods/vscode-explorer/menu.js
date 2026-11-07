@@ -91,6 +91,27 @@ export async function openInCode(path, on, dir = false) {
   if (c.code !== 0) throw Object.assign(new Error(c.stderr.trim() || "VS Code didn't start"), { unreachable: true });
 }
 
+// A menu item that needs no open tab, for an entry { path (absolute), root, dir, on }: the menu's pick and the tree's
+// keys (main.js, keys.js). Reveal in Finder is for this computer's files only, as the menu shows it.
+export function explorerAction(action, t) {
+  const folder = t.dir ? t.path : parentOf(t.path);
+  const fail = (e) => e?.unreachable ? toast(e) : dialog({ kind: "error", text: String(e?.message ?? e) }, 150 + extraLines(String(e?.message ?? e), 50, 18));
+  switch (action) {
+    case "code": return openInCode(t.path, t.on, t.dir).catch(fail);
+    case "system": return exec("open", [t.path]).catch(fail);
+    case "reveal": return t.on ? undefined : osRun(revealCommand(os(), t.path)).catch(fail);
+    case "terminal": return run("terminal.open", { folder, place: "tab" });
+    case "cut": case "copy": return setShared(CLIPBOARD, { path: t.path, dir: t.dir, cut: action === "cut", on: t.on ?? null });
+    case "paste": return paste(folder, t.on).then(refresh, fail);
+    case "copyPath": return copyText(t.path);
+    case "copyRelative": return copyText(relativeTo(t.root, t.path));
+    case "newFile": case "newFolder": return dialog({ kind: action, folder, root: t.root, on: t.on });
+    // Room for the name-taken error under the field, which names the file.
+    case "rename": return dialog({ kind: "rename", path: t.path, root: t.root, on: t.on }, 196 + extraLines(nameProblem(baseName(t.path), true), 56, 16, 2));
+    case "delete": return dialog({ kind: "delete", path: t.path, dir: t.dir, on: t.on }, 170 + extraLines(deleteTitle(t.path), 40, 20));
+  }
+}
+
 // Plain class composed by the mod's View for a { menu } overlay.
 export class ExplorerMenu {
   constructor(cx) {
@@ -109,7 +130,7 @@ export class ExplorerMenu {
   close() { closeOverlay(props().overlay); }
 
   choose(action, cx) {
-    const t = this.target, folder = t.dir ? t.path : parentOf(t.path);
+    const t = this.target;
     if (action === "openWith") { this.withList = true; this.at = -1; return cx.notify(); }
     // Closed once the tab is shown: closing first could end the wait. A second pick meanwhile is ignored.
     const open = (how) => !this.opening && (this.opening = true) && cx.spawn(async cx => { try { await openFile(t.path, { on: t.on, how, folder: t.root }, cx); } finally { this.close(); } });
@@ -117,21 +138,7 @@ export class ExplorerMenu {
     if (action === "preview") return open("viewer");
     if (action === "editor" || action === "viewer") return open(action);
     this.close();
-    const fail = (e) => e?.unreachable ? toast(e) : dialog({ kind: "error", text: String(e?.message ?? e) }, 150 + extraLines(String(e?.message ?? e), 50, 18));
-    switch (action) {
-      case "code": return openInCode(t.path, t.on, t.dir).catch(fail);
-      case "system": return exec("open", [t.path]).catch(fail);
-      case "reveal": return osRun(revealCommand(os(), t.path)).catch(fail);
-      case "terminal": return run("terminal.open", { folder, place: "tab" });
-      case "cut": case "copy": return setShared(CLIPBOARD, { path: t.path, dir: t.dir, cut: action === "cut", on: t.on ?? null });
-      case "paste": return paste(folder, t.on).then(refresh, fail);
-      case "copyPath": return copyText(t.path);
-      case "copyRelative": return copyText(relativeTo(t.root, t.path));
-      case "newFile": case "newFolder": return dialog({ kind: action, folder, root: t.root, on: t.on });
-      // Room for the name-taken error under the field, which names the file.
-      case "rename": return dialog({ kind: "rename", path: t.path, root: t.root, on: t.on }, 196 + extraLines(nameProblem(baseName(t.path), true), 56, 16, 2));
-      case "delete": return dialog({ kind: "delete", path: t.path, dir: t.dir, on: t.on }, 170 + extraLines(deleteTitle(t.path), 40, 20));
-    }
+    return explorerAction(action, t);
   }
 
   render(cx) {

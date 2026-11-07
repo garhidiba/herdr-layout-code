@@ -7,10 +7,12 @@ import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { spaces, panes, focused, terminals, exec, hc, readTextFile, watchFolder, theme, window, appHome, props, shared, setShared, notify, nextCommand } from "herdr";
 import { freshRoot, encode, decode } from "./cache.js";
-import { ExplorerMenu, ExplorerDialog, TabMenu, openMenu, openInCode, refreshKey, openFile, remote, warm, REVEAL, terminalRows } from "./menu.js";
+import { ExplorerMenu, ExplorerDialog, TabMenu, openMenu, openInCode, explorerAction, refreshKey, openFile, remote, warm, REVEAL, terminalRows } from "./menu.js";
 import { WARM } from "./warm.js";
 import { createCore } from "./core.js";
 import { editorFileOf, autoRevealOf, revealPath, within, DETAILS } from "./paths.js";
+import { treeAction, step } from "./keys.js";
+import { keysOs } from "./remote.js";
 import { ROW, clampTop, rowAt, shown, scrollToShow, dragStarted, dropFolder, dragTarget, targetRange } from "./dnd.js";
 import { createDesktop } from "./desktop.js";
 import { createDetails } from "./details.js";
@@ -270,7 +272,7 @@ export default class Files extends View {
       const saved = this.saved.get(next);
       this.context = { key: next, cwd, on }; this.root = cwd; this.on = on; this.entries = new Map(saved?.entries); this.folders = new Set(saved?.folders);
       this.pending = new Set(); this.marks = saved?.marks ?? {}; this.dirty = new Map(saved?.dirty); this.watched = null; this.error = null; this.limited = false;
-      this.loading = false; this.again = false; this.active = null; this.revealing = null;
+      this.loading = false; this.again = false; this.active = null; this.selected = null; this.revealing = null;
     }
     if (!cwd) return;
     // A file operation's refresh during a load runs once that load ends: the load may have listed the folder before the
@@ -408,11 +410,13 @@ export default class Files extends View {
   }
 
   // The active editor's file takes the selection color (VS Code's list.inactiveSelectionBackground); the folder a drag
-  // would land in, and the rows below it, the hover color.
-  row(r, t, target) {
-    const color = GIT_COLOR[r.status], icon = this.icon(r.name, r.dir, r.open), active = r.path === this.active;
+  // would land in, and the rows below it, the hover color. The selected row takes `selection` while the tree holds the
+  // keyboard (list.activeSelectionBackground), else `selected` as the active file.
+  row(r, t, target, focused) {
+    const color = GIT_COLOR[r.status], icon = this.icon(r.name, r.dir, r.open), picked = r.path === this.selected;
+    const active = r.path === this.active || picked, fill = picked && focused ? t.selection : t.selected;
     return h_flex().w_full().h(ROW).flex_none().pl(6 + r.depth * 12).pr(8).gap(5).items_center().rounded(4).cursor_pointer()
-      .when(active, el => el.bg(t.selected)).when(!active && target, el => el.bg(t.hover)).when(!active, el => el.hover(s => s.bg(t.hover)))
+      .when(active, el => el.bg(fill)).when(!active && target, el => el.bg(t.hover)).when(!active, el => el.hover(s => s.bg(t.hover)))
       .child(r.dir ? svg(`mods/vscode-explorer/chevron-${r.open ? "down" : "right"}.svg`).size(12).flex_none().text_color(t.dim) : div().w(12).flex_none())
       .child(icon ? image(`mods/vscode-explorer/icons/${icon}.svg`).w(16).h(16).flex_none() : div().w(16).flex_none())
       .child(div().flex_1().min_w(0).truncate().text_color(color ?? t.foreground).child(r.name))
@@ -479,8 +483,33 @@ export default class Files extends View {
     });
   }
 
+  // A key while the tree holds the keyboard (keys.js): arrows move the selection, the rest are the right-click menu's
+  // items on the selected row (paste with nothing selected goes into the root). False for a key the tree doesn't use.
+  treeKey(e, rows, cx) {
+    const action = treeAction(e, keysOs(window()?.platform));
+    if (!action) return false;
+    const i = rows.findIndex(r => r.path === this.selected), r = rows[i];
+    if (["up", "down", "left", "right"].includes(action)) {
+      const to = step(rows, this.selected, action);
+      if (to?.toggle) this.toggle(to.toggle, cx);
+      if (to?.select) {
+        this.selected = to.select;
+        this.top = scrollToShow(this.top, rows.findIndex(x => x.path === to.select), this.height);
+        cx.notify();
+      }
+    } else if (action === "open") { this.platform = false; if (r) this.click(r, cx); } // not a Cmd+click
+    else if (r || action === "paste") {
+      explorerAction(action, { path: r?.abs ?? this.root, root: this.root, dir: r ? r.dir : true, on: this.on });
+      cx.notify();
+    }
+    return true;
+  }
+
+  // A click selects the row and gives the tree the keyboard (treeKey), as VS Code's.
   click(r, cx) {
     if (!r) return;
+    this.selected = r.path;
+    this.handle.focus();
     if (r.dir) return this.toggle(r.path, cx);
     if (this.platform && !this.on) userExec("code", [r.abs]).catch(() => {});
     else if (this.platform) openInCode(r.abs, this.on).catch(err => notify({ title: "Explorer", body: String(err?.message ?? err), level: "error" }));
@@ -511,7 +540,7 @@ export default class Files extends View {
     const height = this.height, top = (this.top = clampTop(this.top, count, height)), over = count * ROW - height;
     // Only the rows on screen are drawn (a tall screenful until the viewport's size is known), each at its scrolled y.
     const [first, end] = shown(top, height || 1600, count);
-    const drag = this.pressed?.dragging ? this.pressed : null;
+    const drag = this.pressed?.dragging ? this.pressed : null, keyboard = this.handle.is_focused();
     const [hiFrom, hiTo] = drag?.folder ? targetRange(rows, drag.folder) : [0, 0];
     const thumb = Math.max(24, height * height / (count * ROW || 1));
     return v_flex().id("explorer").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
@@ -519,7 +548,12 @@ export default class Files extends View {
         .child(div().font_semibold().child("Explorer"))
         .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim).child(this.root?.split(/[\\/]/).pop() ?? "")))
       .child(v_flex().id("explorer-tree").flex_1().min_h(0).p(4).track_focus(this.handle)
-        .on_key_down((e, cx) => { if (e.key === "escape" && this.pressed) { cx.stop_propagation(); this.cancelDrag(cx); } })
+        .on_key_down((e, cx) => {
+          if (e.key === "escape" && this.pressed) { cx.stop_propagation(); this.cancelDrag(cx); }
+          else if (this.treeKey(e, rows, cx)) cx.stop_propagation();
+        })
+        // A press elsewhere takes the keyboard away: the selection is drawn unfocused then.
+        .on_mouse_down_out((_e, cx) => cx.notify())
         .on_mouse_down("right", (_e, cx) => this.menu(this.root, true, cx))
         // Files dropped from Finder are copied into the folder under the pointer (dnd.js dropFolder; ops.js drop): the
         // drop names no position, so the last one the pointer reported over the rows says where; elsewhere the root.
@@ -542,7 +576,7 @@ export default class Files extends View {
           .on_mouse_move((e, cx) => this.pointerMove(e, rows, cx))
           .on_mouse_up("left", (e, cx) => this.release(e, rows, cx))
           .on_hover((on, cx) => { if (!on) { this.hoverY = null; this.cancelDrag(cx); } })
-          .children(rows.slice(first, end).map((r, k) => this.row(r, t, first + k >= hiFrom && first + k < hiTo).absolute().left(0).top((first + k) * ROW - top)))
+          .children(rows.slice(first, end).map((r, k) => this.row(r, t, first + k >= hiFrom && first + k < hiTo, keyboard).absolute().left(0).top((first + k) * ROW - top)))
           .when(over > 0 && height > 0, el => el.child(div().absolute().right(1).top((height - thumb) * top / over).w(6).h(thumb).rounded(3).bg(t.dim).opacity(0.45)
             .on_mouse_down("left", (e, cx) => { cx.stop_propagation(); this.thumb = { y: e.position.y, top: this.top, ratio: over / (height - thumb) }; })))
           // What is dragged, by the pointer: its icon and name.
