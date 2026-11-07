@@ -7,6 +7,9 @@ import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, run, ap
 import { freshRoot, encode, decode } from "./cache.js";
 import { createCore } from "./core.js";
 import { layoutSections, flexSection, sashPair, dragSash } from "./sections.js";
+import { syncAction, syncSteps, syncError, BUSY } from "./sync.js";
+// Push and pull never wait on a prompt (no terminal here): a missing credential fails at once, a merge takes git's message.
+const NO_PROMPT = ["GIT_TERMINAL_PROMPT=0", "GIT_MERGE_AUTOEDIT=no"];
 
 // The project you work in: the focused terminal's folder. Editor and diff tabs have no folder, so focusing
 // them keeps this space's last project instead of reloading; a fresh space starts at its first terminal's folder.
@@ -357,7 +360,7 @@ export default class SourceControl extends View {
   commit(cx) {
     if (!this.message.trim() || !this.selected || this.busy || this.loading || this.context !== key()) return;
     const root = this.selected, on = this.on, context = this.context, message = this.message.trim();
-    this.busy = true; this.note = null;
+    this.busy = "Committing…"; this.note = null;
     cx.spawn(async (cx) => {
       try {
         for (const args of [["add", "-A"], ["commit", "-m", message]]) {
@@ -366,6 +369,28 @@ export default class SourceControl extends View {
         }
         if (key() === context && this.selected === root) { this.message = ""; this.input.set_value(""); }
       } catch (e) { if (key() === context) this.note = `Commit failed: ${e}`; }
+      finally { this.busy = false; this.refresh(cx); cx.notify(); }
+    });
+    cx.notify();
+  }
+
+  // With nothing to commit: push, pull, sync (pull then push) or publish the selected repo's branch (syncAction).
+  // Each git call is Herdr's exec, so one taking over its 30 s limit is stopped and shown as failed.
+  sync(action, cx) {
+    const repo = this.repos.find((r) => r.path === this.selected);
+    if (!action || !repo || this.busy || this.loading || this.context !== key()) return;
+    const root = this.selected, on = this.on, context = this.context;
+    this.busy = BUSY[action.kind]; this.note = null;
+    cx.spawn(async (cx) => {
+      try {
+        const remotes = action.kind === "publish" ? (await exec("git", [...READ, "remote"], { cwd: root, on })).stdout.split("\n").filter(Boolean) : [];
+        for (const args of syncSteps(action.kind, repo.branch, remotes)) {
+          let r;
+          try { r = await exec("env", [...NO_PROMPT, "git", ...args], { cwd: root, on }); }
+          catch (e) { throw new Error(`${e?.message ?? e} (Herdr stops a command after 30 s; run \`git ${args.join(" ")}\` in a terminal for a slow remote.)`); }
+          if (r.code !== 0) throw new Error(syncError(r.stderr || r.stdout));
+        }
+      } catch (e) { if (key() === context) this.note = `${action.kind[0].toUpperCase()}${action.kind.slice(1)} failed:${e?.message ?? e}`; }
       finally { this.busy = false; this.refresh(cx); cx.notify(); }
     });
     cx.notify();
@@ -482,7 +507,10 @@ export default class SourceControl extends View {
   render(cx) {
     if (key() !== this.context) this.refresh(cx);
     const t = theme(), repo = this.repos.find((r) => r.path === this.selected), shown = (id) => !this.collapsed[id], items = this.graphItems(), files = this.files;
-    const enabled = Boolean(this.message.trim() && repo && !this.busy && !this.loading);
+    // Nothing to commit (neither the loaded files nor the repo list says dirty) but commits to push or pull:
+    // the button pushes, pulls, syncs or publishes instead.
+    const action = syncAction(repo, files.length || Number(Boolean(repo?.dirty)));
+    const enabled = Boolean((action || this.message.trim()) && repo && !this.busy && !this.loading);
     const empty = (text) => div().h(ROW).flex_none().px(22).flex().items_center().text_size(12).text_color(t.dim).child(text);
     // VS Code's layout: open sections share the height below the title and the three headers. Repositories and
     // Graph keep their dragged size; Changes (else the last open section) takes the rest; collapsed ones give theirs back.
@@ -519,8 +547,8 @@ export default class SourceControl extends View {
           .child(div().id("scm-message").w_full().h(28).px(8).flex().items_center().rounded(4).bg(t.surface).border_1().border_color(this.typing ? t.accent : t.border).cursor_text()
             .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.input).h_full().text_size(12).text_color(t.foreground)))
           .child(h_flex().id("scm-commit").w_full().h(28).gap(6).justify_center().items_center().rounded(4).bg(enabled ? t.solid : t.raised).text_color(enabled ? t.solid_foreground : t.dim).text_size(12)
-            .when(enabled, (e) => e.cursor_pointer()).on_click((_e, cx) => this.commit(cx))
-            .child(this.busy ? "Committing…" : `✓ Commit${repo ? ` on ${repo.branch === "(detached)" ? repo.oid.slice(0, 7) : repo.branch}` : ""}`)))
+            .when(enabled, (e) => e.cursor_pointer()).on_click((_e, cx) => action ? this.sync(action, cx) : this.commit(cx))
+            .child(this.busy ? this.busy : action ? action.label : `✓ Commit${repo ? ` on ${repo.branch === "(detached)" ? repo.oid.slice(0, 7) : repo.branch}` : ""}`)))
         .when(Boolean(this.note), (e) => e.child(div().flex_none().px(10).pb(6).text_size(11).text_color(t.ansi1).child(this.note)))
         .child(files.length ? div().flex_1().min_h(0).relative()
           .child(v_virtual_list("scm-files", files.length, ROW, (i) => files[i].path,
