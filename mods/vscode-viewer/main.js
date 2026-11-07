@@ -1,10 +1,10 @@
 // A file editor for a tab: props { file: absolute path, on?: machine, install?: true (the terminal editor isn't on that
 // machine yet: an Install Editor button asks the Explorer to install it, as its confirm dialog's yes does), preview?: true
-// (shown as rendered markdown whatever its extension: the terminal editor's Markdown preview, editor/mdpreview.cjs) }.
+// | "html" (shown rendered whatever its extension, as markdown or as HTML: the terminal editor's preview, editor/mdpreview.cjs) }.
 // Opens straight into Herdr's built-in editor (Atom One Dark colors, VS Code's file-type recognition from langs.json),
 // saves with Cmd+S ("vscode-viewer.save" in keys.json), flags changes on disk, and shows a VS Code-style status bar.
 // Images open as a preview, videos as a still with Open in Player (from another machine both are fetched first:
-// preview.js); markdown opens rendered, with Edit to switch to the editor.
+// preview.js); markdown opens rendered, with Edit to switch to the editor; HTML too (as Markdown: html.js), with Open in Browser.
 // Auto save follows files.autoSave in <herdr home>/vscode-settings.json (shared with the terminal editor). A mod can't stop
 // its tab from closing, so unsaved text is kept as a hot-exit backup in close() and offered back on the next open.
 import { View, div, image, PathBuilder, Background } from "gpui-kit";
@@ -12,6 +12,7 @@ import { v_flex, h_flex, Editor, EditorState, TextView } from "gpui-base";
 import { props, readTextFile, writeTextFile, exec, theme, appHome, nextCommand, focused, panes, spaces, run, shared, setShared } from "herdr";
 import { FETCHED, POSTER, fetchFile, prune } from "./preview.js";
 import { ownPane, closeOwnArgs } from "./pane.js";
+import { htmlToMarkdown } from "./html.js";
 // Herdr starts with PATH=/usr/bin:/bin, so Homebrew/user tools (node, code, codex, trash) are looked up here too.
 const userExec = (cmd, args, opts) => exec("sh", ["-c", 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; exec "$0" "$@"', cmd, ...args], opts);
 
@@ -50,13 +51,13 @@ const extOf = (name) => { const n = name.toLowerCase(), e = n.includes(".") ? n.
 // Atom One Dark editor colors (akamud.vscode-theme-onedark: editor.background / editor.foreground).
 const EDITOR_BG = "#282c34", EDITOR_FG = "#abb2bf";
 
-// What the tab shows: an image preview, a video still, markdown (preview + editor) or code. Extension -> format name.
+// What the tab shows: an image preview, a video still, markdown or HTML (preview + editor) or code. Extension -> format name.
 const IMAGES = { png: "PNG", jpg: "JPEG", jpeg: "JPEG", gif: "GIF", webp: "WebP", bmp: "BMP", ico: "ICO", svg: "SVG", tif: "TIFF", tiff: "TIFF" };
 const VIDEOS = { mp4: "MPEG-4", m4v: "MPEG-4", mov: "QuickTime", webm: "WebM", mkv: "Matroska", avi: "AVI" };
-const MARKDOWN = ["md", "markdown", "mdx", "mkd"];
+const MARKDOWN = ["md", "markdown", "mdx", "mkd"], HTML = ["html", "htm"];
 function kindOf(name) {
   const n = name.toLowerCase(), e = n.includes(".") ? n.split(".").pop() : "";
-  return IMAGES[e] ? "image" : VIDEOS[e] ? "video" : MARKDOWN.includes(e) ? "markdown" : "code";
+  return IMAGES[e] ? "image" : VIDEOS[e] ? "video" : MARKDOWN.includes(e) ? "markdown" : HTML.includes(e) ? "html" : "code";
 }
 const sizeText = (b) => b < 1024 ? `${b} B` : b < 1048576 ? `${(b / 1024).toFixed(1)} KB` : `${(b / 1048576).toFixed(1)} MB`;
 // `sips -g pixelWidth -g pixelHeight` output -> "W × H" (null when it has none).
@@ -126,7 +127,7 @@ export default class Viewer extends View {
     this.text = null;          // what is on disk, as last read or written
     this.code = null; this.dirty = false; this.conflict = false; this.wrap = false;
     this.error = null; this.table = null; this.language = "Plain Text"; this.facts = null;
-    this.kind = p.preview ? "markdown" : kindOf(this.file ?? ""); this.preview = this.kind === "markdown"; this.img = null;
+    this.kind = p.preview === "html" ? "html" : p.preview ? "markdown" : kindOf(this.file ?? ""); this.preview = this.kind === "markdown" || this.kind === "html"; this.img = null;
     this.autoSave = { mode: "off", delay: 1 }; this.autoToken = 0; this.hadFocus = false; this.restore = null; this.pane = null; this.missing = 0;
     this.load(cx);
     // Every 3 s; a local markdown preview every second, so it follows the terminal editor's saves.
@@ -318,6 +319,12 @@ export default class Viewer extends View {
     cx.notify();
   }
 
+  // An HTML buffer as Markdown, converted again only when it changed.
+  htmlText(value) {
+    if (this.htmlSource !== value) { this.htmlSource = value; this.htmlMarkdown = htmlToMarkdown(value); }
+    return this.htmlMarkdown;
+  }
+
   body(t) {
     if (this.kind === "image" || this.kind === "video") return this.img
       ? v_flex().flex_1().min_h(0).relative().items_center().justify_center().p(16).overflow_hidden().bg(EDITOR_BG)
@@ -325,7 +332,7 @@ export default class Viewer extends View {
         .child(image(this.img.path).max_w("100%").max_h("100%"))
       : div().p(12).text_color(t.dim).child(this.error || this.fetching || `Loading ${this.kind}…`);
     if (!this.code) return div().p(12).text_color(t.dim).child(this.error || "Loading file…");
-    if (this.preview) return TextView.markdown("preview", this.code.value()).scrollable(true).selectable(true)
+    if (this.preview) return TextView.markdown("preview", this.kind === "html" ? this.htmlText(this.code.value()) : this.code.value()).scrollable(true).selectable(true)
       .flex_1().min_h(0).px(28).py(16).bg(EDITOR_BG).text_color(EDITOR_FG).text_size(14);
     return Editor.new(this.code).flex_1().min_h(0).bg(EDITOR_BG).text_color(EDITOR_FG);
   }
@@ -346,7 +353,8 @@ export default class Viewer extends View {
       .child(h_flex().h(30).flex_none().pl(16).pr(10).gap(6).items_center()
         .child(crumbs)
         .when(this.dirty, el => el.child(div().size(8).rounded(4).bg("#e5c07b").flex_none()))
-        .when(this.kind === "markdown", el => el.child(button("preview", this.preview ? "Edit" : "Preview", cx => { this.preview = !this.preview; cx.notify(); })))
+        .when(this.kind === "markdown" || this.kind === "html", el => el.child(button("preview", this.preview ? "Edit" : "Preview", cx => { this.preview = !this.preview; cx.notify(); })))
+        .when(this.kind === "html" && !this.on, el => el.child(button("browser", "Open in Browser", () => exec("open", [this.file]).catch(() => {}))))
         .when(text && !this.preview, el => el.child(button("wrap", "Wrap", cx => this.toggleWrap(cx), this.wrap)))
         .when(this.dirty, el => el.child(button("revert", "Revert", cx => this.revert(cx))))
         .when(this.kind === "video" && Boolean(this.img), el => el.child(button("play", "Open in Player", () => exec("open", [this.img.local]).catch(() => {}))))
