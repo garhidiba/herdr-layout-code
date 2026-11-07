@@ -110,6 +110,7 @@ export const MEMO_SETTINGS = {
   "files.autoSave": "afterDelay", "files.autoSaveDelay": 0.5,
   "breadcrumbs.enabled": false, "editor.hover.enabled": false, "editor.codeLens": false,
   "extensions.ignoreRecommendations": true, "editor.inlineSuggest.provider": "off",
+  "workbench.statusBar.visible": false,
 };
 export function memoSettings(text) {
   let user = {};

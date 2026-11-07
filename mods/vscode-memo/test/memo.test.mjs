@@ -117,6 +117,7 @@ test("the memo editor keeps the user's settings, cut down to a document editor",
   assert.equal(s["editor.wordWrap"], "on");
   assert.equal(s["files.autoSave"], "afterDelay");
   assert.equal(s["editor.inlineSuggest.provider"], "off");
+  assert.equal(s["workbench.statusBar.visible"], false);
   assert.deepEqual(JSON.parse(memoSettings(null)), MEMO_SETTINGS);
   assert.deepEqual(JSON.parse(memoSettings("not json")), MEMO_SETTINGS);
 });
