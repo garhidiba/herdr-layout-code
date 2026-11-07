@@ -774,3 +774,139 @@ test("the editor with a protected local server: no key is an error, not a warnin
   fs.rmSync(process.env.FAKE_KEYCHAIN, { force: true });
   s.server.close();
 });
+
+// ---------- a remote editor: suggestions from the desktop typing in it (its proxy, through link.cjs's tunnel) ----------
+const TOKEN = "ab".repeat(24);
+// A desktops/ folder as link.cjs and desktop.js leave it on the machine: `active` and <id>.json.
+function desktops(active, announced = {}) {
+  const dir = fs.mkdtempSync(path.join(tmp, "desktops-"));
+  if (active) fs.writeFileSync(path.join(dir, "active"), active + "\n");
+  for (const [id, a] of Object.entries(announced)) fs.writeFileSync(path.join(dir, `${id}.json`), JSON.stringify(a));
+  return dir;
+}
+// This desktop's proxy, its settings pointing at `endpoint` (a stub provider).
+async function desktopProxy(endpoint, extra = {}) {
+  const server = I.proxy({ token: TOKEN, values: () => S.normalize({ "editor.inlineSuggest.endpoint": endpoint, ...extra }) });
+  await new Promise(r => server.listen(0, "127.0.0.1", r));
+  return server;
+}
+async function remoteEditor(dir, lines, extra = {}) {
+  process.env.VSEDIT_DESKTOPS = dir;
+  const ed = await editorWith("http://127.0.0.1:9", lines, extra);
+  ed.inlineCfg; // read with VSEDIT_DESKTOPS set, as on that machine
+  delete process.env.VSEDIT_DESKTOPS;
+  return ed;
+}
+const desktopEnv = (dir, f) => async () => { process.env.VSEDIT_DESKTOPS = dir; try { return await f(); } finally { delete process.env.VSEDIT_DESKTOPS; } };
+
+test("the active desktop's announcement is its tunnel; anything else is no desktop", () => {
+  assert.deepEqual(I.desktop(desktops("d1", { d1: { port: 4100, token: TOKEN } })), { port: 4100, token: TOKEN });
+  assert.equal(I.desktop(desktops(null, { d1: { port: 4100, token: TOKEN } })), null, "no desktop marked active");
+  assert.equal(I.desktop(desktops("d2", { d1: { port: 4100, token: TOKEN } })), null, "the active desktop's tunnel is gone");
+  assert.equal(I.desktop(desktops("../x", {})), null);
+  assert.equal(I.desktop(desktops("d1", { d1: { port: "4100", token: TOKEN } })), null);
+  assert.equal(I.desktop(null), null, "a local editor");
+});
+
+test("a remote editor asks the desktop's proxy, never the provider address in its settings", () => {
+  const cfg = I.viaDesktop(I.config(S.normalize({ "editor.inlineSuggest.provider": "codestral" })), null);
+  assert.deepEqual([cfg.provider, cfg.hosted, cfg.limit, cfg.enabled], ["desktop", false, 0, true]);
+  const req = I.request({ ...cfg, endpoint: "http://127.0.0.1:4100" }, { prefix: "a", suffix: "b", nextLine: true, file: "/x.js" }, true, TOKEN);
+  assert.equal(req.url, "http://127.0.0.1:4100/fim");
+  assert.equal(req.headers.Authorization, `Bearer ${TOKEN}`);
+  assert.deepEqual(req.body, { prefix: "a", suffix: "b", nextLine: true, file: "/x.js", stream: true });
+  assert.equal(I.viaDesktop(I.config(S.normalize({ "editor.inlineSuggest.provider": "off" })), null).enabled, false);
+  assert.equal(I.viaDesktop(I.config(S.normalize({})), false).enabled, false);
+});
+
+test("a remote editor with no desktop sends nothing and says so once", async () => {
+  const local = await stub(() => ({ response: "x" }));
+  const dir = desktops(null);
+  const ed = await remoteEditor(dir, ["let a = 1;", ""], { "editor.inlineSuggest.endpoint": local.endpoint });
+  const said = [];
+  const say = ed.say.bind(ed);
+  ed.say = (text, ...rest) => { said.push(text); return say(text, ...rest); };
+  await desktopEnv(dir, async () => {
+    type(ed, "c"); await sleep(80);
+    type(ed, "o"); await sleep(80);
+    ed.inlineTrigger(); await sleep(30);
+  })();
+  assert.equal(local.bodies.length, 0, "the settings' 127.0.0.1 is the desktop's, not this machine's");
+  assert.deepEqual(said, [I.NO_DESKTOP]);
+  assert.equal(ed.inlineStatus().text, "Desktop: no desktop");
+  assert.equal(ed.inline.error, null);
+  local.server.close();
+});
+
+test("a remote editor's suggestion comes from the active desktop's provider and settings", async () => {
+  const provider = await stub(() => ({ chunks: [" a", " + b;"] }));
+  const proxy = await desktopProxy(provider.endpoint);
+  const other = await desktopProxy("http://127.0.0.1:9"); // another desktop showing the same terminal
+  const dir = desktops("d1", { d1: { port: proxy.address().port, token: TOKEN }, d2: { port: other.address().port, token: TOKEN } });
+  const ed = await remoteEditor(dir, ["function add(a, b) {", "  "]);
+  await desktopEnv(dir, async () => {
+    type(ed, "return");
+    assert.ok(await waitFor(() => ghost(ed)), `no suggestion: ${ed.inline.error}`);
+    assert.equal(ghost(ed), " a + b;");
+    assert.equal(prefixOf(provider.bodies[0]), "function add(a, b) {\n  return", "the desktop built the FIM prompt");
+    assert.equal(ed.inlineStatus().text, "Desktop");
+    // the desktop's own errors come back as they are
+    provider.server.close(); proxy.close(); other.close();
+    const failing = await stub(() => ({ status: 500, error: "model crashed" }));
+    const proxy2 = await desktopProxy(failing.endpoint);
+    fs.writeFileSync(path.join(dir, "d1.json"), JSON.stringify({ port: proxy2.address().port, token: TOKEN }));
+    type(ed, ";");
+    assert.ok(await waitFor(() => ed.inline.error));
+    assert.equal(ed.inline.error, "Desktop: Ollama: model crashed");
+    // its tunnel gone: quietly off, no error counted
+    proxy2.close(); failing.server.close();
+    fs.writeFileSync(path.join(dir, "d1.json"), JSON.stringify({ port: 9, token: TOKEN }));
+    const errors = ed.inlineHealth(ed.inlineCfg).errors;
+    type(ed, " ");
+    assert.ok(await waitFor(() => ed.inline.noDesktop));
+    assert.equal(ed.inlineHealth(ed.inlineCfg).errors, errors);
+  })();
+});
+
+test("the proxy answers only with its token, and keeps the desktop's keys to itself", async () => {
+  const proxy = await desktopProxy("", { "editor.inlineSuggest.provider": "codestral" });
+  const url = `http://127.0.0.1:${proxy.address().port}/fim`, body = JSON.stringify({ prefix: "a", suffix: "" });
+  assert.equal((await fetch(url, { method: "POST", body })).status, 401);
+  assert.equal((await fetch(url, { method: "POST", body, headers: { Authorization: "Bearer " + "cd".repeat(24) } })).status, 401);
+  fs.rmSync(process.env.FAKE_KEYCHAIN, { force: true });
+  const r = await fetch(url, { method: "POST", body, headers: { Authorization: `Bearer ${TOKEN}` } });
+  assert.equal(r.status, 502);
+  assert.match((await r.json()).error, /^Codestral: no API key/);
+  proxy.close();
+});
+
+test("link.cjs announces its proxy there while the tunnel lasts (a fake ssh runs the remote side here)", async (t) => {
+  const L = require("../link.cjs");
+  assert.deepEqual(L.sshArgs("can@10.0.0.7:2222", 30000, 4100, "d1").slice(-4, -1), ["-p", "2222", "can@10.0.0.7"]);
+  assert.ok(L.sshArgs("vps", 30000, 4100, "d1").includes("127.0.0.1:30000:127.0.0.1:4100"));
+  const home = fs.mkdtempSync(path.join(tmp, "home-")), log = path.join(home, "ssh.argv"), fake = path.join(home, "ssh");
+  fs.writeFileSync(fake, `#!/bin/sh\nprintf '%s\\n' "$@" > "${log}"\nfor a; do last=$a; done\nHOME="${home}" exec sh -c "$last"\n`, { mode: 0o755 });
+  const settings = path.join(home, "settings.json"), closed = http.createServer();
+  await new Promise(r => closed.listen(0, "127.0.0.1", r));
+  const dead = `http://127.0.0.1:${closed.address().port}`; // nothing answers there
+  closed.close();
+  fs.writeFileSync(settings, JSON.stringify({ "editor.inlineSuggest.provider": "ollama", "editor.inlineSuggest.endpoint": dead }));
+  const child = require("child_process").spawn(process.execPath, [path.join(__dirname, "..", "link.cjs"), "vps", "d1"],
+    { env: { ...process.env, VSEDIT_SSH: fake, VSEDIT_SETTINGS: settings } });
+  t.after(() => child.kill("SIGKILL"));
+  let out = "";
+  child.stdout.on("data", d => { out += d; });
+  assert.ok(await waitFor(() => out.includes("linked vps"), 5000), "never linked");
+  const file = path.join(home, ".local/share/herdr-vscode/desktops/d1.json");
+  const a = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.equal(fs.statSync(file).mode & 0o077, 0, "only its owner reads the token");
+  const argv = fs.readFileSync(log, "utf8").split("\n");
+  const forward = argv[argv.indexOf("-R") + 1].split(":");
+  assert.deepEqual([forward[0], forward[1]], ["127.0.0.1", String(a.port)], "announced: the tunnel's end there, on its loopback only");
+  assert.ok(!argv.join(" ").includes(a.token), "the token is never an argument");
+  // the proxy behind the tunnel (here: its local end) answers that token, with this desktop's settings
+  const r = await fetch(`http://127.0.0.1:${forward[3]}/fim`, { method: "POST", headers: { Authorization: `Bearer ${a.token}` }, body: "{}" });
+  assert.equal((await r.json()).error, `Ollama is not running at ${dead} (start it: ollama serve)`);
+  child.kill("SIGTERM");
+  assert.ok(await waitFor(() => !fs.existsSync(file), 5000), "the announcement outlived the tunnel");
+});

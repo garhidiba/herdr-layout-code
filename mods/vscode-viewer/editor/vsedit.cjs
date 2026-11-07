@@ -1469,7 +1469,10 @@ class Editor {
 
   // ----- inline suggestions (inline.cjs): ghost text from a provider after typing pauses -----
   get inlineCfg() {
-    if (this._inlineCfg?.settings !== this.settings) this._inlineCfg = { settings: this.settings, cfg: I.config(this.settings, inlineUsable) };
+    if (this._inlineCfg?.settings !== this.settings) {
+      const cfg = I.config(this.settings, inlineUsable);
+      this._inlineCfg = { settings: this.settings, cfg: I.desktopsDir() ? I.viaDesktop(cfg, this.settings["editor.inlineSuggest.enabled"]) : cfg };
+    }
     return this._inlineCfg.cfg;
   }
   inlineHealth(cfg) {
@@ -1482,6 +1485,7 @@ class Editor {
     if (!cfg.enabled) return "Inline suggestions are off (click their status bar item to turn them on)";
     const paused = this.inlineHealth(cfg).paused;
     if (paused) return `${cfg.label} is paused: ${paused} (click its status bar item to resume)`;
+    if (cfg.provider === "desktop" && !I.desktop()) return this.inlineNoDesktop();
     if (this.inline.models.get(cfg.key)?.missing) return I.missingText(cfg);
     if (cfg.hosted && !this.inlineKeyOf(cfg)) return `${cfg.label}: ${I.keyHelp(cfg.provider)}`;
     if (this.popup || this.prompt || this.peek || !this.empty) return "ui";
@@ -1490,6 +1494,12 @@ class Editor {
     if (!manual && (!I.atSuggestable(this.lines[this.head.line], this.head.col) || I.quietEnd(this.lines, this.head.line))) return "position";
     if (cfg.limit && I.usageOf(cfg.key).requests >= cfg.limit) return `${cfg.label}: today's limit of ${cfg.limit} requests is reached (editor.inlineSuggest.dailyRequestLimit)`;
     return null;
+  }
+  // A remote editor with no desktop to ask: suggestions quietly off, said once a session (I.NO_DESKTOP, returned).
+  inlineNoDesktop() {
+    this.inline.noDesktop = true;
+    if (!this.inline.toldDesktop) { this.inline.toldDesktop = true; this.say(I.NO_DESKTOP, this.colors.barFg, 8000); }
+    return I.NO_DESKTOP;
   }
   // The provider's API key (inline.cjs apiKey; "" when none). A hosted one is looked up again at most every 10 s while
   // there is none; a local server's (optional) after a failed request.
@@ -1532,8 +1542,13 @@ class Editor {
   }
   // Asks the provider for the cursor's position (manual: Trigger Inline Suggestion, which says why it can't).
   async inlineRequest(manual) {
-    const cfg = this.inlineCfg, why = this.inlineBlocked(cfg, manual);
-    if (why) { if (manual && why !== "ui") this.say(why, this.colors.warn, 5000); return; }
+    const why = this.inlineBlocked(this.inlineCfg, manual);
+    if (why) { if (manual && why !== "ui" && why !== I.NO_DESKTOP) this.say(why, this.colors.warn, 5000); return; }
+    // a remote editor asks the active desktop's tunnel (inlineBlocked found it)
+    const desk = this.inlineCfg.provider === "desktop" ? I.desktop() : null;
+    if (this.inlineCfg.provider === "desktop" && !desk) return;
+    this.inline.noDesktop = false;
+    const cfg = desk ? { ...this.inlineCfg, endpoint: `http://127.0.0.1:${desk.port}` } : this.inlineCfg;
     const at = { ...this.head }, file = this.file, version = this.buf.version;
     const key = `${file}\0${version}\0${at.line}\0${at.col}\0${cfg.key}\0${cfg.multiline}`;
     if (this.inline.cache.has(key)) return this.inlineShow(this.inline.cache.get(key), at, version);
@@ -1552,9 +1567,10 @@ class Editor {
       if (r.text && r.text !== this.inline.ghost?.items[0]) { this.inlineShow([r.text], at, version); this.redraw(); }
       return cfg.multiline && I.blockCut(text, ctx, false).done;
     };
-    try { const { status, json } = await I.postStream(I.request(cfg, ctx, true, this.inlineKeyOf(cfg)), ac.signal, partial); texts = I.reply(cfg, status, json); }
+    try { const { status, json } = await I.postStream(I.request(cfg, ctx, true, desk ? desk.token : this.inlineKeyOf(cfg)), ac.signal, partial); texts = I.reply(cfg, status, json); }
     catch (e) { error = I.failure(cfg, e); if (error === null) return; } // aborted: a newer request or an edit
     if (gen !== this.inline.gen) return;
+    if (error === I.NO_DESKTOP) { Object.assign(this.inline, { abort: null, busy: false }); this.inlineNoDesktop(); return this.redraw(); }
     if (error === I.missingText(cfg)) this.inline.models.set(cfg.key, { missing: true, chat: false });
     if (error && !cfg.hosted) this.inline.keys.delete(cfg.provider); // the server may want a key saved since
     Object.assign(this.inline, { abort: null, busy: false, error });
@@ -1640,8 +1656,8 @@ class Editor {
     const info = this.inline.models.get(cfg.key), missing = info?.missing, chat = I.chatModel(cfg, info);
     const noKey = cfg.enabled && cfg.hosted && !this.inlineKeyOf(cfg);
     const state = !cfg.enabled ? ": off" : missing ? (cfg.provider === "ollama" ? `: ollama pull ${cfg.model}` : ": model not found") : noKey ? ": no API key" : paused ? ": paused" : limited ? ": limit" :
-      this.inline.busy ? " …" : this.inline.error ? ": error" : chat ? ": chat model" : "";
-    const notes = [paused ? `${cfg.label} paused: ${paused}` : h.note, missing && I.missingText(cfg), chat && I.chatHint(cfg),
+      this.inline.noDesktop ? ": no desktop" : this.inline.busy ? " …" : this.inline.error ? ": error" : chat ? ": chat model" : "";
+    const notes = [this.inline.noDesktop && I.NO_DESKTOP, paused ? `${cfg.label} paused: ${paused}` : h.note, missing && I.missingText(cfg), chat && I.chatHint(cfg),
       noKey && I.keyHelp(cfg.provider) + (this.inline.keys.get(cfg.provider)?.loose ? ` (vscode-secrets.json is readable by others: chmod 600 it)` : "")].filter(Boolean);
     return { text: cfg.label + state, run: () => this.toggleInline(), hover: () => [...notes, I.usageText(cfg, I.usageOf(cfg.key))].join(" · ") };
   }

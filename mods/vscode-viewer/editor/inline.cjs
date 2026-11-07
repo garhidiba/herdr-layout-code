@@ -91,6 +91,28 @@ function config(values, usable = () => true) {
   return cfg;
 }
 
+// ---------- a remote editor's suggestions come from the desktop typing in it (VS Code Remote's way) ----------
+// On a remote machine (VSEDIT_DESKTOPS: the bundle root's desktops/, remote-vsedit.sh) the editor never asks a provider
+// itself: the desktop whose window last focused a remote editor there marks itself `active`, and its tunnel (link.cjs)
+// is announced as <id>.json {port, token}. Its provider, model and key are used, the key never leaving that desktop.
+// None (no tunnel, another desktop's gone): suggestions are quietly off, said once.
+const NO_DESKTOP = "Inline suggestions are off here: they come from the Herdr desktop you type on, and none is connected to this machine";
+const desktopsDir = () => process.env.VSEDIT_DESKTOPS || null;
+// The active desktop's tunnel: { port, token } | null.
+function desktop(dir = desktopsDir()) {
+  if (!dir) return null;
+  try {
+    const id = fs.readFileSync(path.join(dir, "active"), "utf8").trim();
+    if (!/^[0-9a-f]{1,64}$/.test(id)) return null;
+    const { port, token } = JSON.parse(fs.readFileSync(path.join(dir, `${id}.json`), "utf8"));
+    return Number.isInteger(port) && port > 0 && port < 65536 && /^[0-9a-f]{16,128}$/.test(token) ? { port, token } : null;
+  } catch { return null; }
+}
+// A remote editor's config: the desktop's proxy instead of the provider (its address comes per request from desktop()).
+// On unless the provider is off or suggestions were turned off (`enabled`: the editor.inlineSuggest.enabled setting).
+const viaDesktop = (cfg, enabled) => ({ ...cfg, provider: "desktop", label: "Desktop", model: "", endpoint: "", customEndpoint: false, hosted: false,
+  limit: 0, price: null, key: "desktop", enabled: cfg.provider !== "off" && enabled !== false });
+
 // ---------- which files and positions ----------
 // A glob (*, ?, ** across folders) -> RegExp, case-insensitive.
 function globRe(p) {
@@ -281,6 +303,9 @@ function cacheKey(file) {
 // The HTTP request for a suggestion: { url, headers, body } (stream: Ollama's NDJSON lines or the hosted APIs' SSE
 // events, read by postStream). key: the provider's API key (optional for a local server: "" sends none).
 function request(cfg, ctx, stream = false, key = "") {
+  // the desktop's proxy (key: its token) builds the provider's request itself
+  if (cfg.provider === "desktop") return { url: `${cfg.endpoint}/fim`, headers: headers(key),
+    body: { prefix: ctx.prefix, suffix: ctx.suffix, nextLine: !!ctx.nextLine, file: ctx.file ?? "", stream } };
   if (cfg.hosted) {
     const stop = cfg.multiline || ctx.nextLine ? [] : ["\n"];
     return { url: cfg.endpoint, headers: headers(key),
@@ -344,6 +369,8 @@ const notRunning = (cfg) => START[cfg.provider] ? `${cfg.label} is not running a
 // A failed connection -> the status bar's words.
 function failure(cfg, e) {
   if (e?.name === "AbortError") return null;
+  // the desktop's tunnel gone (its own errors come back as replies, which start with the label)
+  if (cfg.provider === "desktop" && !e?.message?.startsWith(cfg.label)) return NO_DESKTOP;
   const code = e?.cause?.code ?? e?.code;
   if (["ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH"].includes(code)) return notRunning(cfg);
   return e?.message?.startsWith(cfg.label) || e?.message?.startsWith("Ollama") ? e.message : `${cfg.label}: ${e?.message ?? e}`;
@@ -467,7 +494,58 @@ function usageText(cfg, u) {
     (p50 == null ? "" : ` · p50 ${p50} ms, p95 ${p95} ms`);
 }
 
-module.exports = { PROVIDERS, MODELS, DEFAULTS, EXCLUDE, MAX_FILE_CHARS, normalize, config, globRe, denied, atSuggestable, quietEnd, contextAt,
+// ---------- the desktop's proxy: a remote editor's requests, through link.cjs's tunnel ----------
+// POST /fim with `Authorization: Bearer <token>` and { prefix, suffix, nextLine, file }: a suggestion from this
+// desktop's settings, provider and key (read here, never sent back), with its limit, exclusions and usage, streamed as
+// NDJSON {response} lines and a last {response: "", done} — or {error} (status 502 when nothing was sent yet). The
+// caller binds it to 127.0.0.1. `values`: the settings (settings.cjs normalize'd).
+function proxy({ token, values = () => require("./settings.cjs").load().values }) {
+  const http = require("http"), crypto = require("crypto");
+  const want = Buffer.from(`Bearer ${token}`), ND = { "Content-Type": "application/x-ndjson" };
+  const authorized = (h) => { const got = Buffer.from(String(h ?? "")); return got.length === want.length && crypto.timingSafeEqual(got, want); };
+  return http.createServer((req, res) => {
+    const send = (status, o) => { if (!res.headersSent) res.writeHead(status, ND); res.end(JSON.stringify(o) + "\n"); };
+    if (req.method !== "POST" || req.url !== "/fim") return send(404, { error: "not found" });
+    if (!authorized(req.headers.authorization)) return send(401, { error: "unauthorized" });
+    let data = "";
+    req.setEncoding("utf8");
+    req.on("data", d => { data += d; if (data.length > 2e6) req.destroy(); });
+    req.on("end", async () => {
+      let body = null;
+      try { body = JSON.parse(data); } catch {}
+      const str = (s) => (typeof s === "string" ? s : "");
+      const ctx = { prefix: str(body?.prefix), suffix: str(body?.suffix), nextLine: body?.nextLine === true, file: str(body?.file) }, inChars = ctx.prefix.length + ctx.suffix.length;
+      const cfg = config(values(), () => true), key = cfg.provider === "off" ? null : apiKey(cfg.provider).key;
+      if (!cfg.enabled) return send(502, { error: "inline suggestions are off on the desktop" });
+      if (ctx.file && denied(ctx.file, cfg.exclude)) return send(502, { error: "the desktop's editor.inlineSuggest.exclude leaves this file out" });
+      if (cfg.limit && usageOf(cfg.key).requests >= cfg.limit) return send(502, { error: `${cfg.label}: today's limit of ${cfg.limit} requests is reached on the desktop` });
+      if (cfg.hosted && !key) return send(502, { error: `${cfg.label}: ${keyHelp(cfg.provider)}` });
+      const ac = new AbortController(), t0 = Date.now();
+      res.on("close", () => ac.abort());
+      let sent = 0;
+      const write = (text) => {
+        if (text.length <= sent) return;
+        if (!res.headersSent) res.writeHead(200, ND);
+        res.write(JSON.stringify({ response: text.slice(sent) }) + "\n");
+        sent = text.length;
+      };
+      try {
+        const { status, json } = await postStream(request(cfg, ctx, true, key ?? ""), ac.signal, (text) => { write(text); return false; });
+        const text = reply(cfg, status, json)[0];
+        write(text);
+        recordUsage(cfg.key, { inChars, outChars: text.length, ms: Date.now() - t0 });
+        send(200, { response: "", done: true });
+      } catch (e) {
+        const error = failure(cfg, e);
+        if (error === null) return res.destroy(); // the remote editor stopped reading
+        recordUsage(cfg.key, { inChars });
+        send(502, { error });
+      }
+    });
+  });
+}
+
+module.exports = { PROVIDERS, MODELS, DEFAULTS, EXCLUDE, MAX_FILE_CHARS, NO_DESKTOP, desktop, desktopsDir, viaDesktop, proxy, normalize, config, globRe, denied, atSuggestable, quietEnd, contextAt,
   typeThrough, nextWordLength, nextLineLength, trimLineSuffix, proseFile, blockCut, clean, Health, template, request, warmup, show, modelInfo,
   chatModel, missingText, chatHint, reply, failure, post, postStream, HOSTED, apiKey, keyHelp, maskKey, saveKey, removeKey, cacheKey, cost,
   usageFile, today, usageOf, recordUsage, percentile, usageText };
