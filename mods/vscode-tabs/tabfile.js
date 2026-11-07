@@ -2,7 +2,7 @@
 
 // vscode-explorer's tab menu popup (its menu.js TabMenu): rows of 26px, separators of 9px, 10px padding, as its
 // paths.js menuHeight gives for tabMenuItems (a fixed set of rows; the test checks it).
-export const TAB_MENU = { width: 300, height: 306 };
+export const TAB_MENU = { width: 300, height: 332 };
 
 // The file tab `id` of `space` shows, as the tab menu's props: { tab, file, on, pane, argv, root }. An editor tab is a
 // terminal running the editor launcher (vsedit.sh, as vscode-explorer's paths.js editorFileOf reads it: a mod can't

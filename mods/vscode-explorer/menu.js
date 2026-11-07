@@ -136,7 +136,7 @@ export class ExplorerMenu {
   }
 }
 
-// The editor tab menu, for a { tabMenu: { tab, file, on, pane, argv, root } } overlay (vscode-tabs' tabfile.js): VS Code's
+// The editor tab menu, for a { tabMenu: { tab, file, on, pane, argv, root, dirty } } overlay (vscode-tabs' tabfile.js): VS Code's
 // editor tab context menu, the items Herdr can do (paths.js tabMenuItems). Closing goes through tab.close as the tab's
 // × does: the editor keeps unsaved text as a hot-exit backup and offers it back on the next open.
 export class TabMenu extends ExplorerMenu {
@@ -161,9 +161,10 @@ export class TabMenu extends ExplorerMenu {
     });
     this.close();
     switch (action) {
-      case "close": case "closeOthers": case "closeRight": case "closeAll": {
+      case "close": case "closeOthers": case "closeRight": case "closeSaved": case "closeAll": {
         const space = spaces().find(s => s.tabs.some(x => x.id === t.tab));
-        for (const args of closeArgs(action, space?.tabs ?? [], t.tab, fileTabs(space, panes(), terminals()))) run("tab.close", args);
+        const dirty = new Set(t.dirty ?? []);
+        for (const args of closeArgs(action, space?.tabs ?? [], t.tab, fileTabs(space, panes(), terminals()), dirty)) run("tab.close", args);
         return;
       }
       case "copyPath": return copyText(t.file);

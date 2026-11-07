@@ -139,6 +139,7 @@ export const menuHeight = (rows) => rows.reduce((h, r) => h + (r === "-" ? 9 : 2
 const TAB_KEYS = {
   close: { mac: "⌘W", win: "Ctrl+F4", linux: "Ctrl+W" },
   closeOthers: { mac: "⌥⌘T" },
+  closeSaved: { mac: "⌘K U", win: "Ctrl+K U", linux: "Ctrl+K U" },
   copyPath: { mac: "⌥⌘C", win: "Shift+Alt+C", linux: "Ctrl+Alt+C" },
   copyRelative: { mac: "⌥⇧⌘C", win: "Ctrl+K Ctrl+Shift+C", linux: "Ctrl+Shift+Alt+C" },
   reveal: { mac: "⌥⌘R", win: "Shift+Alt+R", linux: "Ctrl+Alt+R" },
@@ -152,7 +153,8 @@ const REVEAL_LABEL = { mac: "Reveal in Finder", win: "Reveal in File Explorer", 
 export function tabMenuItems({ remote, os }) {
   const key = (id) => TAB_KEYS[id][os] ?? "";
   const groups = [
-    [["Close", "close", key("close")], ["Close Others", "closeOthers", key("closeOthers")], ["Close to the Right", "closeRight"], ["Close All", "closeAll"]],
+    [["Close", "close", key("close")], ["Close Others", "closeOthers", key("closeOthers")], ["Close to the Right", "closeRight"],
+      ["Close Saved", "closeSaved", key("closeSaved")], ["Close All", "closeAll"]],
     [["Copy Path", "copyPath", key("copyPath")], ["Copy Relative Path", "copyRelative", key("copyRelative")]],
     [["Reopen Editor With…", "reopenWith"]],
     [[REVEAL_LABEL[os], "reveal", key("reveal"), remote], ["Reveal in Explorer View", "revealExplorer"]],
@@ -168,15 +170,16 @@ export const fileTabs = (space, panes, terminals) => {
   return new Set(panes.filter(p => tabs.has(p.tab) && (p.mod === "vscode-viewer" || (p.terminal && editorFileOf(argv.get(p.terminal)) !== null))).map(p => p.tab));
 };
 
-// tab.close args for a close item on tab `id`, in tab bar order (`tabs`: its space's; `files`: fileTabs). Close Others /
-// to the Right / All close file tabs only, as VS Code closes editors: a shell or a running agent stays. When nothing
-// is left in the space, the last one is confirmed: no "Close space?", vscode-spaces keeps it as a gray row, as the ×.
-export function closeArgs(action, tabs, id, files) {
+// tab.close args for a close item on tab `id`, in tab bar order (`tabs`: its space's; `files`: fileTabs; `dirty`: the
+// tabs whose editor has unsaved changes, vscode-tabs' dirtyTabs). Close Others / to the Right / Saved / All close file
+// tabs only, as VS Code closes editors: a shell or a running agent stays; Close Saved leaves the unsaved ones. When
+// nothing is left in the space, the last one is confirmed: no "Close space?", vscode-spaces keeps it as a gray row, as the ×.
+export function closeArgs(action, tabs, id, files, dirty = new Set()) {
   const at = tabs.findIndex(t => t.id === id);
   if (at < 0) return [];
   const isFile = (t) => files.has(t.id);
   const picked = { close: [tabs[at]], closeOthers: tabs.filter(t => t.id !== id && isFile(t)), closeRight: tabs.slice(at + 1).filter(isFile),
-    closeAll: tabs.filter(t => t.id === id || isFile(t)) }[action] ?? [];
+    closeSaved: tabs.filter(t => isFile(t) && !dirty.has(t.id)), closeAll: tabs.filter(t => t.id === id || isFile(t)) }[action] ?? [];
   return picked.map((t, i) => (picked.length === tabs.length && i === picked.length - 1 ? { id: t.id, confirmed: true } : { id: t.id }));
 }
 

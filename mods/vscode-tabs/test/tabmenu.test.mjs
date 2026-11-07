@@ -49,11 +49,12 @@ test("a remote space's editor tab is on that machine", () => {
 });
 
 test("the menu is VS Code's tab menu, the items Herdr can do, with the OS's keys", () => {
-  assert.deepEqual(labels(tabMenuItems({ remote: false, os: "mac" })), ["Close", "Close Others", "Close to the Right", "Close All", "Copy Path",
+  assert.deepEqual(labels(tabMenuItems({ remote: false, os: "mac" })), ["Close", "Close Others", "Close to the Right", "Close Saved", "Close All", "Copy Path",
     "Copy Relative Path", "Reopen Editor With…", "Reveal in Finder", "Reveal in Explorer View", "Split Right"]);
   const hint = (os, action) => tabMenuItems({ remote: false, os }).find(r => r[1] === action)[2] ?? "";
   assert.deepEqual(["mac", "win", "linux"].map(os => hint(os, "close")), ["⌘W", "Ctrl+F4", "Ctrl+W"]);
   assert.deepEqual(["mac", "win", "linux"].map(os => hint(os, "closeOthers")), ["⌥⌘T", "", ""]);
+  assert.deepEqual(["mac", "win", "linux"].map(os => hint(os, "closeSaved")), ["⌘K U", "Ctrl+K U", "Ctrl+K U"]);
   assert.deepEqual(["mac", "win", "linux"].map(os => hint(os, "copyRelative")), ["⌥⇧⌘C", "Ctrl+K Ctrl+Shift+C", "Ctrl+Shift+Alt+C"]);
   assert.deepEqual(["mac", "win", "linux"].map(os => tabMenuItems({ remote: false, os }).find(r => r[1] === "reveal")[0]),
     ["Reveal in Finder", "Reveal in File Explorer", "Open Containing Folder"]);
@@ -63,7 +64,7 @@ test("a remote file's Reveal in Finder is disabled, every other item stays", () 
   const rows = tabMenuItems({ remote: true, os: "mac" });
   assert.deepEqual(rows.filter(r => r !== "-" && r[3]).map(r => r[1]), ["reveal"]);
   assert.ok(tabMenuItems({ remote: false, os: "mac" }).every(r => r === "-" || !r[3]));
-  assert.equal(labels(rows).length, 10);
+  assert.equal(labels(rows).length, 11);
 });
 
 test("the tab bar opens the popup at the menu's own height on every OS", () => {
@@ -103,9 +104,18 @@ test("only when no tab is left in the space is the last close confirmed, so the 
   assert.deepEqual(closeArgs("closeOthers", [{ id: "x" }], "x", new Set(["x"])), []);
 });
 
+test("Close Saved closes the file tabs without unsaved changes, the clicked one too, and leaves shells and agents", () => {
+  assert.deepEqual(closeArgs("closeSaved", mixed, "c", files, new Set(["b"])), [{ id: "c" }, { id: "e" }]);
+  assert.deepEqual(closeArgs("closeSaved", mixed, "b", files, new Set(["b", "e"])), [{ id: "c" }]);
+  assert.deepEqual(closeArgs("closeSaved", mixed, "b", files), [{ id: "b" }, { id: "c" }, { id: "e" }]);
+  const two = [{ id: "x" }, { id: "y" }], both = new Set(["x", "y"]);
+  assert.deepEqual(closeArgs("closeSaved", two, "x", both, new Set()), [{ id: "x" }, { id: "y", confirmed: true }]);
+});
+
 test("a tab that is gone or an unknown item closes nothing", () => {
   assert.deepEqual(closeArgs("closeAll", mixed, "gone", files), []);
-  assert.deepEqual(closeArgs("closeSaved", mixed, "b", files), []);
+  assert.deepEqual(closeArgs("closeSaved", mixed, "gone", files), []);
+  assert.deepEqual(closeArgs("pin", mixed, "b", files), []);
 });
 
 test("Split Right opens the same file beside it: the editor again, or a viewer pane", () => {

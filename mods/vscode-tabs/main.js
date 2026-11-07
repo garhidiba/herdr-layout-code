@@ -45,7 +45,7 @@ export default class Tabs extends View {
         .on_mouse_down("right", (_e, cx) => {
           cx.stop_propagation();
           const file = tabFileOf(c.id, space, panes(), terminals(), shared("vscode-viewer.focused"));
-          openOverlay(file ? { mod: "vscode-explorer", kind: "popup", ...TAB_MENU, props: { tabMenu: file } }
+          openOverlay(file ? { mod: "vscode-explorer", kind: "popup", ...TAB_MENU, props: { tabMenu: { ...file, dirty: [...dirty] } } }
             : { mod: "menu", kind: "popup", width: 200, props: { tab: "tab", target: { id: c.id, space: space.id } } });
         })
         .when(Boolean(program?.icon), el => el.child(program.tint ? svg(program.icon).size(14).text_color(t.muted) : image(program.icon).size(14)))
