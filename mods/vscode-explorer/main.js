@@ -13,6 +13,7 @@ import { createCore } from "./core.js";
 import { editorFileOf, autoRevealOf, revealPath, DETAILS } from "./paths.js";
 import { createDesktop } from "./desktop.js";
 import { createDetails } from "./details.js";
+import { createOps } from "./ops.js";
 // Herdr starts with PATH=/usr/bin:/bin, so Homebrew/user tools (node, code, codex, trash) are looked up here too.
 const userExec = (cmd, args, opts) => exec("sh", ["-c", 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; exec "$0" "$@"', cmd, ...args], opts);
 
@@ -439,6 +440,12 @@ export default class Files extends View {
       .child(v_flex().id("explorer-tree").flex_1().min_h(0).p(4)
         .on_mouse_down("left", e => { this.platform = Boolean(e.modifiers?.platform); })
         .on_mouse_down("right", (_e, cx) => this.menu(this.root, true, cx))
+        // Files dropped from Finder are copied into the tree's folder (ops.js drop). The drop names no row, so they
+        // land in the root wherever they are let go; the folder watch shows them.
+        .on_drop((e, cx) => {
+          const [folder, on] = [this.root, this.on];
+          if (folder && e.paths?.length) cx.spawn(() => createOps(exec, on).drop(e.paths, folder).catch(err => notify({ title: "Explorer", body: String(err?.message ?? err), level: "error" })));
+        })
         .when(rows.length > 0, el => el.child(div().flex_1().min_h(0).relative()
           .child(v_virtual_list("explorer-rows", rows.length, ROW, i => rows[i].path, range => rows.slice(range.start, range.end).map(r => this.row(r, t)))
             .size_full().track_scroll(this.scroll)

@@ -87,6 +87,28 @@ test("paste copies under a free name, moves on cut, and stays on one machine", a
   rmSync(d, { recursive: true });
 });
 
+test("dropped files and folders are copied in under free names, never moved or overwritten", async () => {
+  const d = tmp(), { ops } = machine(null), to = join(d, "to"), odd = join(d, `it's "한글" $x.txt`);
+  mkdirSync(to); mkdirSync(join(d, "my.dir"));
+  writeFileSync(join(d, "my.dir", "x"), "x");
+  writeFileSync(odd, "new");
+  writeFileSync(join(to, `it's "한글" $x.txt`), "old");
+  await ops.drop([odd, join(d, "my.dir")], to);
+  assert.equal(readFileSync(join(to, `it's "한글" $x.txt`), "utf8"), "old");
+  assert.equal(readFileSync(join(to, `it's "한글" $x copy.txt`), "utf8"), "new");
+  assert.equal(readFileSync(join(to, "my.dir", "x"), "utf8"), "x");
+  assert.ok(existsSync(odd) && existsSync(join(d, "my.dir")));
+  await ops.drop([join(d, "my.dir")], to);
+  assert.ok(existsSync(join(to, "my.dir copy", "x"))); // a folder keeps its whole name
+  rmSync(d, { recursive: true });
+});
+
+test("a drop onto another machine's tree is refused before anything is copied", async () => {
+  const { ops, calls } = machine("box");
+  await assert.rejects(ops.drop(["/local/a.txt"], "/remote/to"), /not supported yet/);
+  assert.equal(calls.length, 0);
+});
+
 test("a machine that can't be reached rejects as unreachable; locally the error passes through as is", async () => {
   const down = createOps(async () => { throw new Error("cannot reach box"); }, "box");
   await assert.rejects(down.mkdir("/x"), (e) => e.unreachable === true && e.message === "box: cannot reach box");

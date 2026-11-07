@@ -31,5 +31,11 @@ export function createOps(exec, on = null) {
       const name = await freeName(baseName(src), (n) => exists(`${folder}/${n}`), clip.dir);
       await must(clip.cut ? "mv" : "cp", [...(clip.cut ? ["-n"] : ["-R", "-n"]), src, `${folder}/${name}`], "Paste failed");
     },
+    // Copies files dropped from this computer (Finder) into `folder`, each as a paste: a free name, never a move.
+    // Nothing uploads to another machine yet, so a remote tree refuses before copying anything.
+    async drop(paths, folder) {
+      if (on) throw new Error("Dropping files onto another machine's folder is not supported yet.");
+      for (const path of paths) await this.paste({ path, dir: (await run("test", ["-d", path])).code === 0 }, folder);
+    },
   };
 }
