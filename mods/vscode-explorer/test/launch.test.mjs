@@ -135,6 +135,40 @@ test("a tab Herdr never shows is ended and opened with tab.new instead", async (
   assert.deepEqual(h.calls, [["tab.new", editor]]);
 });
 
+test("a warm tab handed the open is named and selected, with no hc run; none (or a failing hand-off) opens as before", async () => {
+  let h = harness();
+  const openTab = (warm, log) => createOpenTab({ hc: async (a) => { h.hcCalls.push(a); return { code: 0, stdout: '{"address":"t9"}' }; },
+    run: (n, a) => h.calls.push([n, a]), spaces: () => [{ id: "sp1", machine: null, active: true, tabs: [{ id: "tbX" }, { id: "tbW" }] }],
+    panes: () => [], newId: () => "tbX", warm, log });
+  const asked = [];
+  await openTab(async (space, args) => { asked.push([space.id, args.name]); return "tbW"; })(editor, { sleep: async () => {} });
+  assert.deepEqual(asked, [["sp1", "a.ts"]]);
+  assert.deepEqual(h.hcCalls, []);
+  assert.deepEqual(h.calls, [["tab.rename", { id: "tbW", name: "a.ts" }], ["tab.select", { id: "tbW" }]]);
+  for (const warm of [async () => null, async () => { throw new Error("gone"); }]) {
+    h = harness();
+    await openTab(warm)(editor, { sleep: async () => {} });
+    assert.equal(h.hcCalls[0][0], "run");
+    assert.deepEqual(h.calls.map(c => c[0]), ["tab.rename", "tab.select"]);
+  }
+});
+
+test("the timing log gets each step of an open: warm (start, select) and cold (start, hc-run, shown, select)", async () => {
+  const logs = [];
+  const opener = (warm) => createOpenTab({ hc: async () => ({ code: 0, stdout: '{"address":"t9"}' }), run: () => {},
+    spaces: () => [{ id: "sp1", machine: null, active: true, tabs: [{ id: "tbX" }] }], panes: () => [], newId: () => "tbX", warm, log: (f) => logs.push(f) });
+  await opener(async () => "tbW")(editor, { sleep: async () => {} });
+  await opener(null)(editor, { sleep: async () => {} });
+  assert.deepEqual(logs.map(l => `${l.step}:${l.mode}`), ["start:cold", "select:warm", "start:cold", "hc-run:cold", "shown:cold", "select:cold"]);
+  assert.ok(logs.every(l => l.name === "a.ts" && l.ms >= 0 && l.at >= l.ms));
+});
+
+test("extra labels go on the terminal with Herdr's", () => {
+  const args = directRun(editor, where, ["vscode.warm=1"]);
+  assert.deepEqual(args.slice(7, 13), ["--label", "herdr.space=sp1", "--label", "herdr.tab=tb1", "--label", "vscode.warm=1"]);
+  assert.equal(args[13], "--");
+});
+
 test("vscode-settings carries the same launch.js", () => {
   const read = (mod) => readFileSync(new URL(`../../${mod}/launch.js`, import.meta.url), "utf8");
   assert.equal(read("vscode-settings"), read("vscode-explorer"));

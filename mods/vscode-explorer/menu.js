@@ -2,14 +2,28 @@
 // same mod (props { menu }, { dialog } or { tabMenu }), so they share the open rule in paths.js with the tree.
 import { div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { exec, hc, run, spaces, panes, terminals, props, openOverlay, closeOverlay, theme, shared, setShared, appHome, readTextFile, writeTextFile, notify, window } from "herdr";
+import { exec, hc, run, spaces, panes, terminals, machines, props, openOverlay, closeOverlay, theme, shared, setShared, appHome, home, readTextFile, writeTextFile, notify, window } from "herdr";
 import { createOpenTab } from "./launch.js";
+import { createWarmPool, TIMING } from "./warm.js";
 import { menuItems, menuHeight, openWith, baseName, parentOf, relativeTo, nameProblem, vscodeRemoteArgs, isMarkdown, editorTabOf,
   tabMenuItems, closeArgs, fileTabs, splitArgs, clipboardCommand, revealCommand } from "./paths.js";
 import { createOps } from "./ops.js";
 import { createRemote, createOpenFile, keysOs, ROOT, INSTALL_COMMAND, INSTALL_REQUEST } from "./remote.js";
 
-const openTab = createOpenTab({ hc, run, spaces, panes });
+// Each local space's hidden warm editor tab (warm.js): the tree keeps them (main.js), any open hands one a file.
+export const warm = createWarmPool({ hc, run, exec, spaces, terminals, machines, shared, setShared, appHome, home, readTextFile });
+// workbench.editor.openTimingLog: each open's steps as JSON lines in <herdr home>/.vscode-open-timing.log (hidden: no
+// mod reload), written after the tab is selected so the timing doesn't pay for it.
+let timing = [];
+const logOpen = (fields) => {
+  if (!shared(TIMING)) return;
+  timing = [...timing.slice(-49), JSON.stringify(fields)]; // opens that never select (tab.new) don't pile up
+  if (fields.step !== "select") return;
+  const text = timing.join("\n") + "\n";
+  timing = [];
+  exec("sh", ["-c", 'printf %s "$1" >> "$2"', "log", text, `${appHome()}/.vscode-open-timing.log`]).catch(() => {});
+};
+const openTab = createOpenTab({ hc, run, spaces, panes, warm: warm.claim, log: logOpen });
 // The editor on a remote space's machine (remote.js): installing it is asked on each open with the shipped confirm dialog,
 // whose yes runs INSTALL_COMMAND for the tree (main.js), naming the machine in the shared value INSTALL_REQUEST.
 const askInstall = (machine, size) => {

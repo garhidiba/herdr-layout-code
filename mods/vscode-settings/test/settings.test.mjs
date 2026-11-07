@@ -175,6 +175,12 @@ test("explorer.autoReveal: on by default, a boolean the toggle writes, anything 
   assert.throws(() => withSetting({}, "explorer.autoReveal", "off"));
 });
 
+test("workbench.editor.preloadEditor: on by default, a boolean", () => {
+  assert.equal(normalize({})["workbench.editor.preloadEditor"], true);
+  assert.equal(normalize({ "workbench.editor.preloadEditor": false })["workbench.editor.preloadEditor"], false);
+  assert.equal(normalize({ "workbench.editor.preloadEditor": "no" })["workbench.editor.preloadEditor"], true);
+});
+
 test("a server address is checked as typed: http(s), a host, a port in range; empty is the default", () => {
   for (const ok of ["", "  ", "http://127.0.0.1:11434", "http://192.168.0.10:1234/v1", "https://gpu.lan", "http://[::1]:11434/", "HTTP://Box:8080"]) assert.equal(endpointProblem(ok), null, ok);
   assert.match(endpointProblem("localhost:11434"), /^Start the address with http:\/\//);

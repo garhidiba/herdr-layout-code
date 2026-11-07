@@ -7,7 +7,8 @@ import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, v_virtual_list, VirtualListScrollHandle } from "gpui-base";
 import { spaces, panes, focused, terminals, exec, readTextFile, watchFolder, theme, window, appHome, props, shared, setShared, notify, nextCommand } from "herdr";
 import { freshRoot, encode, decode } from "./cache.js";
-import { ExplorerMenu, ExplorerDialog, TabMenu, openMenu, openInCode, refreshKey, openFile, remote, REVEAL } from "./menu.js";
+import { ExplorerMenu, ExplorerDialog, TabMenu, openMenu, openInCode, refreshKey, openFile, remote, warm, REVEAL } from "./menu.js";
+import { WARM } from "./warm.js";
 import { createCore } from "./core.js";
 import { editorFileOf, autoRevealOf, revealPath } from "./paths.js";
 // Herdr starts with PATH=/usr/bin:/bin, so Homebrew/user tools (node, code, codex, trash) are looked up here too.
@@ -27,14 +28,14 @@ function location() {
 const key = () => JSON.stringify(location());
 const PER_FOLDER = 500, TOTAL = 5000, ROW = 22;
 
-// The file the focused tab shows, { file, on }: an editor terminal's (its argv), or a viewer tab's (it shares its file
+// The file the focused tab shows, { file, on }: an editor terminal's (its argv or label), or a viewer tab's (it shares its file
 // when focused). null for any other tab; undefined while the focused terminal isn't listed yet.
 const VIEWER_FOCUS = "vscode-viewer.focused"; // vscode-viewer's
 function activeFile(f, viewer) {
   if (f?.terminal) {
     const term = terminals().find(t => t.address === f.terminal);
     if (!term) return undefined;
-    const file = editorFileOf(term.argv);
+    const file = editorFileOf(term.argv, term.labels);
     return file && { file, on: f.terminal.includes("/") ? f.terminal.split("/")[0] : null };
   }
   return f?.pane && viewer?.pane === f.pane && viewer.file ? { file: viewer.file, on: viewer.on ?? null } : null;
@@ -139,7 +140,12 @@ export default class Files extends View {
     // The confirm dialog's yes for installing the editor on a remote machine (menu.js askInstall).
     cx.spawn(async () => { for (;;) if (await nextCommand() === "install-remote") remote.installRequested(); });
     this.refresh(cx);
+    // The warm editor tabs (warm.js) are this tree's: ones listed from before (a restart, a reload) are forgotten, and
+    // the first pass ends their editors. Every 10s a pass reads workbench.editor.preloadEditor; render() runs one when due.
+    setShared(WARM, {});
+    this.warmFill(cx, 0);
     cx.timer.every(10000, cx => {
+      this.warmFill(cx, 0);
       this.refresh(cx);
       if (this.known && spaces().some(s => !this.known.has(s.id))) this.preloadAll(cx);
     });
@@ -147,6 +153,15 @@ export default class Files extends View {
     cx.timer.every(REMOTE_POLL, cx => { if (this.on) this.refresh(cx); });
     cx.timer.after(3000, cx => this.preloadAll(cx));
     cx.timer.every(PRELOAD_EVERY, cx => this.preloadAll(cx));
+  }
+
+  // One warm tab pass (warm.js fill) after `delay` ms; never two at once.
+  warmFill(cx, delay) {
+    if (this.warming) return;
+    this.warming = true;
+    cx.spawn(async cx => {
+      try { if (delay) await cx.sleep(delay); await warm.fill(cx); } finally { this.warming = false; }
+    });
   }
 
   // Saves the trees 2s after a change, at most once a minute.
@@ -401,6 +416,8 @@ export default class Files extends View {
     if (asked !== this.asked) { if (this.asked !== undefined) this.refresh(cx); this.asked = asked; }
     this.autoReveal(cx);
     this.revealAsked(cx);
+    const due = warm.due(); // a space without its warm tab (one was just used), or one to end
+    if (due !== null) this.warmFill(cx, due);
     const t = theme(), rows = this.rows("", 0, []), byPath = new Map(rows.map(r => [r.path, r]));
     this.scrollToRevealed(rows);
     return v_flex().id("explorer").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)

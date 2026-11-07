@@ -27,9 +27,14 @@ export function openArgs(file, { on = null, appHome, how = "auto", folder = pare
   return { name, folder, argv: ["exec", "sh", `${appHome}/${EDITOR}`, file, "--close-on-exit"] };
 }
 
+// The label a warm editor (warm.js: started with no file, handed one later) gets with the file it shows.
+export const FILE_LABEL = "vscode.file";
+
 // The file an editor tab shows: the argument after the launcher (EDITOR, or remote.js's copy: both end in vsedit.sh) in
-// its terminal's argv, however Herdr wrapped it; null for any other program.
-export function editorFileOf(argv) {
+// its terminal's argv, however Herdr wrapped it, or a warm editor's FILE_LABEL in its `labels`; null for any other
+// program (a warm editor still waiting too: `--warm` follows the launcher).
+export function editorFileOf(argv, labels) {
+  if (typeof labels?.[FILE_LABEL] === "string" && labels[FILE_LABEL]) return labels[FILE_LABEL];
   const i = Array.isArray(argv) ? argv.findIndex(a => /(^|[\\/])vsedit\.sh$/.test(a)) : -1;
   const file = i >= 0 ? argv[i + 1] : null;
   return typeof file === "string" && file && !file.startsWith("-") ? file : null;
@@ -49,19 +54,21 @@ export function normalPath(p) {
 // goes to a file's open editor instead of opening it again; null when none. `panes` and `terminals` are Herdr's.
 export function editorTabOf(file, on, space, panes, terminals) {
   const tabs = new Set((space?.tabs ?? []).map(t => t.id)), want = normalPath(file);
-  const argv = new Map(terminals.map(t => [t.address, t.argv]));
+  const term = new Map(terminals.map(t => [t.address, t]));
   const machine = (address) => (address.includes("/") ? address.split("/")[0] : null);
-  const shows = (address) => { const f = editorFileOf(argv.get(address)); return f !== null && normalPath(f) === want; };
+  const shows = (address) => { const f = editorFileOf(term.get(address)?.argv, term.get(address)?.labels); return f !== null && normalPath(f) === want; };
   return panes.find(p => p.terminal && tabs.has(p.tab) && machine(p.terminal) === (on ?? null) && shows(p.terminal))?.tab ?? null;
 }
 
-// VS Code's explorer.autoReveal in vscode-settings.json (comments and trailing commas allowed, as vscode-settings'
-// loose()): on unless it is false.
-export function autoRevealOf(text) {
+// vscode-settings.json's keys (comments and trailing commas allowed, as vscode-settings' loose()); {} when unreadable.
+export function settingsOf(text) {
   try {
-    return JSON.parse(String(text ?? "").replace(/^﻿/, "").replace(/("(?:[^"\\]|\\.)*")|\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, (m, str) => str ?? "").replace(/,(\s*[}\]])/g, "$1"))?.["explorer.autoReveal"] !== false;
-  } catch { return true; }
+    return JSON.parse(String(text ?? "").replace(/^﻿/, "").replace(/("(?:[^"\\]|\\.)*")|\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, (m, str) => str ?? "").replace(/,(\s*[}\]])/g, "$1")) ?? {};
+  } catch { return {}; }
 }
+
+// VS Code's explorer.autoReveal in vscode-settings.json: on unless it is false.
+export const autoRevealOf = (text) => settingsOf(text)["explorer.autoReveal"] !== false;
 
 // Where the tree reveals `file`: its path below `root` and the folders to open above it, outermost first; null for a
 // file outside the root (or the root itself), which leaves the tree as it is.
@@ -166,8 +173,9 @@ export function tabMenuItems({ remote, os }) {
 // The tabs of `space` showing a file (VS Code's editors): an editor terminal's or a vscode-viewer pane's. Shells and
 // agents are never among them.
 export const fileTabs = (space, panes, terminals) => {
-  const argv = new Map(terminals.map(t => [t.address, t.argv])), tabs = new Set((space?.tabs ?? []).map(t => t.id));
-  return new Set(panes.filter(p => tabs.has(p.tab) && (p.mod === "vscode-viewer" || (p.terminal && editorFileOf(argv.get(p.terminal)) !== null))).map(p => p.tab));
+  const term = new Map(terminals.map(t => [t.address, t])), tabs = new Set((space?.tabs ?? []).map(t => t.id));
+  const shows = (address) => editorFileOf(term.get(address)?.argv, term.get(address)?.labels) !== null;
+  return new Set(panes.filter(p => tabs.has(p.tab) && (p.mod === "vscode-viewer" || (p.terminal && shows(p.terminal)))).map(p => p.tab));
 };
 
 // tab.close args for a close item on tab `id`, in tab bar order (`tabs`: its space's; `files`: fileTabs; `dirty`: the

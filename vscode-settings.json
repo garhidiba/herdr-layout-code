@@ -19,6 +19,12 @@
   "files.insertFinalNewline": false,
   // The Explorer reveals and highlights the active editor's file (opens its folders, scrolls to it).
   "explorer.autoReveal": true,
+  // Each local space keeps an editor started in a hidden tab, so a file the Explorer opens shows at once (false: each
+  // open starts its editor, a little later).
+  "workbench.editor.preloadEditor": true,
+  // Debugging: each Explorer open's steps (start, hc-run, shown, select; warm or cold) as JSON lines with epoch ms in
+  // <herdr home>/.vscode-open-timing.log.
+  // "workbench.editor.openTimingLog": true,
   // The top line: folders › file › the symbols around the cursor (false: the file name only).
   "breadcrumbs.enabled": true,
   // The hover (type and docs, problems) after the mouse pointer rests 300 ms on a word; ⌘K ⌘I / Ctrl+K Ctrl+I shows it either way.

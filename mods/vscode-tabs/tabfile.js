@@ -4,19 +4,34 @@
 // paths.js menuHeight gives for tabMenuItems (a fixed set of rows; the test checks it).
 export const TAB_MENU = { width: 300, height: 332 };
 
+// vscode-explorer's (paths.js FILE_LABEL; warm.js WARM): a mod can't import another mod's files.
+const FILE_LABEL = "vscode.file";
+export const WARM = "vscode-explorer.warm";
+
+// The tabs of `space` the tab bar shows: all but the hidden warm editor tabs (`warm`: the shared WARM value,
+// { [space id]: { tab } }), which wait, settled, to be handed a file.
+export function shownTabs(space, warm) {
+  const hidden = new Set(Object.values(warm ?? {}).map(w => w?.tab));
+  return (space?.tabs ?? []).filter(t => !hidden.has(t.id));
+}
+
 // The file tab `id` of `space` shows, as the tab menu's props: { tab, file, on, pane, argv, root }. An editor tab is a
 // terminal running the editor launcher (vsedit.sh, as vscode-explorer's paths.js editorFileOf reads it: a mod can't
 // import another mod's files), its file the argument after it and `argv` the launcher's arguments; a viewer tab is the
 // vscode-viewer pane that shared itself as focused (`viewer`, its { pane, file, on }). null for any other tab, which
 // keeps Herdr's menu. `root` (Copy Relative Path, Reopen's folder): the editor's folder, which is the Explorer root it
 // was opened from, else the space's first terminal's folder, else the space folder.
+// A warm editor (vscode-explorer's warm.js: started as `vsedit.sh --warm <key>`, handed its file later) carries the
+// file as its terminal's FILE_LABEL (paths.js); `argv` is then the launcher's as if it had started with the file.
 export function tabFileOf(id, space, panes, terminals, viewer) {
   const tabs = new Set((space?.tabs ?? []).map(t => t.id)), on = space?.machine ?? null;
   const spaceRoot = panes.find(p => tabs.has(p.tab) && p.terminal && p.cwd)?.cwd || space?.folder || null;
   const mine = panes.filter(p => p.tab === id);
   for (const p of mine) {
-    const argv = p.terminal ? terminals.find(t => t.address === p.terminal)?.argv : null;
-    const i = Array.isArray(argv) ? argv.findIndex(a => /(^|[\\/])vsedit\.sh$/.test(a)) : -1, file = i >= 0 ? argv[i + 1] : null;
+    const term = p.terminal ? terminals.find(t => t.address === p.terminal) : null, argv = term?.argv;
+    const i = Array.isArray(argv) ? argv.findIndex(a => /(^|[\\/])vsedit\.sh$/.test(a)) : -1, labelled = term?.labels?.[FILE_LABEL];
+    if (i >= 0 && typeof labelled === "string" && labelled) return { tab: id, file: labelled, on, pane: p.pane, argv: [argv[i], labelled, "--close-on-exit"], root: p.cwd || spaceRoot };
+    const file = i >= 0 ? argv[i + 1] : null;
     if (typeof file === "string" && file && !file.startsWith("-")) return { tab: id, file, on, pane: p.pane, argv: argv.slice(i), root: p.cwd || spaceRoot };
   }
   const v = viewer?.file && mine.find(p => p.mod === "vscode-viewer" && p.pane === viewer.pane);

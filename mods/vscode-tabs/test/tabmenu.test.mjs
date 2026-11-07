@@ -2,7 +2,7 @@
 // The editor tab menu: which tabs get it (tabfile.js), and its items and actions (vscode-explorer's paths.js).
 import test from "node:test";
 import assert from "node:assert/strict";
-import { tabFileOf, editorTitleState, dirtyTabs, TAB_MENU } from "../tabfile.js";
+import { tabFileOf, editorTitleState, dirtyTabs, shownTabs, TAB_MENU } from "../tabfile.js";
 import { tabMenuItems, closeArgs, fileTabs, splitArgs, clipboardCommand, revealCommand, menuHeight } from "../../vscode-explorer/paths.js";
 
 const launcher = "/Users/me/.config/herdr-app/mods/vscode-viewer/editor/vsedit.sh";
@@ -71,6 +71,20 @@ test("the tab bar opens the popup at the menu's own height on every OS", () => {
   for (const os of ["mac", "win", "linux"]) for (const remote of [false, true]) {
     assert.equal(menuHeight(tabMenuItems({ remote, os })), TAB_MENU.height, `${os} remote=${remote}`);
   }
+});
+
+test("a warm editor (handed its file later) is a file tab once its label names the file; the tab bar never shows a waiting one", () => {
+  const warm = { address: "t2", argv: ["/bin/sh", "-c", "find", "sh", launcher, "--warm", "/h/.vscode-warm/b", "--close-on-exit"], labels: { "vscode.warm": "1" } };
+  const others = terminals.filter(t => t.address !== "t2");
+  assert.equal(tabFileOf("b", space, panes, [...others, warm], null), null);
+  assert.deepEqual([...fileTabs(space, panes, [...others, warm])].sort(), ["c"]);
+  const handed = { ...warm, labels: { "vscode.file": "/p/b.ts" } };
+  assert.deepEqual(tabFileOf("b", space, panes, [...others, handed], null),
+    { tab: "b", file: "/p/b.ts", on: null, pane: "p2", argv: [launcher, "/p/b.ts", "--close-on-exit"], root: "/p" });
+  assert.deepEqual([...fileTabs(space, panes, [...others, handed])].sort(), ["b", "c"]);
+  assert.deepEqual(shownTabs(space, { [space.id]: { tab: "b", key: "k", address: "t2" } }).map(t => t.id), ["a", "c", "d"]);
+  assert.deepEqual(shownTabs(space, undefined).map(t => t.id), ["a", "b", "c", "d"]);
+  assert.deepEqual(shownTabs(null, {}), []);
 });
 
 test("file tabs are the editor and viewer tabs; a shell or an agent never is one", () => {

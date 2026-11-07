@@ -20,6 +20,7 @@ export const DEFAULTS = {
   "editor.wordWrapColumn": 80,        // 1-500
   "editor.wrappingIndent": "same",    // "none" | "same" | "indent" | "deepIndent"
   "explorer.autoReveal": true,        // the Explorer reveals and highlights the active editor's file (vscode-explorer)
+  "workbench.editor.preloadEditor": true, // each local space keeps an editor started, hidden, so a file opens at once (vscode-explorer warm.js)
 };
 export const CHOICES = { "core.engine": ["js", "rust"], "editor.engine": ["js", "rust"], "files.autoSave": ["off", "afterDelay", "onFocusChange"],
   "editor.inlineSuggest.provider": ["ollama", "lmstudio", "codestral", "mercury", "off"],

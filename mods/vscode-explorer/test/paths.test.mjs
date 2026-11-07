@@ -116,6 +116,15 @@ test("an editor tab's file is the argument after the vsedit launcher, wrapped or
   }
 });
 
+test("a warm editor shows no file while it waits, then the one its label names (warm.js hands it over)", () => {
+  const warm = ["/bin/sh", "-c", "find", "sh", `${home}/mods/vscode-viewer/editor/vsedit.sh`, "--warm", `${home}/.vscode-warm/tb1`, "--close-on-exit"];
+  assert.equal(editorFileOf(warm, { "vscode.warm": "1" }), null);
+  assert.equal(editorFileOf(warm, { "vscode.file": "/p/b.ts" }), "/p/b.ts");
+  const tab = { tabs: [{ id: "tb1" }] }, panes = [{ tab: "tb1", terminal: "t5" }];
+  assert.equal(editorTabOf("/p/b.ts", null, tab, panes, [{ address: "t5", argv: warm, labels: { "vscode.file": "/p/b.ts" } }]), "tb1");
+  assert.equal(editorTabOf("/p/b.ts", null, tab, panes, [{ address: "t5", argv: warm, labels: {} }]), null);
+});
+
 test("revealing a file opens every folder above it, outermost first", () => {
   assert.deepEqual(revealPath("/p", "/p/src/lib/a.ts"), { path: "src/lib/a.ts", folders: ["src", "src/lib"] });
   assert.deepEqual(revealPath("/p", "/p/README.md"), { path: "README.md", folders: [] });
