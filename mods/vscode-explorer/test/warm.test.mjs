@@ -14,7 +14,8 @@ const editor = (file = "/p/a.ts") => openArgs(file, { appHome: APP, folder: "/p"
 
 // A fake Herdr: spaces with tabs, a shared store, hc that starts a labelled terminal which shows up as its tab after
 // `appearsAfter` polls, and exec for the handoff (`handoff`: its exit code) and rm. `real: true` runs exec for real.
-function world({ spaces = [{ id: "sp1", tabs: ["tbShell"] }], settings = "{}", appearsAfter = 1, hcCode = 0, handoff = 0, real = false, appHome = APP } = {}) {
+const ON = '{ "workbench.editor.preloadEditor": true }';
+function world({ spaces = [{ id: "sp1", tabs: ["tbShell"] }], settings = ON, appearsAfter = 1, hcCode = 0, handoff = 0, real = false, appHome = APP } = {}) {
   const store = {}, calls = [], hcCalls = [], execCalls = [], file = { settings };
   const live = spaces.map(s => ({ id: s.id, machine: s.machine ?? null, folder: s.folder ?? "/p", tabs: s.tabs.map((id, i) => ({ id, active: i === 0, settled: false })) }));
   const terms = [], pending = [];
@@ -31,6 +32,7 @@ function world({ spaces = [{ id: "sp1", tabs: ["tbShell"] }], settings = "{}", a
         pending.push({ at: polls + appearsAfter, space: labels["herdr.space"], tab: labels["herdr.tab"] });
         return { code: 0, stdout: JSON.stringify({ address }) };
       }
+      if (a[0] === "ls") return { code: 0, stdout: JSON.stringify({ terminals: terms.filter(t => !t.dead && t.labels[WARM_LABEL]).map(t => ({ address: t.address })) }) };
       if (a[0] === "kill") { const t = terms.find(x => x.address === a[1]); if (t) t.dead = true; for (const s of live) s.tabs = s.tabs.filter(x => x.id !== t?.labels["herdr.tab"]); }
       return { code: 0, stdout: "{}" };
     },
@@ -39,6 +41,7 @@ function world({ spaces = [{ id: "sp1", tabs: ["tbShell"] }], settings = "{}", a
       const tab = live.flatMap(s => s.tabs).find(t => t.id === args?.id);
       if (name === "tab.settle" && tab) tab.settled = true;
       if (name === "tab.unsettle" && tab) tab.settled = false;
+      if (name === "tab.select" && tab) for (const s of live) for (const t of s.tabs) t.active = t === tab || (t.active && !s.tabs.includes(tab));
     },
     exec: async (cmd, args) => {
       execCalls.push([cmd, args]);
@@ -73,13 +76,39 @@ test("each local space gets one hidden warm editor tab: listed first, started wi
   assert.equal(w.pool.due(), null);
 });
 
-test("a warm tab that Herdr made the active one gives the focus back", async () => {
+// Herdr showing the warm tab (as seen live: settling doesn't hide a shown tab) from the `fromPoll`th poll on.
+function showWarmAfter(w, fromPoll, tab = "tbW1") {
+  let polls = 0;
+  w.cx.sleep = (sleep => async () => {
+    await sleep();
+    if (++polls >= fromPoll) for (const s of w.live) if (s.tabs.some(t => t.id === tab)) for (const t of s.tabs) t.active = t.id === tab;
+  })(w.cx.sleep);
+}
+
+test("a new warm tab Herdr puts on screen: the shown tab comes back, the warm one ends at once, no more start", async () => {
+  for (const fromPoll of [1, 4]) { // shown as it appears, or a moment after it was settled
+    const w = world();
+    showWarmAfter(w, fromPoll);
+    await w.pool.fill(w.cx);
+    assert.deepEqual(w.calls, [["tab.settle", { id: "tbW1" }], ["tab.select", { id: "tbShell" }]], `poll ${fromPoll}`);
+    assert.ok(w.hcCalls.some(a => a[0] === "kill" && a[1] === "t1"));
+    assert.deepEqual(w.store[WARM], {});
+    w.advance(RETRY_MS * 10);
+    assert.equal(w.pool.due(), null, "never again until a reload");
+    await w.pool.fill(w.cx);
+    assert.equal(w.hcCalls.filter(a => a[0] === "run").length, 1);
+  }
+});
+
+test("a ready warm tab that ends up on screen later is ended on the next look", async () => {
   const w = world();
-  const pool = w.pool;
-  // Herdr selecting the new tab: the fake shows it as active
-  w.cx.sleep = (sleep => async () => { await sleep(); for (const s of w.live) for (const t of s.tabs) t.active = t.id === "tbW1"; })(w.cx.sleep);
-  await pool.fill(w.cx);
-  assert.deepEqual(w.calls, [["tab.settle", { id: "tbW1" }], ["tab.select", { id: "tbShell" }]]);
+  await w.pool.fill(w.cx);
+  for (const t of w.live[0].tabs) t.active = t.id === "tbW1"; // Herdr shows it (a click elsewhere, a restore)
+  assert.equal(w.pool.due(), 0, "at once");
+  await w.pool.fill(w.cx);
+  assert.ok(w.hcCalls.some(a => a[0] === "kill" && a[1] === "t1"));
+  assert.deepEqual(w.store[WARM], {});
+  assert.equal(w.hcCalls.filter(a => a[0] === "run").length, 1, "and none starts again");
 });
 
 test("opening a file hands it to the warm tab: no new terminal, the tab unsettled, moved last, named and selected", async () => {
@@ -137,12 +166,14 @@ test("only the Explorer's local editor is handed over: other programs, the viewe
   assert.equal(await w.pool.claim(space, editor()), "tbW1");
 });
 
-test("workbench.editor.preloadEditor false: none start, a running one ends on the next pass, opens go as before", async () => {
-  const off = world({ settings: '// mine\n{ "workbench.editor.preloadEditor": false, }' });
-  await off.pool.fill(off.cx);
-  assert.deepEqual(off.hcCalls, []);
-  assert.deepEqual(off.store[WARM] ?? {}, {});
-  assert.equal(off.pool.due(), null, "nothing to do while off");
+test("workbench.editor.preloadEditor is opt-in: absent or false, none start; turned off, a running one ends", async () => {
+  for (const settings of ["{}", '// mine\n{ "workbench.editor.preloadEditor": false, }', "not json"]) {
+    const off = world({ settings });
+    await off.pool.fill(off.cx);
+    assert.deepEqual(off.hcCalls.filter(a => a[0] !== "ls"), [], settings);
+    assert.deepEqual(off.store[WARM] ?? {}, {});
+    assert.equal(off.pool.due(), null, "nothing to do while off");
+  }
   const w = world();
   await w.pool.fill(w.cx);
   w.file.settings = '{ "workbench.editor.preloadEditor": false }';

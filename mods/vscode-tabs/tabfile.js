@@ -9,10 +9,10 @@ const FILE_LABEL = "vscode.file";
 export const WARM = "vscode-explorer.warm";
 
 // The tabs of `space` the tab bar shows: all but the hidden warm editor tabs (`warm`: the shared WARM value,
-// { [space id]: { tab } }), which wait, settled, to be handed a file.
+// { [space id]: { tab } }), which wait, settled, to be handed a file. One on screen is listed, so it can be left.
 export function shownTabs(space, warm) {
   const hidden = new Set(Object.values(warm ?? {}).map(w => w?.tab));
-  return (space?.tabs ?? []).filter(t => !hidden.has(t.id));
+  return (space?.tabs ?? []).filter(t => !hidden.has(t.id) || t.active);
 }
 
 // The file tab `id` of `space` shows, as the tab menu's props: { tab, file, on, pane, argv, root }. An editor tab is a

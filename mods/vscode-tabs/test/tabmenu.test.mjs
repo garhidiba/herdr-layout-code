@@ -84,6 +84,8 @@ test("a warm editor (handed its file later) is a file tab once its label names t
   assert.deepEqual([...fileTabs(space, panes, [...others, handed])].sort(), ["b", "c"]);
   assert.deepEqual(shownTabs(space, { [space.id]: { tab: "b", key: "k", address: "t2" } }).map(t => t.id), ["a", "c", "d"]);
   assert.deepEqual(shownTabs(space, undefined).map(t => t.id), ["a", "b", "c", "d"]);
+  const onScreen = { ...space, tabs: space.tabs.map(t => ({ ...t, active: t.id === "b" })) };
+  assert.deepEqual(shownTabs(onScreen, { [space.id]: { tab: "b" } }).map(t => t.id), ["a", "b", "c", "d"], "one on screen is listed, so it can be left");
   assert.deepEqual(shownTabs(null, {}), []);
 });
 

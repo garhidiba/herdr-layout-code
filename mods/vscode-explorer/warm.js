@@ -2,7 +2,8 @@
 // when a file opens. So each local space keeps one hidden tab whose editor already runs with no file (`vsedit.sh
 // --warm <key>`: terminal.cjs waitForFile, warm.rs): opening a file hands it the file and shows that tab, and the
 // next one starts behind it. The tab is settled (tab.next / tab.prev skip it) and listed in the shared value WARM,
-// whose tabs vscode-tabs leaves out. workbench.editor.preloadEditor: false in vscode-settings.json turns it off.
+// whose tabs vscode-tabs leaves out. Opt-in (workbench.editor.preloadEditor: true in vscode-settings.json): settling
+// doesn't hide a shown tab, and Herdr may show an adopted one; a warm tab seen on screen is ended at once (giveBack).
 // Remote spaces open as before. No Herdr imports, so node tests load it.
 import { directRun, newTabId } from "./launch.js";
 import { EDITOR, FILE_LABEL, editorFileOf, settingsOf } from "./paths.js";
@@ -17,6 +18,8 @@ export const TIMING = "vscode-explorer.openTiming";
 export const PRELOAD_KEY = "workbench.editor.preloadEditor", TIMING_KEY = "workbench.editor.openTimingLog";
 // After a warm editor fails to start or ends by itself, the next try waits this long.
 export const RETRY_MS = 30000;
+// How long a new warm tab must stay off screen before it is used (Herdr may show an adopted tab a moment later).
+export const GUARD_MS = 500;
 
 // Hands file and folder to the warm editor of <key> ($1): written to <key>, then SIGUSR2 to the pid in <key>.pid,
 // which the editor writes once it can take one. Fails (nonzero) when it isn't ready or is gone.
@@ -37,7 +40,17 @@ export function createWarmPool({ hc, run, exec, spaces, terminals, machines, sha
     exec("rm", ["-f", key, `${key}.pid`]).catch(() => {});
   };
   const spaceOf = (id) => spaces().find(s => s.id === id);
-  let filling = false, retryAt = 0, swept = false, enabled = true; // enabled: as the last pass read it
+  // enabled: as the last pass read it. broken: a warm tab was shown (Herdr selected it): none start until a reload.
+  let filling = false, retryAt = 0, swept = false, enabled = false, broken = false;
+  const isShown = (space, tab) => !!spaceOf(space)?.tabs.find(t => t.id === tab)?.active;
+  // A warm tab on screen: tab.settle only takes a tab out of the lists, so a shown one stays shown, as "Ready" with the
+  // tab bar leaving it out. The screen goes back to `before` (if given) and the tab is ended at once; no more start.
+  const giveBack = (space, w, before) => {
+    if (before && before !== w.tab) run("tab.select", { id: before });
+    end(w);
+    put(space, null);
+    broken = true;
+  };
 
   // The id of `space`'s warm tab, handed tab.new `args` (the Explorer's local editor: paths.js openArgs), unsettled and
   // moved last as a new tab would be; null when there is none ready or args are another program's (the open goes on
@@ -59,10 +72,11 @@ export function createWarmPool({ hc, run, exec, spaces, terminals, machines, sha
   function due() {
     if (filling) return null;
     const all = entries(), live = spaces();
-    let later = !swept || (enabled && now() >= retryAt && live.some(s => !s.machine && !all[s.id]));
+    let later = !swept || (enabled && !broken && now() >= retryAt && live.some(s => !s.machine && !all[s.id]));
     for (const [id, w] of Object.entries(all)) {
       const s = live.find(x => x.id === id);
       if (s?.tabs.length === 1 && s.tabs[0].id === w.tab) return 0;
+      if (w.address && s?.tabs.find(t => t.id === w.tab)?.active) return 0; // on screen
       if (!s?.tabs.some(t => t.id === w.tab)) later = true;
     }
     return later ? 500 : null;
@@ -75,24 +89,30 @@ export function createWarmPool({ hc, run, exec, spaces, terminals, machines, sha
     filling = true;
     try {
       const settings = settingsOf(await readTextFile(`${appHome()}/vscode-settings.json`).catch(() => null));
-      enabled = settings[PRELOAD_KEY] !== false;
+      enabled = settings[PRELOAD_KEY] === true;
       if (shared(TIMING) !== (settings[TIMING_KEY] === true)) setShared(TIMING, settings[TIMING_KEY] === true);
       if (!swept && machines().find(m => m.name === null)?.layout === "ready") {
         swept = true;
-        const mine = new Set(Object.values(entries()).map(w => w.tab));
-        for (const t of terminals()) {
-          const tab = t.labels?.["herdr.tab"];
-          if (t.labels?.[WARM_LABEL] && !String(t.address).includes("/") && !mine.has(tab)) end({ address: t.address, key: `${dir()}/${tab}` });
+        // `hc ls --label` (its JSON rows carry no labels); terminals() rows name the tab for the hand-off files.
+        const listed = await hc(["ls", "--json", "--label", `${WARM_LABEL}=1`]).catch(() => null);
+        let found = [];
+        try { found = listed?.code === 0 ? JSON.parse(listed.stdout).terminals ?? [] : []; } catch {}
+        const mine = new Set(Object.values(entries()).map(w => w.address));
+        for (const { address } of found) {
+          if (typeof address !== "string" || address.includes("/") || mine.has(address)) continue;
+          const tab = terminals().find(t => t.address === address)?.labels?.["herdr.tab"];
+          end({ address, key: `${dir()}/${tab}` });
         }
       }
       for (const [id, w] of Object.entries(entries())) {
         const s = spaceOf(id), shown = s?.tabs.some(t => t.id === w.tab);
-        if (enabled && shown && s.tabs.length > 1) continue;
+        if (w.address && isShown(id, w.tab)) { giveBack(id, w, null); continue; }
+        if (enabled && !broken && shown && s.tabs.length > 1) continue;
         end(w);
         put(id, null);
         if (enabled && s && !shown) retryAt = now() + RETRY_MS; // it ended by itself
       }
-      if (!enabled || now() < retryAt) return;
+      if (!enabled || broken || now() < retryAt) return;
       for (const s of spaces()) {
         if (s.machine || entries()[s.id] || !s.tabs.length) continue;
         if (!(await start(s, cx))) { retryAt = now() + RETRY_MS; return; }
@@ -100,8 +120,8 @@ export function createWarmPool({ hc, run, exec, spaces, terminals, machines, sha
     } finally { filling = false; }
   }
 
-  // Starts `space`'s warm tab: listed in WARM before it exists (the tab bar never shows it), settled once Herdr shows
-  // it (the tab that was active stays so), claimable once settled. False when it doesn't start or show up.
+  // Starts `space`'s warm tab: listed in WARM before it exists (the tab bar never shows it), settled once Herdr adopts
+  // it, claimable once it stayed off screen for GUARD_MS. False when it doesn't start, show up, or comes on screen.
   async function start(space, cx) {
     const tab = newId(), key = `${dir()}/${tab}`, before = space.tabs.find(t => t.active)?.id;
     put(space.id, { tab, key, address: null });
@@ -114,7 +134,8 @@ export function createWarmPool({ hc, run, exec, spaces, terminals, machines, sha
     for (let waited = 0; !shown() && waited < wait; waited += step) await cx.sleep(step);
     if (!shown()) { end({ address, key }); put(space.id, null); return false; }
     run("tab.settle", { id: tab });
-    if (shown().active && before && before !== tab) run("tab.select", { id: before });
+    for (let waited = 0; waited < GUARD_MS && !isShown(space.id, tab); waited += step) await cx.sleep(step);
+    if (isShown(space.id, tab) || !shown()) { giveBack(space.id, { address, key, tab }, before); return false; }
     put(space.id, { tab, key, address });
     return true;
   }
