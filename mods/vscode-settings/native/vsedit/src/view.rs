@@ -937,12 +937,15 @@ impl Editor {
 
     /// A buttonless motion: the changed bar alone, "" when nothing changed, None for a whole frame (or not a hover).
     pub fn hover(&mut self, ev: &Ev) -> Option<String> {
-        if self.popup.is_some() {
-            return None;
-        }
         let Ev::Mouse(m) = ev else { return None };
         if !m.motion || m.button != 3 {
             return None;
+        }
+        if let Some(popup) = self.popup.as_mut() {
+            // over a popup only a menu's highlight follows the pointer; any other motion leaves the frame as it is
+            let area = Area { c: &self.c, rows: self.rows, cols: self.cols };
+            let moved = if let Popup::Menu(menu) = popup { menu.hover(m, &area) } else { false };
+            return if moved { None } else { Some(String::new()) };
         }
         let item = self.status_hits.iter().find(|h| m.y == self.rows && m.x >= h.0 && m.x < h.0 + h.1).map(|h| h.2);
         if matches!(item, Some(StatusAct::Inline | StatusAct::Wrap)) {

@@ -410,6 +410,24 @@ test("closing with unsaved changes asks Save / Don't Save / Cancel; hot exit kee
   delete process.env.VSEDIT_BACKUPS;
 });
 
+test("pointer motion over a dialog draws nothing; over a menu only a new highlight draws a frame", async () => {
+  const ed = await plainEditor(Array(60).fill("FROM x"), "/tmp/Dockerfile");
+  ed.rows = 30; ed.cols = 100;
+  ed.typed("y");
+  ed.runCommand("workbench.action.closeActiveEditor");
+  ed.render(0); // the first frame also turns hover reports on
+  const frame = ed.render(0).out, motion = (x, y) => ({ type: "mouse", button: 3, x, y, release: false, motion: true });
+  for (const [x, y] of [[10, 5], [11, 5], [50, 15], [100, 2]]) assert.equal(ed.hover(motion(x, y)), "", `a motion at ${x},${y} drew over the dialog`);
+  assert.equal(ed.render(0).out, frame, "the dialog moved");
+  ed.closePopup();
+  ed.runCommand("editor.action.showContextMenu");
+  ed.render(0);
+  const { x, y } = ed.popup;
+  assert.equal(ed.hover(motion(x + 2, y + 1)), null, "onto a row: a frame for its highlight");
+  ed.handle(motion(x + 2, y + 1));
+  assert.equal(ed.hover(motion(x + 3, y + 1)), "", "the same row");
+});
+
 test("the error page names fs errors in words and maps Esc/⌘W (this OS's Close Editor) to Close, Enter to Try Again", () => {
   const E = require("../errorpage.cjs");
   assert.equal(E.reasonOf(Object.assign(new Error("x"), { code: "ENOENT" })), "File not found");

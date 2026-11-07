@@ -3034,6 +3034,28 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn pointer_motion_over_a_dialog_draws_nothing_and_over_a_menu_only_a_new_highlight() {
+        let mut ed = editor("/tmp/Dockerfile", &["FROM x"; 60]);
+        ed.typed("y");
+        ed.quit();
+        assert!(matches!(ed.popup, Some(Popup::Dialog(_))));
+        ed.render(); // the first frame also turns hover reports on
+        let frame = ed.render();
+        let motion = |x, y| Ev::Mouse(crate::keys::Mouse { button: 3, x, y, motion: true, ..Default::default() });
+        for (x, y) in [(10, 5), (11, 5), (50, 15), (ed.cols, 2)] {
+            assert_eq!(ed.hover(&motion(x, y)), Some(String::new()), "a motion at {x},{y} drew over the dialog");
+        }
+        assert_eq!(ed.render(), frame, "the dialog moved");
+        ed.popup = None;
+        run(&mut ed, "editor.action.showContextMenu");
+        let Some(Popup::Menu(m)) = ed.popup.as_ref() else { panic!("no menu") };
+        let (x, y) = (m.x + 2, m.y + 1);
+        assert_eq!(ed.hover(&motion(x, y)), None, "onto a row: a frame for its highlight");
+        ed.handle(&motion(x, y), None);
+        assert_eq!(ed.hover(&motion(x + 1, y)), Some(String::new()), "the same row");
+    }
+
+    #[test]
     fn go_to_definition_without_a_server_searches_the_folder() {
         let dir = temp_folder("definition");
         fs::write(dir.join("a.go"), "package main\n\nfunc greet() {}\n").unwrap();

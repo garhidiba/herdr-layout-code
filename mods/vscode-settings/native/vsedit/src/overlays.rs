@@ -531,6 +531,19 @@ impl<T: Clone> Menu<T> {
         Outcome::Stay
     }
 
+    /// A buttonless motion: true when the highlighted row (in this menu or an open submenu) changed.
+    pub fn hover(&mut self, m: &Mouse, a: &Area) -> bool {
+        let before = self.path();
+        self.mouse(m, a);
+        self.path() != before
+    }
+
+    fn path(&self) -> Vec<Option<usize>> {
+        let mut path = vec![self.index];
+        path.extend(self.sub.as_ref().map(|s| s.path()).unwrap_or_default());
+        path
+    }
+
     /// None when the event isn't this menu's (a submenu's pointer outside it goes to its parent).
     fn mouse(&mut self, m: &Mouse, a: &Area) -> Option<Outcome<T>> {
         if let Some(s) = self.sub.as_mut() {

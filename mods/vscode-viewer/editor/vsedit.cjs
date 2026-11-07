@@ -1809,7 +1809,10 @@ class Editor {
   }
   // A buttonless motion: the changed bar alone, "" when nothing changed, null for a whole frame (or not a hover).
   hover(ev) {
-    if (this.popup) return null; // menus highlight under the pointer
+    if (this.popup) { // over a popup only a menu's highlight follows the pointer; any other motion leaves the frame as it is
+      if (ev.type !== "mouse" || !ev.motion || ev.button !== 3) return null;
+      return this.popup instanceof O.Menu && this.popup.hover(ev, this) ? null : "";
+    }
     if (ev.type === "mouse" && ev.motion && ev.button === 3 && ev.y === this.rows) { // the inline suggestion item: today's usage
       const h = this.statusHits?.find(h => h.hover && ev.x >= h.x && ev.x < h.x + h.w), text = h?.hover();
       if (text && this.message?.text !== text) { this.say(text, this.colors.barFg, 6000); return null; }

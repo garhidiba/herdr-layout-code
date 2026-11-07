@@ -382,6 +382,11 @@ def run_save_dialog(tmp):
     assert t.read("Do you want to save the changes you made to dialog.txt?", timeout=2)
     sc = screen_of(t)
     assert "Your changes will be lost if you don't save them." in sc and " Save " in sc and " Don't Save " in sc and " Cancel " in sc
+    t.read(timeout=0.5)
+    t.out = b""
+    for x, y in [(10, 5), (11, 5), (50, 15), (51, 16)]:   # the pointer moving over the dialog: nothing redrawn
+        t.send(f"\x1b[<35;{x};{y}M", wait=0.1)
+    assert t.out == b"", f"motion over the dialog drew {len(t.out)} bytes"
     t.send("\x1b[27u")                            # Esc = Cancel
     t.send("Y")
     t.out = b""

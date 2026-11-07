@@ -72,6 +72,9 @@ class Menu {
     if (ev.name === "enter" || ev.name === "space") { this.activate(ed); return true; }
     return true;
   }
+  // A buttonless motion: true when the highlighted row (here or in an open submenu) changed.
+  hover(ev, ed) { const before = this.path(); this.mouse(ev, ed); return this.path() !== before; }
+  path() { return this.sub ? `${this.index}>${this.sub.path()}` : String(this.index); }
   mouse(ev, ed) {
     if (this.sub && this.sub.mouse(ev, ed)) return true;
     if (!inside(ev, this.x, this.y, this.w, this.h)) {
