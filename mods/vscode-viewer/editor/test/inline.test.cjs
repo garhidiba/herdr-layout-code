@@ -28,7 +28,7 @@ exit 1
 `;
 fs.writeFileSync(path.join(tmp, "security"), FAKE_SECURITY, { mode: 0o755 });
 Object.assign(process.env, { VSEDIT_SECURITY: path.join(tmp, "security"), FAKE_KEYCHAIN: path.join(tmp, "keychain"), VSEDIT_SECRETS: path.join(tmp, "secrets.json") });
-for (const env of [...Object.values(I.HOSTED).map(p => p.env), "OLLAMA_API_KEY", "LMSTUDIO_API_KEY"]) delete process.env[env];
+for (const env of [...Object.values(I.HOSTED).map(p => p.env), "HERDR_OLLAMA_API_KEY", "HERDR_LMSTUDIO_API_KEY"]) delete process.env[env];
 test.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
@@ -591,7 +591,7 @@ test("the Settings dialog's helper: a masked key, saving from a file it deletes,
   assert.deepEqual(out("--remove-key", "codestral"), { removed: true });
   assert.equal(out("--key", "codestral").from, null);
   assert.deepEqual(out("--models", "mercury").recommended, ["mercury-edit-2"]);
-  assert.match(out("--key", "ollama").help, /security add-generic-password -U -s herdr-vscode-ollama .*OLLAMA_API_KEY/);
+  assert.match(out("--key", "ollama").help, /security add-generic-password -U -s herdr-vscode-ollama .*HERDR_OLLAMA_API_KEY/);
 });
 
 // ---------- local servers: their own address and model, LM Studio ----------
@@ -702,9 +702,9 @@ test("a local server gets a Bearer key only when one is stored; a 401 / 403 says
   assert.equal(I.show(ollama, "fake-key").headers.Authorization, "Bearer fake-key");
   assert.equal(I.warmup(ollama, "fake-key").headers.Authorization, "Bearer fake-key");
   assert.equal(I.show(ollama).headers.Authorization, undefined);
-  assert.throws(() => I.reply(ollama, 401, { error: "Unauthorized" }), /^Error: Ollama: the server needs an API key or refused it \(HTTP 401\); add one: security add-generic-password -U -s herdr-vscode-ollama .*OLLAMA_API_KEY\)$/);
+  assert.throws(() => I.reply(ollama, 401, { error: "Unauthorized" }), /^Error: Ollama: the server needs an API key or refused it \(HTTP 401\); add one: security add-generic-password -U -s herdr-vscode-ollama .*HERDR_OLLAMA_API_KEY\)$/);
   const lm = I.config(I.normalize({ "editor.inlineSuggest.provider": "lmstudio" }));
-  assert.throws(() => I.reply(lm, 403, {}), /^Error: LM Studio: the server needs an API key or refused it \(HTTP 403\); .*herdr-vscode-lmstudio.*LMSTUDIO_API_KEY\)$/);
+  assert.throws(() => I.reply(lm, 403, {}), /^Error: LM Studio: the server needs an API key or refused it \(HTTP 403\); .*herdr-vscode-lmstudio.*HERDR_LMSTUDIO_API_KEY\)$/);
 });
 
 // A protected local server (both shapes: Ollama's /api/*, LM Studio's /v1/*): answers only `Bearer <s.need>`, else 401;
@@ -738,7 +738,10 @@ test("the Settings helper sends each local server its own key, only when stored,
   assert.equal((await run("--models", "ollama", s.endpoint)).pulled, null, "refused: listed as a server that didn't answer");
   fs.writeFileSync(process.env.FAKE_KEYCHAIN, "herdr-vscode-lmstudio\tlm-fake\n"); // LM Studio's key only
   assert.match((await run("--test", "ollama", "", s.endpoint)).error, /HTTP 401/, "LM Studio's key is not Ollama's");
-  assert.ok(s.auth.every(a => a.endsWith(" null")), "Ollama never got another provider's key");
+  process.env.OLLAMA_API_KEY = "cloud-fake"; // Ollama's own ollama.com key never goes to a server here
+  assert.match((await run("--test", "ollama", "", s.endpoint)).error, /HTTP 401/);
+  delete process.env.OLLAMA_API_KEY;
+  assert.ok(s.auth.every(a => a.endsWith(" null")), "Ollama never got another provider's key, nor ollama.com's");
   fs.writeFileSync(process.env.VSEDIT_SECRETS, JSON.stringify({ ollama: "ol-fake" }), { mode: 0o600 });
   s.auth = [];
   assert.equal((await run("--test", "ollama", "", s.endpoint)).ok, true);

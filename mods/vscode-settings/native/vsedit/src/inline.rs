@@ -35,8 +35,8 @@ fn hosted(provider: &str) -> Option<&'static Hosted> {
 /// protected server in front of it).
 fn key_env(provider: &str) -> &'static str {
     match provider {
-        "ollama" => "OLLAMA_API_KEY",
-        "lmstudio" => "LMSTUDIO_API_KEY",
+        "ollama" => "HERDR_OLLAMA_API_KEY",
+        "lmstudio" => "HERDR_LMSTUDIO_API_KEY",
         _ => hosted(provider).map_or("", |h| h.env),
     }
 }
@@ -1475,13 +1475,16 @@ mod tests {
         let ollama = config(&normalize(&json!({})), |_| true);
         assert!(show(&ollama, "fake-key").unwrap().headers.contains(&("Authorization".into(), "Bearer fake-key".into())));
         assert!(warmup(&ollama, "fake-key").unwrap().headers.contains(&("Authorization".into(), "Bearer fake-key".into())));
-        assert!(key_help("ollama").ends_with("or OLLAMA_API_KEY)") && key_help("lmstudio").ends_with("or LMSTUDIO_API_KEY)"));
+        assert!(key_help("ollama").ends_with("or HERDR_OLLAMA_API_KEY)") && key_help("lmstudio").ends_with("or HERDR_LMSTUDIO_API_KEY)"));
         // each provider's own key: LM Studio's keychain item is not Ollama's, nor Ollama's variable LM Studio's
         std::fs::write(dir.join("keychain"), "herdr-vscode-lmstudio\tlm-fake\n").unwrap();
         assert_eq!(api_key("ollama"), Err(false));
-        std::env::set_var("OLLAMA_API_KEY", "ol-fake");
-        assert_eq!((api_key("ollama"), api_key("lmstudio")), (Ok(("ol-fake".into(), "env")), Ok(("lm-fake".into(), "keychain"))));
+        std::env::set_var("OLLAMA_API_KEY", "cloud-fake"); // Ollama's own ollama.com key never goes to a server here
+        assert_eq!(api_key("ollama"), Err(false));
         std::env::remove_var("OLLAMA_API_KEY");
+        std::env::set_var("HERDR_OLLAMA_API_KEY", "ol-fake");
+        assert_eq!((api_key("ollama"), api_key("lmstudio")), (Ok(("ol-fake".into(), "env")), Ok(("lm-fake".into(), "keychain"))));
+        std::env::remove_var("HERDR_OLLAMA_API_KEY");
         // through curl: no key sends no header and the 401 says why; the stored key passes
         let (endpoint, seen) = guarded_server("lm-fake", 2);
         let cfg = config(&normalize(&json!({ "editor.inlineSuggest.provider": "lmstudio", "editor.inlineSuggest.lmstudio.endpoint": endpoint })), |_| true);

@@ -33,7 +33,8 @@
   // "mercury" (Inception) | "off". The paid ones read their API key from the macOS keychain (Settings › Inline
   // Suggestions, or: security add-generic-password -U -s herdr-vscode-<provider> -a herdr -w <key>), else
   // <herdr home>/vscode-secrets.json ({"<provider>": "<key>"}, chmod 600), else MISTRAL_API_KEY /
-  // INCEPTION_API_KEY. Never put a key in this file.
+  // INCEPTION_API_KEY. Ollama and LM Studio take an optional key the same way, only when the server asks for one (a
+  // proxy or a protected server): else HERDR_OLLAMA_API_KEY / HERDR_LMSTUDIO_API_KEY. Never put a key in this file.
   "editor.inlineSuggest.provider": "ollama",
   // "" = the provider's default (Ollama: "qwen2.5-coder:1.5b-base" at "http://127.0.0.1:11434"; LM Studio:
   // "qwen2.5-coder-1.5b" at "http://127.0.0.1:1234"; Codestral:

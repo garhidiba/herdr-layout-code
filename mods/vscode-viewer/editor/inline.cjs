@@ -18,7 +18,7 @@ const ENDPOINTS = { ollama: "http://127.0.0.1:11434", lmstudio: "http://127.0.0.
 // environment variable and the price in USD per million input / output tokens (editor.inlineSuggest.price overrides).
 const HOSTED = { codestral: { env: "MISTRAL_API_KEY", price: [0.3, 0.9] }, mercury: { env: "INCEPTION_API_KEY", price: [0.25, 0.75] } };
 // A local server's optional key (a proxy or a protected server in front of it): its environment variable.
-const LOCAL_KEY_ENV = { ollama: "OLLAMA_API_KEY", lmstudio: "LMSTUDIO_API_KEY" };
+const LOCAL_KEY_ENV = { ollama: "HERDR_OLLAMA_API_KEY", lmstudio: "HERDR_LMSTUDIO_API_KEY" };
 const keyEnv = (provider) => HOSTED[provider]?.env ?? LOCAL_KEY_ENV[provider];
 const HOSTED_LIMIT = 2000; // requests a day by default for a paid provider (Ollama: unlimited)
 const MAX_FILE_CHARS = 1_000_000; // no suggestions in bigger files
