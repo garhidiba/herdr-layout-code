@@ -1,7 +1,7 @@
 // node --test mods/vscode-explorer/test/paths.test.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
-import { openArgs, wantsEditor, isMarkdown, relativeTo, within, copyName, freeName, nameProblem, menuItems, menuHeight, parentOf, openWith, vscodeRemoteArgs, editorFileOf, autoRevealOf, revealPath } from "../paths.js";
+import { openArgs, wantsEditor, isMarkdown, relativeTo, within, copyName, freeName, nameProblem, menuItems, menuHeight, parentOf, openWith, vscodeRemoteArgs, editorFileOf, autoRevealOf, revealPath, normalPath, editorTabOf } from "../paths.js";
 
 const home = "/Users/me/.config/herdr-app";
 
@@ -134,4 +134,28 @@ test("explorer.autoReveal is on unless the settings file turns it off", () => {
     assert.equal(autoRevealOf(text), true, String(text));
   }
   assert.equal(autoRevealOf('// mine\n{ "explorer.autoReveal": false, /* x */ }'), false);
+});
+
+test("two spellings of one path compare equal", () => {
+  assert.equal(normalPath("/p//src/./a.go"), "/p/src/a.go");
+  assert.equal(normalPath("/p/x/../src/a.go"), "/p/src/a.go");
+  assert.equal(normalPath("/../a"), "/a");
+  assert.equal(normalPath("/"), "/");
+  assert.equal(normalPath("a/../b"), "b");
+});
+
+test("a file open in an editor tab of the space is found there, on its machine only", () => {
+  // As Herdr lists the Explorer's editor terminal (launch.js's FIND wrapper around vsedit.sh).
+  const editor = (address, file) => ({ address, argv: ["/bin/sh", "-c", "find", "sh", `${home}/mods/vscode-viewer/editor/vsedit.sh`, file, "--close-on-exit"] });
+  const space = { id: "s1", tabs: [{ id: "tb1" }, { id: "tb2" }, { id: "tb3" }] };
+  const panes = [{ pane: "p1", tab: "tb1", terminal: "t1" }, { pane: "p2", tab: "tb2", terminal: "t2" }, { pane: "p3", tab: "tb3", terminal: "box/t3" },
+    { pane: "p4", tab: "tbX", terminal: "t4" }, { pane: "p5", tab: "tb1", terminal: null, mod: "vscode-viewer" }];
+  const terminals = [{ address: "t1", argv: ["/bin/zsh", "-l"] }, editor("t2", "/p/services/followService.go"), editor("box/t3", "/p/services/followService.go"), editor("t4", "/p/other.go")];
+  assert.equal(editorTabOf("/p/services/followService.go", null, space, panes, terminals), "tb2");
+  assert.equal(editorTabOf("/p//services/./followService.go", null, space, panes, terminals), "tb2");
+  assert.equal(editorTabOf("/p/services/followService.go", "box", space, panes, terminals), "tb3");
+  assert.equal(editorTabOf("/p/services/followService.go", "nas", space, panes, terminals), null);
+  assert.equal(editorTabOf("/p/other.go", null, space, panes, terminals), null); // another space's tab
+  assert.equal(editorTabOf("/p/services/chatService.go", null, space, panes, terminals), null);
+  assert.equal(editorTabOf("/p/a.go", null, null, panes, terminals), null);
 });

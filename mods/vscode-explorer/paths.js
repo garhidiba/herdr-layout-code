@@ -35,6 +35,26 @@ export function editorFileOf(argv) {
   return typeof file === "string" && file && !file.startsWith("-") ? file : null;
 }
 
+// A path with repeated slashes, `.` and `..` resolved, so two spellings of one file compare equal.
+export function normalPath(p) {
+  const out = [];
+  for (const part of String(p ?? "").split("/")) {
+    if (part === "..") { if (out.length && out[out.length - 1] !== "") out.pop(); }
+    else if (part !== "." && (part || !out.length)) out.push(part);
+  }
+  return out.join("/") || "/";
+}
+
+// The tab of `space` (a spaces() row) whose editor shows `file` on machine `on` (null: this computer), as VS Code
+// goes to a file's open editor instead of opening it again; null when none. `panes` and `terminals` are Herdr's.
+export function editorTabOf(file, on, space, panes, terminals) {
+  const tabs = new Set((space?.tabs ?? []).map(t => t.id)), want = normalPath(file);
+  const argv = new Map(terminals.map(t => [t.address, t.argv]));
+  const machine = (address) => (address.includes("/") ? address.split("/")[0] : null);
+  const shows = (address) => { const f = editorFileOf(argv.get(address)); return f !== null && normalPath(f) === want; };
+  return panes.find(p => p.terminal && tabs.has(p.tab) && machine(p.terminal) === (on ?? null) && shows(p.terminal))?.tab ?? null;
+}
+
 // VS Code's explorer.autoReveal in vscode-settings.json (comments and trailing commas allowed, as vscode-settings'
 // loose()): on unless it is false.
 export function autoRevealOf(text) {

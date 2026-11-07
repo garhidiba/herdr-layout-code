@@ -273,3 +273,23 @@ test("openFile on a machine without the editor: the viewer with the install offe
   await openFile("/srv/x.toml", { on: "box", folder: "/srv" });
   assert.deepEqual(opened[0], { name: "x.toml", mod: "vscode-viewer", props: { file: "/srv/x.toml", on: "box", install: true } });
 });
+
+test("openFile goes to a file's open editor tab, and a second click while it opens does nothing", async () => {
+  const opened = [], shown = [];
+  let release = () => {};
+  const openTab = async (args) => { opened.push(args); if (args.argv) await new Promise((r) => (release = r)); };
+  const openFile = createOpenFile({ openTab, appHome: () => "/h", remote: fake().remote,
+    showOpen: (file, on) => (shown.push(file), file === "/p/open.go") });
+  await openFile("/p/open.go", { folder: "/p" });
+  assert.equal(opened.length, 0);
+  const first = openFile("/p/a.go", { folder: "/p" });
+  await openFile("/p/./a.go", { folder: "/p" }); // the double-click's second click, before the tab shows
+  assert.equal(opened.length, 1);
+  release(); await first;
+  const again = openFile("/p/a.go", { folder: "/p" }); // its tab was closed since: opens again
+  release(); await again;
+  assert.equal(opened.length, 2);
+  await openFile("/p/logo.png", { folder: "/p" }); // the viewer: not looked for among editor tabs
+  assert.equal(opened.length, 3);
+  assert.deepEqual(shown, ["/p/open.go", "/p/a.go", "/p/a.go"]);
+});

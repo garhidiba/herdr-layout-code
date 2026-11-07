@@ -12,7 +12,7 @@
 // A machine without `sh` (or with Git Bash's MINGW/MSYS uname) is asked through PowerShell. Values go into Unix
 // scripts as arguments ("$1"), never into their text; PowerShell gets its script as -EncodedCommand (UTF-16LE base64,
 // so no command-line quoting), with values validated first and written as single-quoted literals.
-import { openArgs, wantsEditor } from "./paths.js";
+import { openArgs, wantsEditor, normalPath } from "./paths.js";
 
 export const ROOT = ".local/share/herdr-vscode"; // under a Unix machine's $HOME; nothing is written outside it
 const WIN_ROOT = "herdr-vscode";                   // under a Windows machine's %LOCALAPPDATA%
@@ -288,9 +288,17 @@ export function createRemote({ exec, readTextFile, notify, appHome, platform = (
 
 // Opens a file as the Explorer does: on a remote space the terminal editor runs on its machine when it is (or gets)
 // installed there, else the viewer. `openTab` is launch.js's.
-export function createOpenFile({ openTab, remote, appHome }) {
+// A file already open in an editor is gone to (`showOpen(file, on)` selects its tab and says whether there was one),
+// and a file still opening isn't opened again: a double-click, or a second click before the tab shows.
+export function createOpenFile({ openTab, remote, appHome, showOpen = () => false }) {
+  const opening = new Set();
   return async function openFile(file, { on = null, how = "auto", folder }, cx) {
-    const launch = on && wantsEditor(file, how) ? await remote.prepare(on) : null;
-    return openTab(openArgs(file, { on, appHome: appHome(), how, folder, remote: launch }), cx);
+    const editor = wantsEditor(file, how), key = JSON.stringify([on, how, normalPath(file)]);
+    if (opening.has(key) || (editor && showOpen(file, on))) return;
+    opening.add(key);
+    try {
+      const launch = on && editor ? await remote.prepare(on) : null;
+      return await openTab(openArgs(file, { on, appHome: appHome(), how, folder, remote: launch }), cx);
+    } finally { opening.delete(key); }
   };
 }

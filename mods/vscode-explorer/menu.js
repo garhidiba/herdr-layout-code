@@ -2,9 +2,9 @@
 // (props { menu } or { dialog }), so they share the open rule in paths.js with the tree.
 import { div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { exec, hc, run, spaces, panes, props, openOverlay, closeOverlay, theme, shared, setShared, appHome, readTextFile, writeTextFile, notify, window } from "herdr";
+import { exec, hc, run, spaces, panes, terminals, props, openOverlay, closeOverlay, theme, shared, setShared, appHome, readTextFile, writeTextFile, notify, window } from "herdr";
 import { createOpenTab } from "./launch.js";
-import { menuItems, menuHeight, openWith, baseName, parentOf, relativeTo, nameProblem, vscodeRemoteArgs, isMarkdown } from "./paths.js";
+import { menuItems, menuHeight, openWith, baseName, parentOf, relativeTo, nameProblem, vscodeRemoteArgs, isMarkdown, editorTabOf } from "./paths.js";
 import { createOps } from "./ops.js";
 import { createRemote, createOpenFile, ROOT, INSTALL_COMMAND, INSTALL_REQUEST } from "./remote.js";
 
@@ -20,8 +20,14 @@ const askInstall = (machine, size) => {
   } });
 };
 export const remote = createRemote({ exec, readTextFile, notify, appHome, platform: () => window()?.platform, shared, setShared, confirm: askInstall });
-// Every way the Explorer opens a file: the tree's click, Open / Open With, a new file.
-export const openFile = createOpenFile({ openTab, remote, appHome });
+// Every way the Explorer opens a file: the tree's click, Open / Open With, a new file. A file open in an editor tab of
+// this space is selected there instead.
+const showOpen = (file, on) => {
+  const tab = editorTabOf(file, on, spaces().find(s => s.active), panes(), terminals());
+  if (tab) run("tab.select", { id: tab });
+  return Boolean(tab);
+};
+export const openFile = createOpenFile({ openTab, remote, appHome, showOpen });
 const CLIPBOARD = "vscode-explorer.clipboard", REFRESH = "vscode-explorer.refresh";
 export const refreshKey = REFRESH;
 
