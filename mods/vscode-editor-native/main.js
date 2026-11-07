@@ -187,7 +187,7 @@ export default class NativeEditor extends View {
     this.log(`change ${JSON.stringify(v)}${this.clearing ? " (clear)" : ""}`);
     if (this.clearing) return;
     this.pending = v;
-    if (v && !composable(v[v.length - 1])) this.flush();
+    if (v) this.flush(); // `change` only comes on commit (the marked syllable never reaches us), so take it all now
     this.reveal();
     cx.notify();
   }
@@ -321,6 +321,12 @@ export default class NativeEditor extends View {
     cx.notify();
   }
 
+  // Herdr settles pane focus after the click; take the keyboard back after it (and log whether it held).
+  grabKeyboard(cx, why) {
+    try { this.input.focus(); } catch (e) { this.log(`focus ${why}: ${e.message ?? e}`); }
+    cx.timer.after(30, (cx) => { try { this.input.focus(); } catch (e) { this.log(`focus late: ${e.message ?? e}`); } cx.notify(); });
+  }
+
   wordAt(pos) {
     const line = this.lines[pos.l]; let a = pos.c, b = pos.c;
     while (a > 0 && /\w/.test(line[a - 1])) a--;
@@ -348,11 +354,17 @@ export default class NativeEditor extends View {
   }
 
   // ---- render ----
-  spans(l, from, to) {
+  // Each piece sits at its computed x (not flowed): flowed pieces round their widths, so a split at the caret or a
+  // composition would nudge the text after it by a fraction of a pixel.
+  spans(l, from, to, shift = 0) {
     const line = this.lines[l], row = this.tok[l], out = [];
+    let at = 0, x = shift;
     const piece = (a, b, color, style) => {
       if (b <= a) return;
-      out.push(div().flex_none().text_color(color ?? FG).when(Boolean(style & 1), (el) => el.italic()).when(Boolean(style & 2), (el) => el.font_bold())
+      x += this.width(line.slice(at, a)); at = a;
+      const left = x;
+      x += this.width(line.slice(a, b)); at = b;
+      out.push(div().absolute().top(0).left(left).h(ROW).flex().items_center().whitespace_nowrap().text_color(color ?? FG).when(Boolean(style & 1), (el) => el.italic()).when(Boolean(style & 2), (el) => el.font_bold())
         .when(Boolean(style & 4), (el) => el.underline()).child(line.slice(a, b).replace(/\t/g, TAB)));
     };
     if (!row || !this.colors.length) piece(from, to);
@@ -371,16 +383,15 @@ export default class NativeEditor extends View {
       const b = l === sel[1].l ? this.width(line.slice(0, sel[1].c)) : this.width(line) + this.charW;
       el.child(div().absolute().top(0).h(ROW).left(x0 + a).w(Math.max(0, b - a)).bg(SEL));
     }
-    const text = h_flex().absolute().top(0).left(x0).h(ROW).items_center().whitespace_nowrap();
-    if (isCaret) text.children(this.spans(l, 0, this.caret.c)).child(this.inputEl()).children(this.spans(l, this.caret.c, line.length));
-    else text.children(this.spans(l, 0, line.length));
+    const text = div().absolute().top(0).left(x0).h(ROW).w_full();
+    text.children(this.spans(l, 0, line.length));
     return el.child(text).child(div().absolute().top(0).left(0).w(this.gutter).h(ROW).flex().items_center().justify_end()
       .text_color(isCaret ? FG : NUM).child(String(l + 1)));
   }
 
-  // The IME sink: transparent, our font, exactly as wide as what it holds (so the rest of the line moves aside).
+  // The IME sink: laid over the composition (so the candidate window sits there), its own text invisible.
   inputEl() {
-    return Input.new(this.input).flex_none().w(Math.ceil(this.width(this.pending)) + 2).h(ROW).p(0).border_0().rounded(0)
+    return Input.new(this.input).flex_none().w(Math.ceil(this.wideW * 1.5) + 2).h(ROW).p(0).border_0().rounded(0)
       .bg("#00000000").text_color(FG).text_size(SIZE).font_family(this.font);
   }
 
@@ -397,7 +408,7 @@ export default class NativeEditor extends View {
       })
       .on_mouse_down("left", (e, cx) => this.mouseDown(e, cx))
       .on_mouse_move((e, cx) => { if (this.dragging && this.lines) { this.caret = this.posAt(e); cx.notify(); } })
-      .on_mouse_up("left", (_e, _cx) => { this.dragging = false; })
+      .on_mouse_up("left", (_e, cx) => { this.dragging = false; this.grabKeyboard(cx, "up"); })
       .on_key_down((e, cx) => {
         const c = KEYS[e.keystroke];
         if (c) { cx.stop_propagation(); this.command(c, "key", cx); return; }
@@ -408,12 +419,10 @@ export default class NativeEditor extends View {
     if (this.lines) {
       const [a, b] = this.visibleRange();
       for (let l = a; l < b; l++) area.child(this.row(l, sel));
-      // The caret: ours, 2px, blinking natively; after the Input's text while it holds a composition.
       const cl = this.caret.l, cy = cl * ROW - this.scrollTop;
-      const cx_ = this.gutter + PAD - this.scrollLeft + this.width(this.lines[cl].slice(0, this.caret.c)) + this.width(this.pending);
-      if (cl < a || cl >= b) area.child(div().absolute().top(0).left(0).w(1).h(ROW).overflow_hidden().child(this.inputEl()));
-      else area.child(div().id(`caret-${cl}-${this.caret.c}-${this.pending.length}`).absolute().top(cy + 2).left(cx_).w(2).h(ROW - 4).bg(CARET)
-        .loop("opacity", { from: 0, to: 1, period: 1100, easing: "linear" }));
+      // The Input sits at the caret, visible: it draws the IME's marked syllable (which never reaches us) and the caret.
+      const px = this.gutter + PAD - this.scrollLeft + this.width(this.lines[cl].slice(0, this.caret.c)), visible = cl >= a && cl < b;
+      area.child(div().absolute().top(visible ? cy : 0).left(visible ? px : -4000).h(ROW).child(this.inputEl()));
     } else area.child(div().p(12).text_color(NUM).child(`Loading ${this.file ?? "(no file prop)"}…`));
     // Font metrics: 100 ASCII and 50 Hangul characters, laid out off screen.
     area.child(div().id("m-ascii").absolute().top(-200).left(0).flex_none().whitespace_nowrap().text_color("#00000000")
