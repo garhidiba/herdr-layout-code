@@ -1151,6 +1151,20 @@ test("Save All writes every unsaved open file, leaving one changed on disk", asy
   delete process.env.VSEDIT_BACKUPS;
 });
 
+test("the terminal title is the file's name, with ● while any open file is unsaved", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vsedit-title-")), [a, b] = ["a.txt", "b\x1b.txt"].map(n => path.join(dir, n));
+  for (const f of [a, b]) fs.writeFileSync(f, "1\n");
+  const ed = new Editor(a, F.load(a), await H.loadGrammar(null), H.loadTheme(), null);
+  assert.equal(ed.title(), "a.txt — vsedit");
+  ed.typed("x");
+  assert.equal(ed.title(), "● a.txt — vsedit");
+  await ed.open(b);
+  assert.equal(ed.title(), "● b.txt — vsedit", "a.txt, open behind, is still unsaved; a control character never reaches the terminal");
+  await ed.open(a);
+  await ed.saveFile();
+  assert.equal(ed.title(), "a.txt — vsedit");
+});
+
 test("the new commands have VS Code's keys on each OS", () => {
   const on = (os) => { const km = K.resolve([], os); return (key) => km.byChord.get(key); };
   const mac = on("mac"), win = on("win"), linux = on("linux");

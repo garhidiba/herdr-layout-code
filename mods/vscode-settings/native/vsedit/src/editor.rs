@@ -1829,6 +1829,13 @@ impl Editor {
     pub fn dialog(&mut self, title: &str, detail: Option<&str>, buttons: Vec<crate::overlays::Button<DAct>>) {
         self.popup = Some(Popup::Dialog(Dialog::new(title, detail, buttons)));
     }
+    /// The terminal title (OSC 2, vsedit.cjs `title`): the file's name and " — vsedit", "● " first while any open file
+    /// is unsaved. vscode-tabs reads it (tabfile.js editorTitleState) for the tab's ● and Close Saved.
+    pub fn title(&self) -> String {
+        let dirty = self.buf.dirty() || self.docs.iter().any(|d| d.buf.dirty());
+        let name: String = self.name().chars().filter(|c| !c.is_control()).collect();
+        format!("{}{name} — vsedit", if dirty { "● " } else { "" })
+    }
     /// Asks about each unsaved file (showing it), then exits.
     fn quit(&mut self) {
         if !self.buf.dirty() {
@@ -2928,6 +2935,24 @@ pub(crate) mod tests {
         let read = |f: &Path| fs::read_to_string(f).unwrap();
         assert_eq!((read(&a), read(&b), read(&c)), ("x1\n".into(), "x1\n".into(), "changed elsewhere\n".into()));
         assert!(ed.message.as_ref().unwrap().text.contains("Not saved, changed on disk: c.txt"));
+    }
+
+    #[test]
+    fn the_terminal_title_is_the_files_name_with_a_dot_while_any_open_file_is_unsaved() {
+        let dir = temp_folder("title");
+        let (a, b) = (dir.join("a.txt"), dir.join("b\x1b.txt"));
+        for f in [&a, &b] {
+            fs::write(f, "1\n").unwrap();
+        }
+        let mut ed = on_disk(&a);
+        assert_eq!(ed.title(), "a.txt — vsedit");
+        ed.typed("x");
+        assert_eq!(ed.title(), "● a.txt — vsedit");
+        assert!(ed.open(&b, None, true));
+        assert_eq!(ed.title(), "● b.txt — vsedit", "a.txt, open behind, is unsaved; a control character never reaches the terminal");
+        assert!(ed.open(&a, None, true));
+        run(&mut ed, "workbench.action.files.save");
+        assert_eq!(ed.title(), "a.txt — vsedit");
     }
 
     #[test]

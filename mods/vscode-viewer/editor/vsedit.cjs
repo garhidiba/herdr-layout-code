@@ -667,6 +667,12 @@ class Editor {
     this.buf.edit([{ start: { line: 0, col: 0 }, end: { line: last, col: this.lines[last].length }, text }], { before });
     this.moveTo(this.buf.clamp(at));
   }
+  // The terminal title (OSC 2): the file's name and " — vsedit", "● " first while any open file is unsaved. vscode-tabs
+  // reads it (tabfile.js editorTitleState) for the tab's ● and Close Saved; main writes it only when it changes.
+  title() {
+    const dirty = this.buf.dirty || [...this.docs.values()].some(s => s.file !== this.file && s.buf.dirty);
+    return `${dirty ? "● " : ""}${path.basename(this.file).replace(/[\x00-\x1f\x7f]/g, "")} — vsedit`;
+  }
   // Asks about each unsaved file, then exits.
   quit() {
     const st = this.allStates().find(s => s.buf.dirty);
@@ -2410,11 +2416,13 @@ async function main() {
   process.stdout.write(ENTER + S.cursorSeq(ed.settings) + `\x1b]12;${ed.colors.cursor}\x07`);
   rightClicksTo("program", false);
 
-  let scheduled = false, timer = null;
+  let scheduled = false, timer = null, title = null;
   const draw = (budget = 60) => {
     scheduled = false;
     ed.rows = process.stdout.rows || 24; ed.cols = process.stdout.columns || 80;
-    const { out, done } = ed.render(budget);
+    const rendered = ed.render(budget), done = rendered.done, now = ed.title();
+    const out = (now === title ? "" : `\x1b]2;${now}\x07`) + rendered.out;
+    title = now;
     // The cursor shape goes out with every frame: Herdr resets it on focus, tab switches and resizes, and a setting may have changed.
     // one synchronized update (mode 2026): the terminal shows the frame whole, never the text under a box before the box
     process.stdout.write("\x1b[?2026h\x1b[?25l" + S.cursorSeq(ed.settings) + out + "\x1b[?2026l");

@@ -231,9 +231,13 @@ fn run(term: &mut Term, ed: &mut Editor) {
         ed.say(e, Some(&w), 6000);
     }
 
-    let draw = |ed: &mut Editor, term: &mut Term| {
+    let mut title = String::new(); // written only when it changes
+    let mut draw = |ed: &mut Editor, term: &mut Term| {
         (ed.rows, ed.cols) = term.size();
-        let out = ed.render();
+        let now = ed.title();
+        let mut out = if now == title { String::new() } else { format!("\x1b]2;{now}\x07") };
+        title = now;
+        out.push_str(&ed.render());
         // The cursor shape goes out with every frame: Herdr resets it on focus, tab switches and resizes, and a setting may have changed.
         // one synchronized update (mode 2026): the terminal shows the frame whole, never the text under a box before the box
         term.write(&format!("\x1b[?2026h\x1b[?25l{}{out}\x1b[?2026l", ed.settings.cursor_seq()));

@@ -22,3 +22,17 @@ export function tabFileOf(id, space, panes, terminals, viewer) {
   const v = viewer?.file && mine.find(p => p.mod === "vscode-viewer" && p.pane === viewer.pane);
   return v ? { tab: id, file: viewer.file, on: viewer.on ?? null, pane: v.pane, argv: null, root: spaceRoot } : null;
 }
+
+// An editor's terminal title (vsedit's OSC 2: "a.ts — vsedit", "● a.ts — vsedit" while a file in it is unsaved):
+// "clean" or "dirty"; null for any other program's title.
+export function editorTitleState(title) {
+  const m = /^(● )?.+ — vsedit$/.exec(title ?? "");
+  return m ? (m[1] ? "dirty" : "clean") : null;
+}
+
+// The tabs of `space` whose editor has unsaved changes (VS Code's dirty editors), from panes() alone: the tab bar
+// reads it on every render.
+export function dirtyTabs(space, panes) {
+  const tabs = new Set((space?.tabs ?? []).map(t => t.id));
+  return new Set(panes.filter(p => tabs.has(p.tab) && p.terminal && editorTitleState(p.title) === "dirty").map(p => p.tab));
+}

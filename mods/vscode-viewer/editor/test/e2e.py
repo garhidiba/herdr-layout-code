@@ -377,7 +377,9 @@ def run_save_dialog(tmp):
     open(file, "w").write("abc\n")
     t = Term(file)
     assert t.read("Ln 1, Col 1")
+    assert "\x1b]2;dialog.txt — vsedit\x07".encode() in t.out, "no terminal title"
     t.send("X")
+    assert t.read("\x1b]2;● dialog.txt — vsedit\x07", timeout=2), "the title has no ● for the unsaved change"
     t.send(QUIT)
     assert t.read("Do you want to save the changes you made to dialog.txt?", timeout=2)
     sc = screen_of(t)

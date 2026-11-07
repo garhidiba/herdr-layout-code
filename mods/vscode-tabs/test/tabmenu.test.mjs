@@ -2,7 +2,7 @@
 // The editor tab menu: which tabs get it (tabfile.js), and its items and actions (vscode-explorer's paths.js).
 import test from "node:test";
 import assert from "node:assert/strict";
-import { tabFileOf, TAB_MENU } from "../tabfile.js";
+import { tabFileOf, editorTitleState, dirtyTabs, TAB_MENU } from "../tabfile.js";
 import { tabMenuItems, closeArgs, fileTabs, splitArgs, clipboardCommand, revealCommand, menuHeight } from "../../vscode-explorer/paths.js";
 
 const launcher = "/Users/me/.config/herdr-app/mods/vscode-viewer/editor/vsedit.sh";
@@ -122,4 +122,22 @@ test("copy and reveal use the computer's own clipboard and file manager", () => 
   assert.deepEqual(revealCommand("mac", "/p/a.ts"), ["open", ["-R", "/p/a.ts"]]);
   assert.deepEqual(revealCommand("win", "C:\\p\\a.ts"), ["explorer.exe", ["/select,C:\\p\\a.ts"]]);
   assert.deepEqual(revealCommand("linux", "/p/src/a.ts"), ["xdg-open", ["/p/src"]]);
+});
+
+test("an editor's title says whether it has unsaved changes; any other program's says nothing", () => {
+  assert.equal(editorTitleState("a.ts — vsedit"), "clean");
+  assert.equal(editorTitleState("● a.ts — vsedit"), "dirty");
+  for (const other of ["● a.ts", "✳ Claude Code", "zsh", "", null, undefined]) assert.equal(editorTitleState(other), null, String(other));
+});
+
+test("the dirty tabs are the ones whose editor's title has the ●, in this space only", () => {
+  const titled = [
+    { pane: "p1", tab: "a", terminal: "t1", title: "● not an editor" },
+    { pane: "p2", tab: "b", terminal: "t2", title: "● a.ts — vsedit" },
+    { pane: "p3", tab: "c", terminal: null, mod: "vscode-viewer", title: "● x — vsedit" },
+    { pane: "p4", tab: "e", terminal: "t5", title: "b.ts — vsedit" },
+    { pane: "p9", tab: "elsewhere", terminal: "t9", title: "● c.ts — vsedit" },
+  ];
+  assert.deepEqual([...dirtyTabs({ ...space, tabs: mixed }, titled)], ["b"]);
+  assert.deepEqual([...dirtyTabs(null, titled)], []);
 });

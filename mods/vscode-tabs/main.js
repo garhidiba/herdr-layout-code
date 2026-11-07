@@ -1,7 +1,7 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
 import { spaces, panes, terminals, run, openOverlay, theme, window, shared, layout, settings } from "herdr";
-import { tabFileOf, TAB_MENU } from "./tabfile.js";
+import { tabFileOf, dirtyTabs, TAB_MENU } from "./tabfile.js";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -15,6 +15,7 @@ function find(node, id) {
 export default class Tabs extends View {
   init() {
     this.pressed = null;
+    this.hoverClose = null; // the tab whose close slot the pointer is on
   }
 
   // The side panel (Explorer / Source Control) is one global state: switching spaces leaves it as it is.
@@ -23,6 +24,7 @@ export default class Tabs extends View {
     const t = theme();
     const space = spaces().find(p => p.active);
     const shown = space?.tabs ?? [];
+    const dirty = dirtyTabs(space, panes());
     // A tab's × on the space's last tab closes without Herdr's "Close space?": vscode-spaces keeps the space as a gray row.
     const stop = (_e, cx) => cx.stop_propagation();
     const button = (id, label, action) => div().id(id).size(26).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
@@ -50,7 +52,13 @@ export default class Tabs extends View {
         .child(div().max_w(170).truncate().child(c.zoomed ? `${name} Z` : name))
         .when(c.status === "working", el => el.child(svg("mods/workspace-chrome/spinner.svg").size(12).flex_none().text_color(t.working).spin(900)))
         .when(c.status === "blocked" || c.status === "done", el => el.child(div().size(6).rounded(3).bg(t[c.status])))
-        .when(c.active, el => el.child(div().id(`close-${c.id}`).text_color(t.dim).on_mouse_down("left", stop).on_click((_e, cx) => { cx.stop_propagation(); run("tab.close", shown.length === 1 ? { id: c.id, confirmed: true } : { id: c.id }); }).child(svg("mods/pane/close.svg").size(12))));
+        // As VS Code's: an unsaved editor's tab shows ● where the × goes, on every tab, and × while the pointer is on it.
+        .when(c.active || dirty.has(c.id), el => el.child(div().id(`close-${c.id}`).text_color(t.dim).on_mouse_down("left", stop)
+          .on_hover((on, cx) => { if (on || this.hoverClose === c.id) { this.hoverClose = on ? c.id : null; cx.notify(); } })
+          .on_click((_e, cx) => { cx.stop_propagation(); run("tab.close", shown.length === 1 ? { id: c.id, confirmed: true } : { id: c.id }); })
+          .child(dirty.has(c.id) && this.hoverClose !== c.id
+            ? div().size(12).flex().items_center().justify_center().child(div().size(8).rounded(4).bg(c.active ? t.foreground : t.muted))
+            : svg("mods/pane/close.svg").size(12))));
     };
     const root = layout(), sidebar = find(root, "sidebar"), w = window();
     // Old saved rails and a dragged-narrow sidebar can be smaller than the window buttons.
