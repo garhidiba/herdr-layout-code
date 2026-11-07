@@ -3,7 +3,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { dragStarted, panesRect, paneRects, dropTarget, dropZone, zoneRect, dragSource, find } from "../drag.js";
+import { dragStarted, panesRect, headersRect, paneRects, dropTarget, dropZone, zoneRect, dragSource, find } from "../drag.js";
 
 // layouts/vscode.json as shipped: work-body padding 8, gap 8; the side panel 368px, shown; the status bar 28px.
 const shipped = JSON.parse(readFileSync(new URL("../../../layouts/vscode.json", import.meta.url), "utf8"));
@@ -93,4 +93,11 @@ test("a dragged tab moves its one pane, a terminal or a viewer; not the shown ta
   assert.deepEqual(dragSource("b", "a", panes), { terminal: "t2" });
   assert.deepEqual(dragSource("c", "a", panes), { pane: "p3" });
   for (const id of ["a", "d", "e", "gone"]) assert.equal(dragSource(id, "a", panes), null, id);
+});
+
+test("a drag from the Explorer (no tab bar bounds) takes the box around the shown panes' headers, down to the panes' bottom", () => {
+  const headers = { a: { x: 276, y: 50, width: 306, height: 30 }, b: { x: 590, y: 50, width: 306, height: 30 }, gone: { x: 0, y: 0, width: 9, height: 9 } };
+  assert.deepEqual(headersRect(headers, ["a", "b"], win, shipped), { x: 276, y: 50, width: 620, height: 714 });
+  assert.equal(headersRect(headers, ["c"], win, shipped), null, "no header known: no drop zones");
+  assert.equal(headersRect(undefined, ["a"], win, shipped), null);
 });

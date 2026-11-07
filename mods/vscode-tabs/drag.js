@@ -4,6 +4,14 @@
 // the pointer while it is over the bar, so once a drag leaves it a full-window overlay of this mod takes over (main.js
 // DragOverlay). Pure rules, window coordinates (logical px). No Herdr imports, so node tests load it.
 
+// The overlay's props, one shape for every drag source (the tab bar, vscode-explorer's tree): { drag: { source, request,
+// into, title, bar?, back?, id? } }. A release over a pane sets the shared value `request` to { ...source, into: the
+// shown tab, place: the zone, beside: that pane, at } for the source's mod to run (a tab: move.js MOVE_REQUEST; a file:
+// vscode-explorer's split.js). `bar`: the tab bar's bounds (panesRect), else the area comes from the pane headers
+// (headersRect). `back`: window bounds the drag may return to (the tree): the pointer over them closes the overlay and
+// sets DRAG_BACK to `id`, so the source picks its drag up again (a drop into a folder there).
+export const DRAG_BACK = "vscode-tabs.drag-back";
+
 // A press becomes a drag past this many px.
 export const THRESHOLD = 4;
 export const dragStarted = (from, to) => Math.hypot(to.x - from.x, to.y - from.y) > THRESHOLD;
@@ -23,11 +31,27 @@ export function find(node, id) {
 // row's gap), above the `status` bar; `win` is the window's size, `tree` the shown layout. The sidebar (spaces) is
 // left of the bar already.
 export function panesRect(bar, win, tree) {
-  const body = find(tree, "work-body"), panel = find(tree, "panel"), status = find(tree, "status");
+  const body = find(tree, "work-body"), panel = find(tree, "panel");
   const pad = body?.padding ?? 0, gap = body?.gap ?? 0;
   const side = panel && !panel.hidden ? (panel.size?.px ?? 0) + gap : 0;
-  const top = bar.y + bar.height + pad, bottom = win.height - (status && !status.hidden ? status.size?.px ?? 0 : 0) - pad;
+  const top = bar.y + bar.height + pad, bottom = panesBottom(win, tree);
   return { x: bar.x + pad, y: top, width: Math.max(0, bar.width - 2 * pad - side), height: Math.max(0, bottom - top) };
+}
+
+// The panes' bottom edge: above the `status` bar, inside `work-body`'s padding.
+function panesBottom(win, tree) {
+  const status = find(tree, "status");
+  return win.height - (status && !status.hidden ? status.size?.px ?? 0 : 0) - (find(tree, "work-body")?.padding ?? 0);
+}
+
+// The panes' area for a drag that didn't start in the tab bar (the Explorer's tree), so with no bar bounds: the box
+// around the shown panes' headers (`headers`, `ids` as paneRects') down to the panes' bottom; null with no header known.
+export function headersRect(headers, ids, win, tree) {
+  const known = ids.map(id => headers?.[id]).filter(Boolean);
+  if (!known.length) return null;
+  const x = Math.min(...known.map(h => h.x)), y = Math.min(...known.map(h => h.y));
+  const right = Math.max(...known.map(h => h.x + h.width));
+  return { x, y, width: right - x, height: Math.max(0, panesBottom(win, tree) - y) };
 }
 
 // Each pane of the shown tab as a rect, from its header's bounds (vscode-pane shares them: `headers`, { [pane]: {x, y,

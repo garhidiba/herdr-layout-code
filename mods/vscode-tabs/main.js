@@ -4,7 +4,7 @@ import { spaces, panes, terminals, run, openOverlay, closeOverlay, props, theme,
 import { tabFileOf, dirtyTabs, TAB_MENU, withDetails, DETAILS } from "./tabfile.js";
 import { createTabCloser, signalCommand, CLOSE_REQUEST } from "./close.js";
 import { createMover, withViewer, fileByName, MOVE_REQUEST, VIEWER_FILES } from "./move.js";
-import { find, dragStarted, panesRect, paneRects, dropTarget, zoneRect, dragSource } from "./drag.js";
+import { find, dragStarted, panesRect, headersRect, paneRects, dropTarget, dropZone, zoneRect, dragSource, DRAG_BACK } from "./drag.js";
 // vscode-pane's { [pane]: bounds }: where each shown pane's header is, for dropping onto one pane.
 const PANE_BOUNDS = "vscode-pane.bounds";
 
@@ -31,9 +31,10 @@ const movePane = createMover({ run, panes, spaces, viewerOf,
   remember: (pane, file) => setShared(VIEWER_FILES, withViewer(shared(VIEWER_FILES), new Set(panes().map(p => p.pane)), pane, file)),
   fail: (body) => notify({ title: "Move", body, level: "error" }) });
 
-// The drag of a tab once it left the bar (drag.js): a full-window, frameless overlay of this mod ({ drag: { source,
-// into, title, bar } }) that follows the pointer over the shown tab's panes, shows where the tab will land and moves
-// it there on release. Escape, a release outside the panes or any new press cancels.
+// A drag once it left its source, a tab out of the bar or a file out of vscode-explorer's tree (drag.js, its props): a
+// full-window, frameless overlay of this mod that follows the pointer over the shown tab's panes, shows where the drop
+// will land and asks the source's `request` on release. Escape, a release outside the panes or any new press cancels;
+// the pointer back over `back` hands the drag back.
 class DragOverlay {
   constructor(cx) {
     this.drag = props().drag;
@@ -48,9 +49,9 @@ class DragOverlay {
   // The pane under `pos` and its zone (drag.js dropTarget), from the shown tab's pane headers' bounds (vscode-pane).
   target(pos) {
     if (!this.win || !pos) return null;
-    const area = panesRect(this.drag.bar, this.win, layout());
-    const ids = panes().filter(p => p.tab === this.drag.into).map(p => p.pane);
-    return dropTarget(paneRects(shared(PANE_BOUNDS), ids, area), area, pos);
+    const d = this.drag, headers = shared(PANE_BOUNDS), ids = panes().filter(p => p.tab === d.into).map(p => p.pane);
+    const area = d.bar ? panesRect(d.bar, this.win, layout()) : headersRect(headers, ids, this.win, layout());
+    return area && dropTarget(paneRects(headers, ids, area), area, pos);
   }
 
   render() {
@@ -60,10 +61,13 @@ class DragOverlay {
     return div().id("tab-drag").size_full().relative().track_focus(this.handle)
       .on_size_change((size) => { this.win = size; })
       .on_key_down((e) => { if (e.key === "escape") this.end(); })
-      .on_mouse_move((e, cx) => { this.pos = e.position; cx.notify(); })
+      .on_mouse_move((e, cx) => {
+        if (d.back && dropZone(d.back, e.position)) { setShared(DRAG_BACK, d.id); return this.end(); }
+        this.pos = e.position; cx.notify();
+      })
       .on_mouse_up("left", (e) => {
         const drop = this.target(e.position);
-        if (drop) setShared(MOVE_REQUEST, { ...d.source, into: d.into, place: drop.zone, beside: drop.beside, at: Date.now() });
+        if (drop && d.request) setShared(d.request, { ...d.source, into: d.into, place: drop.zone, beside: drop.beside, at: Date.now() });
         this.end();
       })
       .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.end(); })
@@ -116,7 +120,7 @@ export default class Tabs extends View {
     this.press = null; this.pressed = null; this.dragging = false;
     const source = p && this.bar ? dragSource(p.id, active, panes()) : null;
     if (source) openOverlay({ mod: "vscode-tabs", kind: "window", frame: "none", at: { x: 0, y: 0 }, width: 1, height: 1,
-      props: { drag: { source, into: active, title: p.title, bar: this.bar } } });
+      props: { drag: { source, request: MOVE_REQUEST, into: active, title: p.title, bar: this.bar } } });
   }
 
   render(cx) {
