@@ -8,6 +8,7 @@ import { createWarmPool, TIMING } from "./warm.js";
 import { menuItems, menuHeight, openWith, baseName, parentOf, relativeTo, nameProblem, vscodeRemoteArgs, isMarkdown, editorPaneOf,
   tabMenuItems, moveRows, outRows, moveOf, closeArgs, fileTabs, splitArgs, clipboardCommand, revealCommand, withDetails, deleteTitle, extraLines, DETAILS } from "./paths.js";
 import { createOps } from "./ops.js";
+import { createSplitOpen } from "./split.js";
 import { createRemote, createOpenFile, keysOs, ROOT, INSTALL_COMMAND, INSTALL_REQUEST } from "./remote.js";
 
 // Herdr's terminals() rows, a remote editor's with its argv and labels (details.js): what editorFileOf reads.
@@ -46,8 +47,9 @@ const askInstall = (machine, size) => {
 export const remote = createRemote({ exec, readTextFile, notify, appHome, platform: () => window()?.platform, shared, setShared, confirm: askInstall });
 // Every way the Explorer opens a file: the tree's click, Open / Open With, a new file. A file open in an editor tab of
 // this space is selected there instead.
+const openEditorPane = (file, on) => editorPaneOf(file, on, spaces().find(s => s.active), panes(), terminalRows());
 const showOpen = (file, on) => {
-  const pane = editorPaneOf(file, on, spaces().find(s => s.active), panes(), terminalRows());
+  const pane = openEditorPane(file, on);
   if (pane) { run("tab.select", { id: pane.tab }); run("pane.focus", { pane: pane.pane }); } // it may share its tab
   return Boolean(pane);
 };
@@ -60,6 +62,10 @@ export const REVEAL = "vscode-explorer.reveal";
 const TAB_CLOSE = "vscode-tabs.close";
 // Move into Tab / Move to New Tab ask the tab bar too (vscode-tabs' move.js MOVE_REQUEST).
 const MOVE = "vscode-tabs.move";
+// A file dragged from the tree onto a pane opens beside it (split.js; the tree runs the drop's request).
+export const splitOpen = createSplitOpen({ run, panes, open: openFile,
+  openPane: openEditorPane,
+  move: (request) => setShared(MOVE, { ...request, at: Date.now() }) });
 
 // Herdr starts with PATH=/usr/bin:/bin; Homebrew/user tools (code, trash) live elsewhere.
 const sh = (script, ...args) => exec("sh", ["-c", 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; ' + script, "explorer", ...args]);

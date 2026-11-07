@@ -5,9 +5,10 @@
 // (VS Code's explorer.autoReveal).
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { spaces, panes, focused, terminals, exec, hc, readTextFile, watchFolder, theme, window, appHome, props, shared, setShared, notify, nextCommand } from "herdr";
+import { spaces, panes, focused, terminals, exec, hc, readTextFile, watchFolder, theme, window, appHome, props, shared, setShared, notify, nextCommand, openOverlay } from "herdr";
 import { freshRoot, encode, decode } from "./cache.js";
-import { ExplorerMenu, ExplorerDialog, TabMenu, openMenu, openInCode, explorerAction, refreshKey, openFile, remote, warm, REVEAL, terminalRows } from "./menu.js";
+import { ExplorerMenu, ExplorerDialog, TabMenu, openMenu, openInCode, explorerAction, refreshKey, openFile, splitOpen, remote, warm, REVEAL, terminalRows } from "./menu.js";
+import { OPEN_AT } from "./split.js";
 import { WARM } from "./warm.js";
 import { createCore } from "./core.js";
 import { editorFileOf, autoRevealOf, revealPath, within, DETAILS } from "./paths.js";
@@ -17,6 +18,8 @@ import { ROW, clampTop, rowAt, shown, scrollToShow, dragStarted, dropFolder, dra
 import { createDesktop } from "./desktop.js";
 import { createDetails } from "./details.js";
 import { createOps } from "./ops.js";
+// vscode-tabs' drag.js DRAG_BACK: its drag overlay hands a file drag back to the tree.
+const DRAG_BACK = "vscode-tabs.drag-back";
 // Herdr starts with PATH=/usr/bin:/bin, so Homebrew/user tools (node, code, codex, trash) are looked up here too.
 const userExec = (cmd, args, opts) => exec("sh", ["-c", 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; exec "$0" "$@"', cmd, ...args], opts);
 
@@ -363,6 +366,14 @@ export default class Files extends View {
     if (this.reveal(ask.file, cx)) { this.revealedAt = ask.at; this.askedRow = this.active; }
   }
 
+  // A file dropped on a pane (split.js): once each, dropped after 5s (shared values outlive a restart).
+  openAtAsked(cx) {
+    const ask = shared(OPEN_AT);
+    if (!ask?.file || ask.at === this.openedAt || Date.now() - ask.at > 5000) return;
+    this.openedAt = ask.at;
+    cx.spawn(cx => splitOpen(ask, cx));
+  }
+
   // Opens the folders above `file`, highlights its row and scrolls to it once listed (scrollToRevealed); false for a
   // file outside the tree.
   reveal(file, cx) {
@@ -433,6 +444,9 @@ export default class Files extends View {
 
   pointerMove(e, rows, cx) {
     this.hoverY = e.local_position.y; // where a drop from Finder lands (render's on_drop)
+    this.rowsBounds = e.bounds; // where a drag handed to the overlay (dragOut) comes back
+    // Back from the overlay: the drag goes on here; any other end of it there (a drop, Escape) ends it here too.
+    if (this.pressed?.out) { if (shared(DRAG_BACK) !== this.pressed.out) return this.cancelDrag(cx); this.pressed.out = null; }
     if (this.thumb) {
       const top = clampTop(this.thumb.top + (e.position.y - this.thumb.y) * this.thumb.ratio, rows.length, this.height);
       if (top !== this.top) { this.top = top; cx.notify(); }
@@ -451,13 +465,25 @@ export default class Files extends View {
   release(e, rows, cx) {
     const p = this.pressed;
     this.pressed = null; this.thumb = null;
-    if (!p || !e.local_position) return cx.notify();
+    if (!p || p.out || !e.local_position) return cx.notify();
     const i = rowAt(this.top, e.local_position.y, rows.length);
     if (!p.dragging) return i >= 0 && i === p.i ? this.click(rows[i], cx) : undefined;
     const folder = dragTarget(p.row, rows, i), r = p.row;
     if (folder !== null) this.place(folder, e.modifiers?.alt
       ? (ops, dir) => ops.paste({ path: r.abs, dir: r.dir, cut: false, on: this.on }, dir)
       : async (ops, dir) => { const to = await ops.moveInto(r.abs, dir); if (to && r.dir) this.forget(r.path); return to; }, cx);
+    cx.notify();
+  }
+
+  // A file dragged out of the tree toward the panes: vscode-tabs' drag overlay takes it over (its drag.js props), a drop
+  // on a pane asks OPEN_AT (split.js), the pointer back over the rows hands it back here (DRAG_BACK). Folders don't
+  // leave the tree: that cancels, as before.
+  dragOut(cx) {
+    const p = this.pressed, into = spaces().find(s => s.active)?.tabs.find(t => t.active)?.id;
+    if (!p?.dragging || p.row.dir || !this.root || !into || !this.rowsBounds) return this.cancelDrag(cx);
+    p.out = Date.now(); p.folder = null;
+    openOverlay({ mod: "vscode-tabs", kind: "window", frame: "none", at: { x: 0, y: 0 }, width: 1, height: 1, props: { drag: {
+      source: { file: p.row.abs, on: this.on, folder: this.root }, request: OPEN_AT, into, title: p.row.name, back: this.rowsBounds, id: p.out } } });
     cx.notify();
   }
 
@@ -540,6 +566,7 @@ export default class Files extends View {
     details(terminals(), panes());
     this.autoReveal(cx);
     this.revealAsked(cx);
+    this.openAtAsked(cx);
     // an editor focused in this active window: this desktop answers its machine's suggestions (desktop.js)
     const editorOn = window()?.active ? activeFile(focused(), null)?.on ?? null : null;
     if (editorOn !== this.editorOn) { this.editorOn = editorOn; cx.spawn(() => desktop.mark(editorOn)); }
@@ -550,7 +577,7 @@ export default class Files extends View {
     const height = this.height, top = (this.top = clampTop(this.top, count, height)), over = count * ROW - height;
     // Only the rows on screen are drawn (a tall screenful until the viewport's size is known), each at its scrolled y.
     const [first, end] = shown(top, height || 1600, count);
-    const drag = this.pressed?.dragging ? this.pressed : null, keyboard = this.handle.is_focused();
+    const drag = this.pressed?.dragging && !this.pressed.out ? this.pressed : null, keyboard = this.handle.is_focused();
     // A drag from Finder isn't lit: Herdr tells it from a hover over an inactive window only by guesswork, and a wrong
     // guess lit the tree on plain hovers.
     const target = drag?.folder ?? null;
@@ -588,7 +615,12 @@ export default class Files extends View {
           })
           .on_mouse_move((e, cx) => this.pointerMove(e, rows, cx))
           .on_mouse_up("left", (e, cx) => this.release(e, rows, cx))
-          .on_hover((on, cx) => { if (!on) { this.hoverY = null; this.cancelDrag(cx); cx.notify(); } })
+          .on_hover((on, cx) => {
+            if (on || this.pressed?.out) return;
+            this.hoverY = null;
+            if (this.pressed?.dragging) this.dragOut(cx); else this.cancelDrag(cx);
+            cx.notify();
+          })
           .children(rows.slice(first, end).map((r, k) => this.row(r, t, first + k >= hiFrom && first + k < hiTo, keyboard).absolute().left(0).top((first + k) * ROW - top)))
           .when(over > 0 && height > 0, el => el.child(div().absolute().right(1).top((height - thumb) * top / over).w(6).h(thumb).rounded(3).bg(t.dim).opacity(0.45)
             .on_mouse_down("left", (e, cx) => { cx.stop_propagation(); this.thumb = { y: e.position.y, top: this.top, ratio: over / (height - thumb) }; })))
