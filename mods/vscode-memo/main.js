@@ -15,7 +15,7 @@ import { View, div, svg } from "gpui-kit";
 import { h_flex } from "gpui-base";
 import { props, openOverlay, closeOverlay, shared, setShared, spaces, panes, terminals, theme, hc, exec, appHome,
   readTextFile, writeTextFile, nextCommand, run, focused } from "herdr";
-import { BUTTON, MIN, memoTarget, clampRect, dragRect, buttonRect, buttonPos, panelRect, gitignoreAddition, memoSettings, dragStarted } from "./memo.js";
+import { BUTTON, MIN, memoTarget, clampRect, dragRect, buttonRect, buttonPos, closesOnPress, panelRect, gitignoreAddition, memoSettings, dragStarted } from "./memo.js";
 
 const POS = "vscode-memo.button";     // { right, bottom }: the button's spot, from the window's bottom-right corner
 const PANEL = "vscode-memo.panel";    // { x, y, width, height }: the panel's
@@ -23,6 +23,8 @@ const WIN = "vscode-memo.window";     // { width, height }: the window's size, a
 const OPEN = "vscode-memo.open";      // { button: { id, rect }, panel: { id, rect, key, address, back, note } }: what is shown
 const TOGGLE = "vscode-memo.toggle";  // a click on the button (its time): the layout's copy opens or closes the panel
 const EDITORS = "vscode-memo.editors"; // { [memo path]: terminal address }: the running memo editors
+const PINNED = "vscode-memo.pinned"; // true: a press outside the panel leaves it open
+const PIN = "mods/vscode-memo/pin.svg";
 const MOD = "vscode-memo", ICON = "mods/vscode-memo/memo.svg", GRIP = 5, CORNER = 14, TITLE = 30;
 
 const same = (a, b) => !!a && !!b && a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
@@ -38,11 +40,13 @@ const noteWindow = ({ width, height }) => {
   if (width > 0 && height > 0 && (w?.width !== width || w?.height !== height)) setShared(WIN, { width, height });
 };
 
-// Closes the panel and gives the keyboard back to where it was before (a pane of the shown space, or a terminal block).
-function closePanel() {
+// Closes the panel (its editor keeps running and saves itself) and, unless `refocus` is false (a press outside put the
+// keyboard there), gives the keyboard back to where it was before (a pane of the shown space, or a terminal block).
+function closePanel(refocus = true) {
   const p = open().panel;
   tryClose(p?.id);
   setOpen({ panel: null });
+  if (!refocus) return;
   const b = p?.back, tabs = new Set(spaces().find(s => s.active)?.tabs.map(t => t.id) ?? []);
   if (b?.pane && tabs.has(panes().find(x => x.pane === b.pane)?.tab)) run("pane.focus", { pane: b.pane });
   else if (b?.terminal && !b.pane && live(b.terminal)) run("pane.focus", { terminal: b.terminal });
@@ -212,17 +216,25 @@ function button() {
 }
 
 // The panel's title bar: drags the panel; × closes it (the editor keeps running and has saved).
+// Unpinned (the default), a press outside the panel closes it, and the keyboard stays where that press put it.
 function title() {
-  const t = theme(), space = spaces().find(s => s.active);
-  const close = (_e, cx) => { cx.stop_propagation(); closePanel(); };
+  const t = theme(), space = spaces().find(s => s.active), pinned = shared(PINNED) === true;
+  const tool = (id, tip, on, child, action) => div().id(id).size(22).flex_none().flex().items_center().justify_center().rounded(5)
+    .cursor_pointer().tooltip(tip).text_color(on ? t.accent : t.muted).when(on, el => el.bg(t.selected))
+    .hover(s => s.bg(t.hover).text_color(on ? t.accent : t.foreground))
+    .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); action(); }).child(child);
   return h_flex().id("memo-title").size_full().px(10).gap(8).items_center().bg(t.chrome).border_b(1).border_color(t.border)
     .text_size(12.5).text_color(t.foreground).cursor_move()
     .on_mouse_down("left", (e, cx) => grab("panel", "move", open().panel?.rect, e, cx))
+    .on_mouse_down_out((e) => {
+      const o = open();
+      if (closesOnPress(e.position, { panel: o.panel?.rect, button: o.button?.rect, pinned: shared(PINNED) === true })) closePanel(false);
+    })
     .child(svg(ICON).size(14).flex_none().text_color(t.muted))
     .child(div().flex_none().font_semibold().child("Memo"))
     .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(space?.name ?? ""))
-    .child(div().id("memo-close").size(22).flex_none().flex().items_center().justify_center().rounded(5).cursor_pointer()
-      .text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground)).on_mouse_down("left", close).child("×"));
+    .child(tool("memo-pin", pinned ? "Unpin memo" : "Pin memo", pinned, svg(PIN).size(14), () => setShared(PINNED, !pinned)))
+    .child(tool("memo-close", "Close", false, "×", () => closePanel()));
 }
 
 // A side or corner of the panel's border: the OS's resize pointer, and a press resizes from there.

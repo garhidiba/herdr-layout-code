@@ -59,6 +59,11 @@ export function buttonRect(pos, win) {
 // The spot to keep for a button at `r`.
 export const buttonPos = (r, win) => ({ right: Math.round(win.width - r.x - r.width), bottom: Math.round(win.height - r.y - r.height) });
 
+const inside = (r, p) => !!r && p.x >= r.x && p.x < r.x + r.width && p.y >= r.y && p.y < r.y + r.height;
+// Whether a press at `pos` closes the panel: an unpinned one, pressed outside it and outside the button (which toggles
+// it itself). Its title bar and border are inside: moving and resizing never close it.
+export const closesOnPress = (pos, { panel, button, pinned }) => !pinned && !!panel && !inside(panel, pos) && !inside(button, pos);
+
 // Where the panel opens: where it was left, else above the button and to its left, its right edge at the button's.
 export function panelRect(saved, button, win) {
   return clampRect(saved ?? { x: button.x + button.width - PANEL.width, y: button.y - 8 - PANEL.height, ...PANEL }, win);

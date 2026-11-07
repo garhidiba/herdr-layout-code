@@ -1,7 +1,7 @@
 // node --test mods/vscode-memo/test/memo.test.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MEMO, MIN, MEMO_SETTINGS, DEFAULT_POS, buttonRect, buttonPos, memoTarget, clampRect, dragRect, panelRect, gitignoreAddition, dragStarted, memoSettings } from "../memo.js";
+import { MEMO, MIN, MEMO_SETTINGS, DEFAULT_POS, buttonRect, buttonPos, closesOnPress, memoTarget, clampRect, dragRect, panelRect, gitignoreAddition, dragStarted, memoSettings } from "../memo.js";
 
 const panes = [
   { pane: "p1", tab: "t1", terminal: null, mod: "vscode-viewer", cwd: null },
@@ -52,6 +52,19 @@ test("the button starts bottom right, above the status bar, and keeps its corner
   assert.deepEqual(buttonRect(pos, { width: 600, height: 400 }), { x: 0, y: 0, width: 40, height: 40 });
   // A spot saved by the first version ({ x, y }) is used as is.
   assert.deepEqual(buttonRect({ x: 216, y: 3 }, win), { x: 216, y: 3, width: 40, height: 40 });
+});
+
+test("a press outside closes the unpinned panel; inside, on the button or pinned it doesn't", () => {
+  const panel = { x: 100, y: 100, width: 400, height: 300 }, button = { x: 900, y: 700, width: 40, height: 40 };
+  const at = (x, y, pinned = false) => closesOnPress({ x, y }, { panel, button, pinned });
+  assert.ok(at(50, 50));
+  assert.ok(at(500, 250)); // just past the right edge
+  assert.ok(!at(100, 100)); // the border's corner: resizing
+  assert.ok(!at(300, 110)); // the title bar: moving
+  assert.ok(!at(300, 300)); // the editor
+  assert.ok(!at(910, 710)); // the button toggles it itself
+  assert.ok(!at(50, 50, true)); // pinned
+  assert.ok(!closesOnPress({ x: 50, y: 50 }, { panel: null, button, pinned: false })); // no panel
 });
 
 test("the panel opens where it was left, else above the button and to its left", () => {
