@@ -15,16 +15,15 @@ import { View, div, svg } from "gpui-kit";
 import { h_flex } from "gpui-base";
 import { props, openOverlay, closeOverlay, shared, setShared, spaces, panes, terminals, theme, hc, exec, appHome,
   readTextFile, writeTextFile, nextCommand } from "herdr";
-import { BUTTON, MIN, memoTarget, clampRect, dragRect, panelRect, gitignoreAddition, memoSettings, dragStarted } from "./memo.js";
+import { BUTTON, MIN, memoTarget, clampRect, dragRect, buttonRect, buttonPos, panelRect, gitignoreAddition, memoSettings, dragStarted } from "./memo.js";
 
-const POS = "vscode-memo.button";     // { x, y }: the button's spot
+const POS = "vscode-memo.button";     // { right, bottom }: the button's spot, from the window's bottom-right corner
 const PANEL = "vscode-memo.panel";    // { x, y, width, height }: the panel's
 const WIN = "vscode-memo.window";     // { width, height }: the window's size, as the grab overlay last saw it
 const OPEN = "vscode-memo.open";      // { button: { id, rect }, panel: { id, rect, key, address, note } }: what is shown
 const TOGGLE = "vscode-memo.toggle";  // a click on the button (its time): the layout's copy opens or closes the panel
 const EDITORS = "vscode-memo.editors"; // { [memo path]: terminal address }: the running memo editors
 const MOD = "vscode-memo", ICON = "mods/vscode-memo/memo.svg", GRIP = 5, CORNER = 14, TITLE = 30;
-const DEFAULT_POS = { x: 216, y: 3 }; // the sidebar's top bar, right end (layouts/vscode.json: 268 px wide, 46 tall)
 
 const same = (a, b) => !!a && !!b && a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
 const open = () => shared(OPEN) ?? {};
@@ -33,6 +32,11 @@ const live = (address) => !!address && terminals().some(t => t.address === addre
 // Which memo the panel shows: its machine and file.
 const memoKey = (t) => JSON.stringify([t?.on ?? null, t?.path ?? null]);
 const tryClose = (id) => { if (id) try { closeOverlay(id); } catch {} };
+// The window's size, from a full-window overlay's (the probe's, the grab's).
+const noteWindow = ({ width, height }) => {
+  const w = shared(WIN);
+  if (width > 0 && height > 0 && (w?.width !== width || w?.height !== height)) setShared(WIN, { width, height });
+};
 
 // A press on the button, the title bar (edge "move") or the border: the grab overlay takes the pointer from here.
 function grab(target, edge, rect, e, cx) {
@@ -47,6 +51,9 @@ class Host {
     const o = open(); // windows from before a restart or a layout switch are gone
     tryClose(o.button?.id); tryClose(o.panel?.id);
     setShared(OPEN, {});
+    // The window's size (the button's spot is from its bottom-right corner): a full-window overlay that closes as
+    // soon as it is laid out.
+    openOverlay({ mod: MOD, kind: "window", frame: "none", at: { x: 0, y: 0 }, width: 1, height: 1, props: { role: "probe" } });
     this.toggleAt = shared(TOGGLE); this.busy = false;
     cx.spawn(async (cx) => { for (;;) { if ((await nextCommand()) === "toggle") { this.toggle(cx); cx.notify(); } } });
   }
@@ -65,7 +72,8 @@ class Host {
         const t = memoTarget(spaces().find(s => s.active), panes());
         const note = !t ? "This space has no folder for a memo." : t.on ? "Memo is local-only for now." : null;
         const address = note ? null : await this.editor(t, cx).catch(() => null);
-        const rect = panelRect(shared(PANEL), open().button?.rect ?? { ...DEFAULT_POS, width: BUTTON, height: BUTTON }, shared(WIN));
+        const win = shared(WIN) ?? { width: 1200, height: 800 };
+        const rect = panelRect(shared(PANEL), open().button?.rect ?? buttonRect(shared(POS), win), win);
         setShared(PANEL, rect);
         this.place({ key: memoKey(t), address, note: note ?? (address ? null : "The editor didn't start.") }, rect);
       } finally { this.busy = false; cx.notify(); }
@@ -124,9 +132,9 @@ class Host {
 
   render(cx) {
     const o = open(), win = shared(WIN);
-    // The button where it was left (kept inside the window).
-    const b = clampRect({ ...(shared(POS) ?? DEFAULT_POS), width: BUTTON, height: BUTTON }, win);
-    if (!same(o.button?.rect, b)) {
+    // The button where it was left (kept inside the window), once the window's size is known.
+    const b = win && buttonRect(shared(POS), win);
+    if (b && !same(o.button?.rect, b)) {
       tryClose(o.button?.id);
       setOpen({ button: { id: openOverlay({ mod: MOD, kind: "window", frame: "none", at: { x: b.x, y: b.y }, width: BUTTON, height: BUTTON,
         props: { role: "button" } }), rect: b } });
@@ -161,17 +169,13 @@ class Grab {
   render() {
     const t = theme(), g = this.g, r = this.moved() ? this.rect() : null;
     return div().id("memo-grab").size_full().relative().track_focus(this.handle)
-      .on_size_change((size) => {
-        this.win = size;
-        const w = shared(WIN);
-        if (w?.width !== size.width || w?.height !== size.height) setShared(WIN, { width: size.width, height: size.height });
-      })
+      .on_size_change((size) => { this.win = size; noteWindow(size); })
       .on_key_down((e) => { if (e.key === "escape") this.end(); })
       .on_mouse_move((e, cx) => { this.pos = e.position; cx.notify(); })
       .on_mouse_up("left", (e) => {
         this.pos = e.position;
         if (!this.moved()) { if (g.target === "button") setShared(TOGGLE, Date.now()); }
-        else if (g.target === "button") { const { x, y } = this.rect(); setShared(POS, { x, y }); }
+        else if (g.target === "button") { if (this.win) setShared(POS, buttonPos(this.rect(), this.win)); }
         else setShared(PANEL, this.rect());
         this.end();
       })
@@ -220,10 +224,12 @@ export default class Memo extends View {
     const role = props()?.role;
     if (role === "grab") this.part = new Grab(cx);
     else if (!role) this.part = new Host(cx);
+    else if (role === "probe") cx.timer.after(1000, () => tryClose(props().overlay)); // closes itself even unsized
   }
   render(cx) {
     if (this.part) return this.part.render(cx);
     const role = props().role, t = theme();
+    if (role === "probe") return div().id("memo-probe").size_full().on_size_change((size) => { noteWindow(size); tryClose(props().overlay); });
     if (role === "button") return button();
     if (role === "title") return title();
     if (role === "grip") return grip();

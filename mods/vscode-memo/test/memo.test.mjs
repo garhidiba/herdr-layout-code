@@ -1,7 +1,7 @@
 // node --test mods/vscode-memo/test/memo.test.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MEMO, MIN, MEMO_SETTINGS, memoTarget, clampRect, dragRect, panelRect, gitignoreAddition, dragStarted, memoSettings } from "../memo.js";
+import { MEMO, MIN, MEMO_SETTINGS, DEFAULT_POS, buttonRect, buttonPos, memoTarget, clampRect, dragRect, panelRect, gitignoreAddition, dragStarted, memoSettings } from "../memo.js";
 
 const panes = [
   { pane: "p1", tab: "t1", terminal: null, mod: "vscode-viewer", cwd: null },
@@ -40,12 +40,26 @@ test("dragging moves, and an edge or corner resizes with the opposite side fixed
   assert.ok(dragStarted({ x: 0, y: 0 }, { x: 4, y: 3 }));
 });
 
-test("the panel opens where it was left, else under the button", () => {
-  const win = { width: 1200, height: 800 }, button = { x: 900, y: 10, width: 40, height: 40 };
-  assert.deepEqual(panelRect(null, button, win), { x: 500, y: 58, width: 440, height: 340 });
+test("the button starts bottom right, above the status bar, and keeps its corner as the window resizes", () => {
+  const win = { width: 1200, height: 800 };
+  assert.deepEqual(buttonRect(null, win), { x: 1144, y: 716, width: 40, height: 40 });
+  assert.deepEqual(buttonPos(buttonRect(null, win), win), DEFAULT_POS);
+  // Dragged to (300, 100): kept as offsets, so a wider, shorter window keeps it as far from the bottom-right corner.
+  const pos = buttonPos({ x: 300, y: 100, width: 40, height: 40 }, win);
+  assert.deepEqual(pos, { right: 860, bottom: 660 });
+  assert.deepEqual(buttonRect(pos, { width: 1400, height: 760 }), { x: 500, y: 60, width: 40, height: 40 });
+  // A window too small for that offset: kept inside it.
+  assert.deepEqual(buttonRect(pos, { width: 600, height: 400 }), { x: 0, y: 0, width: 40, height: 40 });
+  // A spot saved by the first version ({ x, y }) is used as is.
+  assert.deepEqual(buttonRect({ x: 216, y: 3 }, win), { x: 216, y: 3, width: 40, height: 40 });
+});
+
+test("the panel opens where it was left, else above the button and to its left", () => {
+  const win = { width: 1200, height: 800 }, button = buttonRect(null, win);
+  assert.deepEqual(panelRect(null, button, win), { x: 744, y: 368, width: 440, height: 340 });
   assert.deepEqual(panelRect({ x: 1000, y: 700, width: 300, height: 200 }, button, win), { x: 900, y: 600, width: 300, height: 200 });
-  // A button near the left edge: the panel stays in the window.
-  assert.equal(panelRect(null, { x: 0, y: 0, width: 40, height: 40 }, win).x, 0);
+  // A button near the top left: the panel stays in the window.
+  assert.deepEqual(panelRect(null, { x: 0, y: 0, width: 40, height: 40 }, win), { x: 0, y: 0, width: 440, height: 340 });
 });
 
 test(".gitignore gets the memo once, keeping its newline", () => {

@@ -47,9 +47,21 @@ export function dragRect(r, edge, dx, dy, min = { width: 0, height: 0 }) {
   return { x, y, width, height };
 }
 
-// Where the panel opens: where it was left, else below the button, its right edge at the button's.
+// The button's spot is kept as its distance from the window's right and bottom edges, so it stays in its corner as
+// the window resizes. First: 16 px in from the right, 16 px above the status bar (layouts/vscode.json: 28 px).
+export const DEFAULT_POS = { right: 16, bottom: 28 + 16 };
+// The button's rect in window `win` for its spot `pos` ({ right, bottom }; an older { x, y } as is), inside the window.
+export function buttonRect(pos, win) {
+  const p = pos?.right != null || pos?.x != null ? pos : DEFAULT_POS;
+  const x = p.right != null ? win.width - p.right - BUTTON : p.x, y = p.bottom != null ? win.height - p.bottom - BUTTON : p.y;
+  return clampRect({ x, y, width: BUTTON, height: BUTTON }, win);
+}
+// The spot to keep for a button at `r`.
+export const buttonPos = (r, win) => ({ right: Math.round(win.width - r.x - r.width), bottom: Math.round(win.height - r.y - r.height) });
+
+// Where the panel opens: where it was left, else above the button and to its left, its right edge at the button's.
 export function panelRect(saved, button, win) {
-  return clampRect(saved ?? { x: button.x + button.width - PANEL.width, y: button.y + button.height + 8, ...PANEL }, win);
+  return clampRect(saved ?? { x: button.x + button.width - PANEL.width, y: button.y - 8 - PANEL.height, ...PANEL }, win);
 }
 
 // Lines that already ignore the memo when git can't say (no git, not a repo).
