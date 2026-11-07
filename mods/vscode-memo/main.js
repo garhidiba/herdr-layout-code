@@ -16,7 +16,7 @@
 import { View, div, svg } from "gpui-kit";
 import { h_flex } from "gpui-base";
 import { props, openOverlay, closeOverlay, shared, setShared, spaces, panes, terminals, theme, hc, exec, appHome,
-  readTextFile, writeTextFile, nextCommand, run, focused } from "herdr";
+  readTextFile, writeTextFile, nextCommand, run, focused, placement } from "herdr";
 import { MIN, CORNER, GRIP, memoTarget, clampRect, dragRect, closesOnPress, panelRect, panelLayout, gitignoreAddition,
   memoSettings, dragStarted } from "./memo.js";
 
@@ -44,7 +44,19 @@ function closePanel(refocus = true) {
   if (!refocus) return;
   const b = p?.back, tabs = new Set(spaces().find(s => s.active)?.tabs.map(t => t.id) ?? []);
   if (b?.pane && tabs.has(panes().find(x => x.pane === b.pane)?.tab)) run("pane.focus", { pane: b.pane });
-  else if (b?.terminal && !b.pane && live(b.terminal)) run("pane.focus", { terminal: b.terminal });
+  else if (b?.terminal && !b.pane && live(b.terminal)) focusTerminal(b.terminal);
+}
+
+// pane.focus {terminal} through herdr-app, as vscode-explorer's launch.js asks for right clicks: run() shows a miss as
+// a toast ("no such pane"), and a terminal block that isn't drawn yet (the panel just opened) or no longer is (a layout
+// terminal block that went) is one. Tries `tries` times, `wait` ms apart, silently; true once it took.
+async function focusTerminal(address, tries = 1, wait = 0) {
+  for (let i = 0; i < tries; i++) {
+    if (i) await new Promise(r => setTimeout(r, wait));
+    const r = await exec("herdr-app", ["do", "pane.focus", "--terminal", address]).catch(() => null);
+    if (r?.code === 0 && !/"error"/.test(r.stdout)) return true;
+  }
+  return false;
 }
 
 // A press on the title bar (edge "move") or a grip: the grab overlay takes the pointer from here.
@@ -60,7 +72,7 @@ class Host {
   constructor(cx) {
     tryClose(open().panel?.id); // windows from before a restart or a layout switch are gone
     setShared(OPEN, {});
-    this.busy = false; this.down = null; this.up = null;
+    this.busy = false; this.down = this.up = this.bounds = null; this.dragged = false;
     cx.spawn(async (cx) => { for (;;) { if ((await nextCommand()) === "toggle") { this.toggle(cx); cx.notify(); } } });
   }
 
@@ -77,6 +89,9 @@ class Host {
         const t = memoTarget(spaces().find(s => s.active), panes());
         const note = !t ? "This space has no folder for a memo." : t.on ? "Memo is local-only for now." : null;
         const address = note ? null : await this.editor(t, cx).catch(() => null);
+        // The button's bounds as its last press saw them (window coordinates): the panel opens beside it, and a press on
+        // it is no press outside the panel (it toggles the panel itself).
+        if (this.bounds && !same(open().button, this.bounds)) setOpen({ button: { ...this.bounds } });
         const rect = panelRect(shared(PANEL), open().button, shared(WIN));
         setShared(PANEL, rect);
         // Where the keyboard was before the panel first opened, for closing it.
@@ -94,7 +109,7 @@ class Host {
     const body = { type: "block", content: p.address ? { terminal: p.address } : { mod: MOD, props: { role: "note", note: p.note } } };
     const id = openOverlay({ kind: "window", at: { x: rect.x, y: rect.y }, width: rect.width, height: rect.height, layout: panelLayout(MOD, body) });
     setOpen({ panel: { ...p, id, rect } });
-    if (p.address) cx.timer.after(50, () => { if (open().panel?.id === id) run("pane.focus", { terminal: p.address }); });
+    if (p.address) focusTerminal(p.address, 8, 60);
   }
 
   // The running editor of memo `t`, else a new one: .herdr/ and the file made, the memo ignored by git, the editor's
@@ -133,11 +148,6 @@ class Host {
     if (add) await exec("sh", ["-c", 'printf %s "$2" >> "$1"', "sh", gitignore, add]);
   }
 
-  // Where the button is (window coordinates), for opening the panel beside it and for presses outside the panel.
-  noteButton(bounds) {
-    if (bounds && !same(open().button, bounds)) setOpen({ button: { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height } });
-  }
-
   render(cx) {
     const p = open().panel;
     if (p && !this.busy) {
@@ -147,19 +157,22 @@ class Host {
       else if (memoKey(t) !== p.key) this.show(cx); // another space's memo
       else if (!same(r, p.rect)) this.place(p, r, cx); // moved or resized
     }
-    // The button: Herdr drags the float on a press it isn't stopped on; a click that didn't move toggles the panel.
+    // The button is the float: Herdr's frame (its background, border, shadow) around the icon. Herdr drags the float on
+    // a press nothing stops, so nothing here stops it, and a press only notes where the button is (locally: a shared
+    // value set then would redraw every mod mid-press); a click that was a drag (placement().dragging seen since the
+    // press, or the pointer moved) doesn't toggle the panel.
     const t = theme(), on = Boolean(p);
-    return div().id("memo-button").size(30).rounded(6).flex().items_center().justify_center().cursor_pointer().tooltip("Memo")
-      .text_color(on ? t.accent : t.muted).hover(s => s.bg(t.hover).text_color(on ? t.accent : t.foreground))
-      .on_mouse_move((e) => this.noteButton(e.bounds))
-      .on_mouse_down("left", (e) => { this.down = e.position; this.up = null; this.noteButton(e.bounds); })
+    if (placement()?.dragging) this.dragged = true;
+    return div().id("memo-button").size(32).flex().items_center().justify_center().cursor_pointer().tooltip("Memo")
+      .text_color(on ? t.accent : t.foreground)
+      .on_mouse_down("left", (e) => { this.down = e.position; this.up = null; this.dragged = false; this.bounds = e.bounds ?? null; })
       .on_mouse_up("left", (e) => { this.up = e.position; })
       .on_click((_e, cx) => {
-        const moved = this.down && this.up && dragStarted(this.down, this.up);
-        this.down = this.up = null;
+        const moved = this.dragged || (this.down && this.up && dragStarted(this.down, this.up));
+        this.down = this.up = null; this.dragged = false;
         if (!moved) this.toggle(cx);
       })
-      .child(svg(ICON).size(18));
+      .child(svg(ICON).size(20));
   }
 }
 
@@ -235,13 +248,17 @@ function grip() {
 
 export default class Memo extends View {
   init(_props, cx) {
-    const role = props()?.role;
+    const role = props()?.role, overlay = props()?.overlay;
     if (role === "grab") this.part = new Grab(cx);
-    else if (!role) this.part = new Host(cx);
+    else if (!overlay) this.part = new Host(cx);
   }
   render(cx) {
     if (this.part) return this.part.render(cx);
-    const role = props().role, t = theme();
+    const role = props().role, overlay = props().overlay, t = theme();
+    // A window this mod no longer opens (an earlier version's always-open button, its size probe: any open window
+    // keeps Herdr's pointer popups, the tab and Explorer menus, from opening), or a panel that isn't the one shown
+    // (left from before a reload), closes itself.
+    if (!["title", "grip", "note"].includes(role) || open().panel?.id !== overlay) { tryClose(overlay); return div(); }
     if (role === "title") return title();
     if (role === "grip") return grip();
     return div().size_full().p(16).bg(t.background).text_color(t.muted).text_size(13).child(props().note ?? "");
