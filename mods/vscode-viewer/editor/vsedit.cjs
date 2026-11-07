@@ -24,7 +24,9 @@ let langModule = null;
 const Lang = new Proxy({}, { get: (_, k) => (langModule ??= require("./lang/index.cjs"))[k] });
 const { applyWorkspaceEdit, lastFirst } = require("./lang/edits.cjs");
 const { wordOccurrences, Fallback } = require("./lang/fallback.cjs");
-const { gitRoot, run, which } = require("./lang/proc.cjs");
+const { gitRoot, run, runAsync, which } = require("./lang/proc.cjs");
+const MD = require("./mdpreview.cjs");
+const PREVIEW = " Preview "; // the breadcrumb row's button for Markdown files
 const T = require("./terminal.cjs");
 const HV = require("./hexview.cjs");
 const E = require("./errorpage.cjs");
@@ -1714,6 +1716,19 @@ class Editor {
     try { fs.writeFileSync(path.join(path.dirname(S.settingsFile()), ".vscode-settings-page"), JSON.stringify({ page: page ?? "settings", at: Date.now() })); } catch {}
     require("child_process").spawn(bin, ["do", "mod.open", "--name", "vscode-settings"], { stdio: "ignore", detached: true }).on("error", () => {}).unref();
   }
+  // Markdown: Open Preview to the Side (toggle false) / Toggle Preview (true): the viewer mod beside this pane
+  // (mdpreview.cjs); without herdr-app here (a remote machine, or outside Herdr) the status bar says where it opens.
+  markdownPreview(toggle) {
+    if (this.scope !== MD.SCOPE) return this.say("Preview: not a Markdown file", this.colors.warn);
+    const bin = process.env.HC_TERMINAL_ID && which("herdr-app");
+    if (!bin) return this.say(MD.REMOTE, this.colors.warn, 5000);
+    if (this.previewing) return;
+    let sharedText = "";
+    try { sharedText = fs.readFileSync(MD.sharedFile(), "utf8"); } catch {}
+    this.previewing = true;
+    MD.showPreview({ file: this.file, terminal: process.env.HC_TERMINAL_ID, toggle, sharedText, herdr: (args) => runAsync(bin, args, { timeout: 3000 }).then(r => r.stdout) })
+      .catch(() => {}).finally(() => { this.previewing = false; });
+  }
   // After each input event: record a cursor change for Cursor Undo; restart the auto-save timer when the text changed.
   afterEvent() {
     this.noteCursor();
@@ -1897,8 +1912,9 @@ class Editor {
       if (ev.button === 0 && !ev.motion) this.statusHits?.find(h => ev.x >= h.x && ev.x < h.x + h.w)?.run();
       return;
     }
-    if (ev.y === 1) { // the breadcrumbs: a click opens Go to Symbol
-      if (ev.button === 0 && !ev.motion && this.settings["breadcrumbs.enabled"]) this.goToSymbol();
+    if (ev.y === 1) { // the breadcrumbs: a click opens Go to Symbol; on the Preview button, Toggle Preview
+      if (ev.button === 0 && !ev.motion && this.previewHit && ev.x >= this.previewHit) this.markdownPreview(true);
+      else if (ev.button === 0 && !ev.motion && this.settings["breadcrumbs.enabled"]) this.goToSymbol();
       return;
     }
     if (ev.y < 2 || ev.y > this.height + 1) return;
@@ -1968,9 +1984,12 @@ class Editor {
 
     // breadcrumbs
     P.move(1, 1);
-    const crumbs = this.crumbText();
-    P.text(fit(crumbs + (this.buf.dirty ? " ●" : ""), this.cols), c.barFg, c.bg);
-    if (this.buf.dirty) { const w = W.textWidth(crumbs + " ", 8); if (w < this.cols) { P.move(1, w + 1); P.text("●", c.warn, c.bg); } }
+    // a Markdown file's Preview button at the row's right end (Toggle Preview)
+    const crumbs = this.crumbText(), pw = this.scope === MD.SCOPE && this.cols >= 30 ? PREVIEW.length : 0;
+    P.text(fit(crumbs + (this.buf.dirty ? " ●" : ""), this.cols - pw), c.barFg, c.bg);
+    if (this.buf.dirty) { const w = W.textWidth(crumbs + " ", 8); if (w < this.cols - pw) { P.move(1, w + 1); P.text("●", c.warn, c.bg); } }
+    this.previewHit = pw ? this.cols - pw + 1 : null;
+    if (pw) { P.move(1, this.previewHit); P.text(PREVIEW, c.barFg, c.bar); }
 
     for (let r = 0, k = -1; r < height; r++) {
       const { line: l, lens, ghost: gk, sub = 0 } = layout[r], folded = l >= 0 && this.folds.has(l);

@@ -23,6 +23,7 @@ mod highlight;
 mod inline;
 mod keys;
 mod lang;
+mod mdpreview;
 mod language;
 mod overlays;
 mod paint;

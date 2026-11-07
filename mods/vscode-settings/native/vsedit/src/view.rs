@@ -20,6 +20,8 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 const WORD_DELAY: Duration = Duration::from_millis(250);
+/// The breadcrumb row's button for Markdown files.
+const PREVIEW: &str = " Preview ";
 
 /// Occurrences to highlight and their colors.
 pub struct Hits {
@@ -124,17 +126,23 @@ impl Editor {
         let bulb = self.light_bulb_line();
         let c = &self.c;
 
-        // breadcrumbs
+        // breadcrumbs; a Markdown file's Preview button at the row's right end (Toggle Preview)
         p.move_to(1, 1);
         let crumbs = self.crumb_text();
         let dirty = self.buf.dirty();
-        p.text(&fit(&format!("{crumbs}{}", if dirty { " ●" } else { "" }), self.cols as usize), &c.bar_fg, &c.bg);
+        let pw = if self.scope.as_deref() == Some(crate::mdpreview::SCOPE) && self.cols >= 30 { tw(PREVIEW) } else { 0 };
+        p.text(&fit(&format!("{crumbs}{}", if dirty { " ●" } else { "" }), (self.cols - pw) as usize), &c.bar_fg, &c.bg);
         if dirty {
             let w = tw(&format!("{crumbs} "));
-            if w < self.cols {
+            if w < self.cols - pw {
                 p.move_to(1, w + 1);
                 p.text("●", &c.warn, &c.bg);
             }
+        }
+        self.preview_hit = (pw > 0).then_some(self.cols - pw + 1);
+        if let Some(x) = self.preview_hit {
+            p.move_to(1, x);
+            p.text(PREVIEW, &c.bar_fg, &c.bar);
         }
 
         let no_hits: Vec<Hit> = vec![];
@@ -1139,7 +1147,9 @@ impl Editor {
             return;
         }
         if m.y == 1 {
-            if m.press() && self.settings.breadcrumbs {
+            if m.press() && self.preview_hit.is_some_and(|x| m.x >= x) {
+                self.markdown_preview(true);
+            } else if m.press() && self.settings.breadcrumbs {
                 self.run_act(crate::commands::Act::GotoSymbol, None);
             }
             return;

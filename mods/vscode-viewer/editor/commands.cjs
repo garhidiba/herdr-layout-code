@@ -95,6 +95,8 @@ const RUNS = {
   "workbench.action.openSettingsJson": ["openSettings"],
   "workbench.action.openGlobalKeybindings": ["openSettingsUi", ["keybindings"]],
   "workbench.action.openGlobalKeybindingsFile": ["openKeybindings"],
+  "markdown.showPreviewToSide": ["markdownPreview", [false]],
+  "markdown.showPreview": ["markdownPreview", [true]],
   "workbench.action.closeActiveEditor": ["quit"],
   "undo": ["undo"],
   "redo": ["redo"],

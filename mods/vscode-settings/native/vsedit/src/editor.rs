@@ -310,6 +310,8 @@ pub struct Editor {
     pub drag_next: Option<Instant>,
     pub last_click: (Instant, Pos),
     pub status_hits: Vec<(i32, i32, StatusAct)>,
+    /// The breadcrumb row's Preview button's first column (Markdown files).
+    pub preview_hit: Option<i32>,
     pub find_box: Option<(i32, i32, i32, i32)>,
     pub find_hits: Vec<(i32, i32, i32, FindAct)>,
     pub word: Option<(String, Instant)>,
@@ -414,6 +416,7 @@ impl Editor {
             drag_next: None,
             last_click: (now - Duration::from_secs(10), pos(usize::MAX, 0)),
             status_hits: vec![],
+            preview_hit: None,
             find_box: None,
             find_hits: vec![],
             word: None,
@@ -2161,6 +2164,17 @@ impl Editor {
             self.open_settings_json();
         }
     }
+    /// Markdown: Open Preview to the Side / Toggle Preview: the viewer mod beside this pane (mdpreview.rs); without
+    /// herdr-app here (a remote machine, or outside Herdr) the status bar says where it opens.
+    pub fn markdown_preview(&mut self, toggle: bool) {
+        if self.scope.as_deref() != Some(crate::mdpreview::SCOPE) {
+            return self.warn("Preview: not a Markdown file");
+        }
+        if let Err(e) = crate::mdpreview::spawn(self.file.to_string_lossy().into_owned(), toggle) {
+            let w = self.c.warn.clone();
+            self.say(e, Some(&w), 5000);
+        }
+    }
     /// After each input event: restart the auto-save timer when the text changed.
     pub fn after_event(&mut self) {
         self.note_cursor();
@@ -2400,6 +2414,7 @@ impl Editor {
             Act::InlineCycle(dir) => self.inline_cycle(dir),
             Act::OpenSettingsJson => self.open_settings_json(),
             Act::OpenKeybindingsJson => self.open_keybindings_json(),
+            Act::MarkdownPreview(toggle) => self.markdown_preview(toggle),
             Act::Navigate(dir) => self.navigate(dir),
             Act::SaveAs => self.ask_save_as(),
             Act::SaveAll => self.save_all(),
@@ -3675,6 +3690,23 @@ pub(crate) mod tests {
         col.settings.word_wrap_column = 40;
         assert!(screen(&mut col)[7].contains("Wrap 40"));
         assert_eq!(col.wrap_width(), 40);
+    }
+
+    #[test]
+    fn a_markdown_file_has_a_preview_button_on_the_breadcrumb_row_and_other_files_say_why_not() {
+        std::env::remove_var("HC_TERMINAL_ID"); // no herdr-app to ask, as on a remote machine
+        let mut md = editor("/tmp/x.md", &["# Hi"]);
+        (md.rows, md.cols) = (10, 80);
+        assert!(screen(&mut md)[0].trim_end().ends_with("Preview"));
+        assert_eq!(md.preview_hit, Some(80 - " Preview ".len() as i32 + 1));
+        let x = md.preview_hit.unwrap() + 2;
+        md.mouse(&crate::keys::Mouse { button: 0, x, y: 1, ..Default::default() }, None);
+        assert_eq!(md.message.as_ref().map(|m| m.text.as_str()), Some(crate::mdpreview::REMOTE));
+        let mut txt = wrapped(&["hi"], "off", 10, 80);
+        assert!(!screen(&mut txt)[0].contains("Preview"));
+        assert_eq!(txt.preview_hit, None);
+        run(&mut txt, "markdown.showPreview");
+        assert_eq!(txt.message.as_ref().map(|m| m.text.as_str()), Some("Preview: not a Markdown file"));
     }
 
     #[test]

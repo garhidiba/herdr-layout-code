@@ -56,6 +56,8 @@ pub enum Act {
     OpenSettingsUi(bool),
     OpenSettingsJson,
     OpenKeybindingsJson,
+    /// Markdown: Toggle Preview (true) / Open Preview to the Side (false): mdpreview.rs
+    MarkdownPreview(bool),
     Quit,
     Undo,
     Redo,
@@ -193,6 +195,8 @@ pub fn act_of(id: &str) -> Option<Act> {
         "workbench.action.openSettingsJson" => OpenSettingsJson,
         "workbench.action.openGlobalKeybindings" => OpenSettingsUi(true),
         "workbench.action.openGlobalKeybindingsFile" => OpenKeybindingsJson,
+        "markdown.showPreviewToSide" => MarkdownPreview(false),
+        "markdown.showPreview" => MarkdownPreview(true),
         "workbench.action.closeActiveEditor" => Quit,
         "undo" => Undo,
         "redo" => Redo,
