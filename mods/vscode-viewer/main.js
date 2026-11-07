@@ -11,7 +11,7 @@ import { View, div, image, PathBuilder, Background } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState, TextView } from "gpui-base";
 import { props, readTextFile, writeTextFile, exec, theme, appHome, nextCommand, focused, panes, spaces, run, shared, setShared } from "herdr";
 import { FETCHED, POSTER, fetchFile, prune } from "./preview.js";
-import { ownPane } from "./pane.js";
+import { ownPane, closeOwnArgs } from "./pane.js";
 // Herdr starts with PATH=/usr/bin:/bin, so Homebrew/user tools (node, code, codex, trash) are looked up here too.
 const userExec = (cmd, args, opts) => exec("sh", ["-c", 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; exec "$0" "$@"', cmd, ...args], opts);
 
@@ -71,6 +71,8 @@ const pathHash = (s) => { let h = 5381; for (const c of s) h = (h * 33 ^ c.charC
 // Hot-exit backups: <app>/mods/vscode-viewer/.backups/<path hash>.json, the format editor/backup.cjs reads and writes:
 // { path, text, cursor, time, mtimeMs, size } (mtimeMs/size: the file on disk at backup time; compared to the second).
 const BACKUPS = "mods/vscode-viewer/.backups";
+// Loads in a row (3 s apart, 1 s for a local markdown preview) a file must be missing before its viewer closes.
+const MISSING_CHECKS = 2;
 // { mtime (s), size } of a file here or on machine `on`, or null.
 async function statOf(file, on = null) {
   const st = await exec("sh", ["-c", `stat -c '%Y %s' "$1" 2>/dev/null || stat -f '%m %z' "$1"`, "sh", file], { on }).catch(() => null);
@@ -125,7 +127,7 @@ export default class Viewer extends View {
     this.code = null; this.dirty = false; this.conflict = false; this.wrap = false;
     this.error = null; this.table = null; this.language = "Plain Text"; this.facts = null;
     this.kind = p.preview ? "markdown" : kindOf(this.file ?? ""); this.preview = this.kind === "markdown"; this.img = null;
-    this.autoSave = { mode: "off", delay: 1 }; this.autoToken = 0; this.hadFocus = false; this.restore = null; this.pane = null;
+    this.autoSave = { mode: "off", delay: 1 }; this.autoToken = 0; this.hadFocus = false; this.restore = null; this.pane = null; this.missing = 0;
     this.load(cx);
     // Every 3 s; a local markdown preview every second, so it follows the terminal editor's saves.
     let tick = 0;
@@ -133,20 +135,38 @@ export default class Viewer extends View {
     cx.spawn(async cx => { for (;;) { const c = await nextCommand(); if (c === "save") await this.save(cx); } });
     // onFocusChange: save when this tab stops being the focused pane.
     cx.timer.every(500, cx => {
-      // Its own pane: props().pane (Herdr gives a tab's mod none), else learnPane's, else the only viewer pane there is.
-      const mine = props().pane ?? this.pane ?? (panes().filter(p => p.mod === "vscode-viewer").length === 1 ? panes().find(p => p.mod === "vscode-viewer").pane : null);
+      const mine = this.ownPaneId();
       const now = !!mine && focused()?.pane === mine;
       if (this.hadFocus && !now && this.autoSave.mode === "onFocusChange") this.save(cx);
       // The Explorer reveals the focused tab's file (its autoReveal).
       if (now && !this.hadFocus) setShared("vscode-viewer.focused", { pane: mine, file: this.file, on: this.on });
-      // Every viewer pane's file, for moving it to another tab (vscode-tabs' move.js VIEWER_FILES); gone panes dropped.
+      // Every viewer pane's file, for moving it to another tab (vscode-tabs' move.js VIEWER_FILES), and whether it is
+      // unsaved, so the Explorer's Delete leaves it open (its paths.js closesForDeleted); gone panes dropped.
       const files = shared("vscode-viewer.files") ?? {};
-      if (mine && (files[mine]?.file !== this.file || files[mine]?.on !== this.on)) {
+      if (mine && (files[mine]?.file !== this.file || files[mine]?.on !== this.on || files[mine]?.dirty !== this.dirty)) {
         const live = new Set(panes().map(p => p.pane));
-        setShared("vscode-viewer.files", { ...Object.fromEntries(Object.entries(files).filter(([k]) => live.has(k))), [mine]: { file: this.file, on: this.on } });
+        setShared("vscode-viewer.files", { ...Object.fromEntries(Object.entries(files).filter(([k]) => live.has(k))), [mine]: { file: this.file, on: this.on, dirty: this.dirty } });
       }
       this.hadFocus = now;
     });
+  }
+
+  // Its own pane: props().pane (Herdr gives a tab's mod none), else learnPane's, else the only viewer pane there is.
+  ownPaneId() {
+    const viewers = panes().filter(p => p.mod === "vscode-viewer");
+    return props().pane ?? this.pane ?? (viewers.length === 1 ? viewers[0].pane : null);
+  }
+
+  // A local file missing MISSING_CHECKS loads in a row was deleted outside Herdr (a shell's rm, a git checkout): the
+  // viewer closes its pane (its tab when alone in it), as the Explorer's Delete does, unless it holds unsaved text. A
+  // remote file stays: its machine may only be unreachable.
+  noteMissing(gone) {
+    this.missing = gone ? this.missing + 1 : 0;
+    if (this.missing < MISSING_CHECKS || this.dirty || this.on || this.closing) return;
+    const pane = this.ownPaneId(), args = pane && closeOwnArgs(pane, panes(), spaces());
+    if (!args) return;
+    this.closing = true;
+    run(...args);
   }
 
   // Learns its own pane while on screen (pane.js ownPane: laid out or under the pointer means in the shown tab) and shares
@@ -220,6 +240,7 @@ export default class Viewer extends View {
         }
         if (this.kind === "image" || this.kind === "video") return await this.loadPreview(cx);
         const disk = await readTextFile(this.file, { on: this.on });
+        this.noteMissing(disk === null);
         if (disk === null) this.error = "This file is no longer available";
         else if (disk.includes("\0")) { this.code?.release(); this.code = null; this.error = "Binary file · no text preview"; }
         else if (disk !== this.text) {
@@ -242,6 +263,7 @@ export default class Viewer extends View {
     this.copying = true;
     try {
       const st = await statOf(this.file, this.on);
+      this.noteMissing(!st);
       if (!st) { this.img = null; this.error = "This file is no longer available"; return; }
       const { mtime, size } = st, key = `${mtime}-${size}`;
       if (this.img?.key === key || this.failed === key) return;

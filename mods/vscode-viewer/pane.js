@@ -14,3 +14,14 @@ export function ownPane({ panes, tab, bounds = null, headers = null }) {
   });
   return hits.length === 1 ? hits[0].pane : null;
 }
+
+// How a viewer closes its own pane `pane` ([command, args]): its tab when the pane is all the tab holds (confirmed when
+// that is its space's last tab, so the space stays as a gray row, as the tab's ×), else the pane alone, so the tab
+// keeps its other panes. null when the pane is gone.
+export function closeOwnArgs(pane, panes, spaces) {
+  const tab = panes.find(p => p.pane === pane)?.tab;
+  if (!tab) return null;
+  if (panes.some(p => p.tab === tab && p.pane !== pane)) return ["pane.close", { pane }];
+  const last = (spaces ?? []).find(s => s.tabs.some(t => t.id === tab))?.tabs.length === 1;
+  return ["tab.close", last ? { id: tab, confirmed: true } : { id: tab }];
+}
