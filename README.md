@@ -12,7 +12,7 @@ A VS Code–style layout for [Herdr](https://herdr.dev):
 - **Pane menu:** Open in VS Code / Finder.
 - **Status bar:** Claude and Codex usage meters; Codex limit resets can be redeemed from the card; a gear for Settings.
 - **Settings:** a VS Code-style dialog (gear, `cmd-,`, or the editor's Preferences: Open Settings) for auto save, trim/final newline, format on save, tab size, inline suggestions, word wrap and the core and editor engines (JavaScript, or the optional Rust builds), with a **Keyboard Shortcuts** page (or the editor's Preferences: Open Keyboard Shortcuts) to change, remove and reset the editor's keys.
-- **Quick memo:** a floating button (bottom right; drag it to another edge) opens a resizable panel with the space's `.herdr/memo.md` in the editor, cut down to a document editor (word wrap on, saved 0.5 s after each edit); a folder's `.gitignore` gets the memo added. Local spaces only for now.
+- **Quick memo:** a round button floating over the window (bottom right; drag it anywhere) opens a resizable panel with the space's `.herdr/memo.md` in the editor, cut down to a document editor (word wrap on, saved 0.5 s after each edit); a folder's `.gitignore` gets the memo added. Local spaces only for now.
 
 See [RECIPE.md](RECIPE.md) for exactly what it does and how it is built.
 
