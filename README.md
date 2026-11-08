@@ -2,6 +2,8 @@
 
 A VS Code-style layout for [Herdr](https://herdr.dev): a file explorer, a terminal code editor, source control and a viewer, in Herdr's own panes and tabs.
 
+![herdr-layout-vscode](preview.png)
+
 [RECIPE.md](RECIPE.md) is the detailed spec: exactly what each part does and how it is built.
 
 ## Features

@@ -2,6 +2,8 @@
 
 Herdr's main layout turned into a VS Code–style workbench: a file explorer with Material Icon Theme icons, VS Code's git colors and VS Code's right-click menu, and a Source Control panel (repositories, changes, commit graph) on the right; every file but an image opening in its own terminal tab in a VS Code-like editor painted by VS Code's own tokenizer with Atom One Dark, images in a viewer tab, and changes as a VS Code-style diff tab; a pane menu that opens the folder in VS Code or Finder; a status bar that shows how much of the Claude and Codex usage windows is left, with Codex limit resets; and a VS Code-style Settings dialog for the editor's settings, its keyboard shortcuts and the core engine.
 
+![VS Code](preview.png)
+
 ## What you see
 
 - **Left sidebar** (268px, 44–480): Herdr's own brand row (46px), spaces and agents lists (equal weights, min 90px each), footer (69px). As Herdr's main layout, except that the spaces list is `vscode-spaces`: each space row shows the icons of the agents in that space (13px, one per kind such as Claude Code or Codex, dimmed to 55% while every agent of that kind is idle; past three kinds the first two and `+N`; a 10px `working` spinner while one works; the tooltip lists them, e.g. `Claude Code ×2 · working, Codex · idle`), right before the green `↑N` / red `↓N`, which are commits ahead of / behind the branch's upstream (`git status --porcelain=v2 --branch`, `# branch.ab`), not changed files. A space without agents shows none.
