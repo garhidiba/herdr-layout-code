@@ -6,7 +6,7 @@
 // drag overlay), a drop from Finder, or Import (Herdr has only a folder picker: the folder's first image, then ‹ ›).
 // Pictures go through the viewer's preview cache (preview.js cachePreview; a remote space's file is fetched first),
 // the placing rules are imagefit.js'. A strong downscale is drawn from a resampled copy (Smooth, the default; imagefit.js
-// resampleWidth). The two toolbar rows show and hide over the picture with a delay (toolbar.js), unless pinned. The
+// resampleWidth). The two toolbar rows show over the picture on a click and hide by themselves (toolbar.js), unless pinned. The
 // column shares the layout's `side` row with the side panel, so Herdr's own gutter between them trades their widths.
 import { div, svg, image } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
@@ -14,7 +14,7 @@ import { props, shared, setShared, spaces, theme, exec, appHome, readTextFile, p
 import { CACHE, pathHash, statOf, cachePreview, prune, imageExt } from "./preview.js";
 import { FITS, place, clampPan, zoomTo, zoomStep, pan, toggleFit, nextFit, FIT_NAMES, imageSize, svgSize, imagesIn, resampleWidth, resampleName,
   scopeOf, stateKey, scopedEntry, withEntry, viewOf, fromView, drawnAt, widthToApply } from "./imagefit.js";
-import { barsStart, barsShown, barsTick, barsMove, barsLeave, barsOver, barsNext } from "./toolbar.js";
+import { barsStart, barsShown, barsTick, barsClick, barsEnter, barsLeave, barsOver, barsNext } from "./toolbar.js";
 
 // { file, on, at }: show this image in the panel (vscode-explorer and vscode-tabs set it; taken once, within 5 s).
 export const IMAGE_OPEN = "vscode-viewer.image-open";
@@ -39,6 +39,7 @@ async function screenDensity() {
 }
 // layouts/vscode.json's Image Viewer column and the row it shares with the side panel (which fills the rest of it).
 const COLUMN = "image-panel", SIDE = "side";
+const CLICK_SLOP = 4; // px a click may move before it is a pan
 // Here: resamples image $1 to $3 px wide as $2 (format $4), Lanczos through ImageMagick when installed, else macOS's sips;
 // exits 3 with neither (the original is drawn then). Lands whole: written aside, then renamed. Herdr's PATH may leave magick out.
 const RESAMPLE = `PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"; [ -f "$2" ] && exit 0
@@ -66,7 +67,7 @@ export class ImagePanel {
     this.state = { fit: "contain", scale: 1, x: null, y: null }; // imagefit.js' view state
     this.view = null;     // the picture area's size
     this.list = null;     // { folder, on, names }: the images beside it
-    this.busy = null; this.error = null; this.drag = null; this.taken = null;
+    this.busy = null; this.error = null; this.drag = null; this.press = null; this.taken = null; // press: a single click's start
     this.bars = barsStart(); this.barsDue = 0; this.flashUntil = 0; // toolbar.js' state, its next wake
     this.scope = "space"; this.pending = null; this.seenView = null; this.saveToken = 0;
     // The scope setting, read now and every 2 s (the Settings dialog writes the file); the screen's density too (30 s).
@@ -342,9 +343,11 @@ export class ImagePanel {
         const file = (e.paths ?? []).find(f => imageExt(f));
         if (file) this.show(file, null); else { this.error = "Drop an image file (PNG, JPEG, GIF, WebP, BMP, ICO, SVG, TIFF)"; cx.notify(); }
       })
-      .on_scroll_wheel((e, cx) => { this.setBars(barsMove(this.bars, Date.now()), cx); this.wheel(e, cx); })
+      .on_scroll_wheel((e, cx) => this.wheel(e, cx))
       .on_mouse_down("left", (e, cx) => {
         this.handle.focus();
+        // A first press may be a click (toolbar.js barsClick on its release); a double-click's second one never is.
+        this.press = e.click_count === 1 ? e.position : null;
         if (!ready) return;
         if (e.click_count === 2) {
           const fit = nextFit(this.state, d, v);
@@ -359,7 +362,13 @@ export class ImagePanel {
         if (!g || !ready) return;
         this.setState({ ...this.state, ...clampPan({ x: g.x + e.position.x - g.at.x, y: g.y + e.position.y - g.at.y }, d, v, p.scale) }, cx);
       })
-      .on_mouse_up("left", (_e, cx) => { if (this.drag) { this.drag = null; this.setBars(this.bars, cx); cx.notify(); } })
+      .on_mouse_up("left", (e, cx) => {
+        const press = this.press;
+        this.press = null;
+        if (this.drag) { this.drag = null; cx.notify(); }
+        const click = press && Math.hypot(e.position.x - press.x, e.position.y - press.y) <= CLICK_SLOP;
+        this.setBars(click ? barsClick(this.bars, Date.now()) : this.bars, cx);
+      })
       .on_hover((on) => { if (!on) this.drag = null; })
       .when(large, el => this.drag ? el.cursor_grabbing() : el.cursor_grab());
     const body = this.img
@@ -380,7 +389,7 @@ export class ImagePanel {
     // A load over a shown image (or its failure) says so at the bottom without hiding the picture.
     const status = this.img && (this.busy || this.error);
     // The rows lie over the picture's top, taking no room from it (a fit touches the walls): pinned always shown, else
-    // as toolbar.js says for the pointer, for a moment after a new picture, and while there is none.
+    // as toolbar.js says for clicks and the pointer, for a moment after a new picture, and while there is none.
     const showBars = pinned || barsShown(this.bars) || !this.img || Date.now() < this.flashUntil;
     const bars = v_flex().id("image-bars").absolute().top(0).left(0).right(0).bg(t.background).child(title).child(tools)
       .on_hover((on, cx) => this.setBars(barsOver(this.bars, Date.now(), on), cx))
@@ -388,7 +397,7 @@ export class ImagePanel {
     const card = v_flex().id(this.modal ? "image-modal" : "image-panel").min_h(0).relative().overflow_hidden().bg(t.background).text_color(t.foreground).text_size(13)
       .when(Boolean(this.modal), el => el.size_full()).when(!this.modal, el => el.flex_1().min_w(0).h_full().rounded(10).border_1().border_color(t.border))
       .on_hover((on, cx) => { if (!on) this.setBars(barsLeave(this.bars, Date.now()), cx); })
-      .on_mouse_move((e, cx) => this.setBars(barsMove(this.bars, Date.now(), e.local_position?.y ?? null), cx))
+      .on_mouse_move((_e, cx) => { if (this.bars.phase === "leaving") this.setBars(barsEnter(this.bars, Date.now()), cx); })
       .child(body).child(bars)
       // The Explorer's card look: GPUI clips children to the rectangle only, so the picture's corners are covered by a
       // ring in the color behind the card (inner radius 10), then the card's 1px border is drawn over it.

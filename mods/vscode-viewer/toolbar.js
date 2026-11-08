@@ -1,10 +1,11 @@
 // When the Image Viewer's two toolbar rows show (image.js, column and dialog alike), unless pinned: a small state
-// machine over the pointer, on a clock the caller passes (ms), so tests drive it with a fake one. Pure, no imports.
-//   shown after the pointer has been inside SHOW_DELAY, or at once in the top TOP_BAND px (or over the rows);
-//   hidden LEAVE_HIDE after it leaves, or IDLE_HIDE after its last move inside, unless it is over the rows or a drag /
-//   zoom runs (`busy`); any move shows them again, after the same delay.
-// Phases: "hidden", "waiting" (shows at `at`), "shown", "leaving" (hides at `at`). The rows show in shown and leaving.
-export const SHOW_DELAY = 150, LEAVE_HIDE = 1200, IDLE_HIDE = 2000, TOP_BAND = 48;
+// machine over clicks and the pointer, on a clock the caller passes (ms), so tests drive it with a fake one. Pure.
+//   A click in the view (a press and release without a drag; not the second of a double-click) shows them, or hides
+//   them when shown, unless it was on the rows. Hovering, panning and wheel zooms never show them.
+//   Shown, they hide IDLE_HIDE after the last click or the pointer leaving the rows, LEAVE_HIDE after it leaves the
+//   view (coming back in time keeps them); never while it is over them or a drag runs (`busy`).
+// Phases: "hidden", "shown", "leaving" (hides at `at`). The rows show in shown and leaving.
+export const LEAVE_HIDE = 1200, IDLE_HIDE = 2000;
 
 export const barsStart = () => ({ phase: "hidden", at: 0, moved: 0, over: false });
 export const barsShown = (s) => s.phase === "shown" || s.phase === "leaving";
@@ -12,17 +13,21 @@ export const barsShown = (s) => s.phase === "shown" || s.phase === "leaving";
 // The deadlines passed by `t`.
 export function barsTick(s, t, busy = false) {
   if (s.phase === "leaving" && t >= s.at) return { ...s, phase: "hidden" };
-  if (s.phase === "waiting" && t >= s.at) s = { ...s, phase: "shown" };
   if (s.phase === "shown" && !s.over && !busy && t - s.moved >= IDLE_HIDE) return { ...s, phase: "hidden" };
   return s;
 }
 
-// The pointer moved inside (a wheel counts too); `y`: its height in the view from the top, when known.
-export function barsMove(s, t, y = null) {
+// A click in the view: shows hidden rows; hides shown ones, unless it was on them (then it only counts as use).
+export function barsClick(s, t) {
   s = barsTick(s, t);
-  const top = y !== null && y >= 0 && y < TOP_BAND;
-  const phase = top || barsShown(s) ? "shown" : "waiting";
-  return { ...s, phase, at: s.phase === "waiting" ? s.at : t + SHOW_DELAY, moved: t };
+  if (barsShown(s) && s.over) return { ...s, phase: "shown", moved: t };
+  return { ...s, phase: barsShown(s) ? "hidden" : "shown", moved: t };
+}
+
+// The pointer moved inside the view: back before the leave ran out keeps the rows (the wait starts again).
+export function barsEnter(s, t) {
+  s = barsTick(s, t);
+  return s.phase === "leaving" ? { ...s, phase: "shown", moved: t } : s;
 }
 
 export function barsLeave(s, t) {
@@ -30,12 +35,12 @@ export function barsLeave(s, t) {
   return { ...s, over: false, phase: barsShown(s) ? "leaving" : "hidden", at: t + LEAVE_HIDE };
 }
 
-// The pointer onto the rows (shown at once, kept while it stays) or off them.
-export const barsOver = (s, t, on) => on ? { ...barsTick(s, t), phase: "shown", over: true, moved: t } : { ...s, over: false, moved: t };
+// The pointer onto the rows (shown ones stay while it does) or off them (the wait starts there).
+export const barsOver = (s, t, on) => ({ ...barsTick(s, t), over: on, moved: t });
 
-// Ms until the rows may show or hide by themselves, or null when nothing is due.
+// Ms until the rows hide by themselves, or null when nothing is due.
 export function barsNext(s, t, busy = false) {
-  if (s.phase === "waiting" || s.phase === "leaving") return Math.max(0, s.at - t);
+  if (s.phase === "leaving") return Math.max(0, s.at - t);
   if (s.phase === "shown" && !s.over && !busy) return Math.max(0, s.moved + IDLE_HIDE - t);
   return null;
 }
