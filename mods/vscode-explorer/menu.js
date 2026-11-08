@@ -5,7 +5,7 @@ import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { exec, hc, run, spaces, panes, terminals, machines, props, openOverlay, closeOverlay, theme, shared, setShared, appHome, home, readTextFile, writeTextFile, notify, window } from "herdr";
 import { createOpenTab, noteViewer } from "./launch.js";
 import { createWarmPool, TIMING } from "./warm.js";
-import { menuItems, menuHeight, openWith, baseName, parentOf, relativeTo, nameProblem, vscodeRemoteArgs, isMarkdown, isImage, editorPaneOf,
+import { menuItems, menuHeight, openWith, baseName, parentOf, relativeTo, nameProblem, vscodeRemoteArgs, isMarkdown, isImage, editorPaneOf, viewerPaneOf, wantsEditor,
   tabMenuItems, moveRows, outRows, moveOf, closeArgs, fileTabs, splitArgs, clipboardCommand, revealCommand, withDetails, deleteTitle, extraLines, closesForDeleted, DETAILS } from "./paths.js";
 import { createOps } from "./ops.js";
 import { createSplitOpen } from "./split.js";
@@ -49,10 +49,14 @@ const askInstall = (machine, size) => {
 };
 export const remote = createRemote({ exec, readTextFile, notify, appHome, platform: () => window()?.platform, shared, setShared, confirm: askInstall });
 // Every way the Explorer opens a file: the tree's click, Open / Open With, a new file. A file open in an editor tab of
-// this space is selected there instead.
-const openEditorPane = (file, on) => editorPaneOf(file, on, spaces().find(s => s.active), panes(), terminalRows());
-const showOpen = (file, on) => {
-  const pane = openEditorPane(file, on);
+// this space (a viewer's file: in a viewer tab) is selected there instead.
+const openPaneOf = (file, on, editor = wantsEditor(file)) => {
+  const space = spaces().find(s => s.active);
+  return editor ? editorPaneOf(file, on, space, panes(), terminalRows())
+    : viewerPaneOf(file, on, space, panes(), shared(VIEWER_FILES), shared("vscode-viewer.focused"));
+};
+const showOpen = (file, on, editor) => {
+  const pane = openPaneOf(file, on, editor);
   if (pane) { run("tab.select", { id: pane.tab }); run("pane.focus", { pane: pane.pane }); } // it may share its tab
   return Boolean(pane);
 };
@@ -67,7 +71,7 @@ const TAB_CLOSE = "vscode-tabs.close";
 const MOVE = "vscode-tabs.move";
 // A file dragged from the tree onto a pane opens beside it (split.js; the tree runs the drop's request).
 export const splitOpen = createSplitOpen({ run, panes, open: openFile,
-  openPane: openEditorPane,
+  openPane: (file, on) => openPaneOf(file, on, true),
   move: (request) => setShared(MOVE, { ...request, at: Date.now() }) });
 
 // Herdr starts with PATH=/usr/bin:/bin; Homebrew/user tools (code, trash) live elsewhere.

@@ -1,7 +1,7 @@
 // node --test mods/vscode-explorer/test/paths.test.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
-import { openArgs, wantsEditor, isMarkdown, isImage, relativeTo, within, copyName, freeName, nameProblem, menuItems, menuHeight, parentOf, openWith, vscodeRemoteArgs, editorFileOf, autoRevealOf, revealPath, normalPath, editorTabOf, editorPaneOf, deleteTitle, extraLines, closesForDeleted } from "../paths.js";
+import { openArgs, wantsEditor, isMarkdown, isImage, relativeTo, within, copyName, freeName, nameProblem, menuItems, menuHeight, parentOf, openWith, vscodeRemoteArgs, editorFileOf, autoRevealOf, revealPath, normalPath, editorTabOf, editorPaneOf, viewerPaneOf, deleteTitle, extraLines, closesForDeleted } from "../paths.js";
 
 test("a dialog grows by the lines a long file name wraps onto, and not for a short one", () => {
   assert.equal(deleteTitle("/p/Invoice-44K7PLUN-0001 copy 2.pdf"), "Are you sure you want to delete 'Invoice-44K7PLUN-0001 copy 2.pdf'?");
@@ -180,6 +180,25 @@ test("a file open in an editor tab of the space is found there, on its machine o
   const shared = [...panes, { pane: "p6", tab: "tb1", terminal: "t6" }], more = [...terminals, editor("t6", "/p/b.go")];
   assert.deepEqual(editorPaneOf("/p/b.go", null, space, shared, more), { pane: "p6", tab: "tb1", terminal: "t6" });
   assert.equal(editorTabOf("/p/b.go", null, space, shared, more), "tb1");
+});
+
+test("a file open in a viewer tab of the space is found there, on its machine only", () => {
+  const space = { id: "s1", tabs: [{ id: "tb1" }, { id: "tb2" }, { id: "tb3" }] };
+  const panes = [{ pane: "p1", tab: "tb1", terminal: null, mod: "vscode-viewer" }, { pane: "p2", tab: "tb2", terminal: null, mod: "vscode-viewer" },
+    { pane: "p3", tab: "tbX", terminal: null, mod: "vscode-viewer" }, { pane: "p4", tab: "tb3", terminal: "t4" }];
+  const viewers = { p1: { file: "/p/demo.mp4", on: null }, p2: { file: "/srv/demo.mp4", on: "box" }, p3: { file: "/p/other.mp4", on: null },
+    p4: { file: "/p/shell.mp4", on: null }, gone: { file: "/p/gone.mp4", on: null } };
+  assert.deepEqual(viewerPaneOf("/p/demo.mp4", null, space, panes, viewers), panes[0]);
+  assert.deepEqual(viewerPaneOf("/p//./demo.mp4", undefined, space, panes, viewers), panes[0]);
+  assert.deepEqual(viewerPaneOf("/srv/demo.mp4", "box", space, panes, viewers), panes[1]);
+  assert.equal(viewerPaneOf("/srv/demo.mp4", null, space, panes, viewers), null); // another machine's
+  assert.equal(viewerPaneOf("/p/other.mp4", null, space, panes, viewers), null); // another space's tab
+  assert.equal(viewerPaneOf("/p/shell.mp4", null, space, panes, viewers), null); // not a viewer pane
+  assert.equal(viewerPaneOf("/p/gone.mp4", null, space, panes, viewers), null); // a closed pane's record
+  assert.equal(viewerPaneOf("/p/demo.mp4", null, null, panes, viewers), null);
+  assert.equal(viewerPaneOf("/p/demo.mp4", null, space, panes, null), null);
+  // a viewer nobody recorded yet, known only as the focused one
+  assert.deepEqual(viewerPaneOf("/p/demo.mp4", null, space, panes, {}, { pane: "p1", file: "/p/demo.mp4", on: null }), panes[0]);
 });
 
 test("deleting a file or a folder closes the panes showing it, and their tab when nothing else is in it", () => {

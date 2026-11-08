@@ -288,17 +288,20 @@ export function createRemote({ exec, readTextFile, notify, appHome, platform = (
 
 // Opens a file as the Explorer does: on a remote space the terminal editor runs on its machine when it is (or gets)
 // installed there, else the viewer. `openTab` is launch.js's.
-// A file already open in an editor is gone to (`showOpen(file, on)` selects its tab and says whether there was one),
-// and a file still opening isn't opened again: a double-click, or a second click before the tab shows.
+// A file already open where it would open is gone to (`showOpen(file, on, editor)` selects the tab of its editor, or of
+// its viewer when `editor` is false, and says whether there was one), and a file still opening isn't opened again: a
+// double-click, or a second click before the tab shows.
 export function createOpenFile({ openTab, remote, appHome, showOpen = () => false }) {
   const opening = new Set();
   return async function openFile(file, { on = null, how = "auto", folder, place = "tab" }, cx) {
     const editor = wantsEditor(file, how), key = JSON.stringify([on, how, normalPath(file)]);
-    if (opening.has(key) || (editor && showOpen(file, on))) return;
+    if (opening.has(key) || showOpen(file, on, editor)) return;
     opening.add(key);
     try {
       const launch = on && editor ? await remote.prepare(on) : null;
-      return await openTab(openArgs(file, { on, appHome: appHome(), how, folder, remote: launch }), cx, place);
+      const args = openArgs(file, { on, appHome: appHome(), how, folder, remote: launch });
+      if (editor && args.mod && showOpen(file, on, false)) return; // no editor on that machine: its viewer, as above
+      return await openTab(args, cx, place);
     } finally { opening.delete(key); }
   };
 }

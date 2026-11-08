@@ -279,7 +279,7 @@ test("openFile goes to a file's open editor tab, and a second click while it ope
   let release = () => {};
   const openTab = async (args) => { opened.push(args); if (args.argv) await new Promise((r) => (release = r)); };
   const openFile = createOpenFile({ openTab, appHome: () => "/h", remote: fake().remote,
-    showOpen: (file, on) => (shown.push(file), file === "/p/open.go") });
+    showOpen: (file, on, editor) => (editor && shown.push(file), editor && file === "/p/open.go") });
   await openFile("/p/open.go", { folder: "/p" });
   assert.equal(opened.length, 0);
   const first = openFile("/p/a.go", { folder: "/p" });
@@ -292,4 +292,28 @@ test("openFile goes to a file's open editor tab, and a second click while it ope
   await openFile("/p/logo.png", { folder: "/p" }); // the viewer: not looked for among editor tabs
   assert.equal(opened.length, 3);
   assert.deepEqual(shown, ["/p/open.go", "/p/a.go", "/p/a.go"]);
+});
+
+test("openFile goes to a video's or an image's open viewer tab instead of opening another, local or remote", async () => {
+  const opened = [], asked = [];
+  const viewers = new Set(["null:/p/clip.mp4", "box:/srv/clip.mov", "null:/p/logo.png", "box:/srv/x.toml"]);
+  const openFile = createOpenFile({ openTab: async (args) => opened.push(args), appHome: () => "/h", remote: fake().remote,
+    showOpen: (file, on, editor) => (asked.push([file, on, editor]), !editor && viewers.has(`${on}:${file}`)) });
+  await openFile("/p/clip.mp4", { folder: "/p" });
+  await openFile("/srv/clip.mov", { on: "box", folder: "/srv" });
+  await openFile("/p/logo.png", { folder: "/p" });
+  assert.equal(opened.length, 0);
+  await openFile("/p/other.mp4", { folder: "/p" }); // not open yet: a viewer tab
+  assert.equal(opened[0].mod, "vscode-viewer");
+  assert.deepEqual(asked.slice(0, 3).map(a => a[2]), [false, false, false]);
+});
+
+test("openFile on a machine without the editor goes to the file's open viewer tab", async () => {
+  const opened = [];
+  const openFile = createOpenFile({ openTab: async (args) => opened.push(args), appHome: () => "/h", remote: fake().remote,
+    showOpen: (file, on, editor) => editor === false && on === "box" && file === "/srv/x.toml" });
+  await openFile("/srv/x.toml", { on: "box", folder: "/srv" });
+  assert.equal(opened.length, 0);
+  await openFile("/srv/y.toml", { on: "box", folder: "/srv" });
+  assert.equal(opened[0].mod, "vscode-viewer");
 });

@@ -76,6 +76,16 @@ export function editorPaneOf(file, on, space, panes, terminals) {
   return panes.find(p => p.terminal && tabs.has(p.tab) && machine(p.terminal) === (on ?? null) && shows(p.terminal)) ?? null;
 }
 export const editorTabOf = (...args) => editorPaneOf(...args)?.tab ?? null;
+// The vscode-viewer pane of `space` showing `file` on machine `on`, as editorPaneOf finds an editor: panes() has no mod
+// props, so the file is the one `viewers` (vscode-viewer's { [pane]: { file, on } }) or `focusedViewer` records for it.
+export function viewerPaneOf(file, on, space, panes, viewers = {}, focusedViewer = null) {
+  const tabs = new Set((space?.tabs ?? []).map(t => t.id)), want = normalPath(file);
+  const shows = (pane) => {
+    const v = viewers?.[pane] ?? (focusedViewer?.pane === pane ? focusedViewer : null);
+    return typeof v?.file === "string" && normalPath(v.file) === want && (v.on ?? null) === (on ?? null);
+  };
+  return panes.find(p => p.mod === "vscode-viewer" && tabs.has(p.tab) && shows(p.pane)) ?? null;
+}
 
 // vscode-settings.json's keys (comments and trailing commas allowed, as vscode-settings' loose()); {} when unreadable.
 export function settingsOf(text) {
