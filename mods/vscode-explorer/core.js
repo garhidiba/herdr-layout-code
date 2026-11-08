@@ -62,6 +62,6 @@ export function createCore({ exec, readTextFile, notify, appHome, shared = () =>
     try {
       const out = await call(args);
       return out.error === undefined ? out : null;
-    } catch { broken("Rust core not built — using JavaScript", "Build it in Settings."); return null; }
+    } catch { broken("Rust core call failed — using JavaScript", "It passed its version check; one call failed (a mod reload can do this). Trying again in a minute."); return null; }
   };
 }
