@@ -738,7 +738,8 @@ def run_drag_scroll(tmp):
 
 
 def run_drag_reveal(tmp):
-    """Scrolled right, a drag ending on a short line's end scrolls the view back so the caret shows (VS Code)."""
+    """Scrolled right, a drag or Down / Shift+Down ending on a short line's end scrolls the view back so the caret
+    shows (VS Code)."""
     file = os.path.join(tmp, "reveal.txt")
     open(file, "w").write("0123456789" * 40 + "\nshort\n")
     t = Term(file)
@@ -751,6 +752,13 @@ def run_drag_reveal(tmp):
     t.send("\x1b[<0;50;3m", wait=0.3)
     assert t.read("Ln 2, Col 6"), "drag did not land at the short line's end: " + plain(t)[-200:]
     assert re.search(r"2  s?hort", plain(t)), "the view did not scroll back to the caret: " + plain(t)[-300:]   # the keys' 4-column margin
+    for key, label in (("\x1b[B", "Down"), ("\x1b[1;2B", "Shift+Down")):   # the keys too: back to line 1's end, then down
+        t.send("\x1b[A\x1b[F", wait=0.3)
+        assert t.read("Ln 1, Col 401")
+        t.out = b""
+        t.send(key, wait=0.3)
+        assert t.read("Ln 2, Col 6"), label + " did not land at the short line's end: " + plain(t)[-200:]
+        assert re.search(r"2  s?hort", plain(t)), label + " did not scroll back to the caret: " + plain(t)[-300:]
     t.send(QUIT)
     assert t.wait_exit() == 0
     print("drag onto a short line reveals the caret: ok")

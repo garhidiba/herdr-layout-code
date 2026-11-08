@@ -1959,3 +1959,21 @@ test("scrolled right, a drag or double-click onto a short line reveals the selec
   assert.ok(shown());
   ed.stopDragScroll();
 });
+
+test("scrolled right, Up / Down, Shift+Up / Down and Page Up / Down onto a short line scroll back left to the caret", async () => {
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "vsedit-keyreveal-")), "a.txt");
+  fs.writeFileSync(file, "x".repeat(200) + "\nshort\n" + "y".repeat(200) + "\n한글탭\tz");
+  const ed = new Editor(file, F.load(file), await H.loadGrammar(null), H.loadTheme(), null);
+  ed.rows = 10; ed.cols = 60;
+  ed.render(0);
+  ed.moveTo({ line: 0, col: 150 });
+  const got = [];
+  for (const [name, shift] of [["down"], ["down"], ["down"], ["up"], ["up"], ["down", true], ["up", true], ["pagedown"], ["pageup"]]) {
+    ed.handle({ type: "key", name, shift: !!shift }); ed.render(0);
+    const x = ed.rowPos(ed.head).x;
+    got.push([name, ed.head.line, ed.head.col, x >= ed.left && x < ed.left + ed.textWidth]);
+  }
+  assert.ok(got.every(g => g[3]), "the caret off the view: " + JSON.stringify(got));
+  assert.deepEqual(got[0].slice(1, 3), [1, 5]);
+  assert.deepEqual(got[2].slice(1, 3), [3, 5]);
+});

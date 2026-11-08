@@ -3710,6 +3710,24 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn scrolled_right_up_down_page_and_shift_moves_onto_a_short_line_scroll_back_left() {
+        let (xs, ys) = ("x".repeat(200), "y".repeat(200));
+        let mut ed = wrapped(&[xs.as_str(), "short", ys.as_str(), "한글탭\tz"], "off", 10, 60);
+        screen(&mut ed);
+        let mut got = vec![];
+        ed.move_to(pos(0, 150), false);
+        for id in ["cursorDown", "cursorDown", "cursorDown", "cursorUp", "cursorUp", "cursorDownSelect", "cursorUpSelect", "cursorPageDown", "cursorPageUp"] {
+            run(&mut ed, id);
+            screen(&mut ed);
+            let x = ed.row_pos(ed.head()).1;
+            got.push((id, ed.head(), x >= ed.left && x < ed.left + ed.text_width()));
+        }
+        assert!(got.iter().all(|g| g.2), "the caret off the view: {got:?}");
+        assert_eq!(got[0].1, pos(1, 5));
+        assert_eq!(got[2].1, pos(3, 11));
+    }
+
+    #[test]
     fn scrolled_right_a_drag_or_double_click_onto_a_short_line_reveals_the_selection_head() {
         let (xs, ys) = ("x".repeat(200), "y".repeat(200));
         let mut ed = wrapped(&[xs.as_str(), "short", ys.as_str(), "한글탭\tz"], "off", 10, 60);
