@@ -55,9 +55,9 @@ const LANE_COLORS = ["#ffb000", "#dc267f", "#994f00", "#40b0a6", "#b66dff"];
 const laneColor = (i) => LANE_COLORS[i % LANE_COLORS.length];
 
 // Prints the folder's own repo (or an empty line), then "@@<repo>" and the branch headers of
-// `status --porcelain=v2 --branch` for it and every repo up to 3 levels below (200 at most).
+// `status --porcelain=v2 --branch` for it and every repo up to 3 levels below, not inside node_modules (200 at most).
 // One entry line after the headers is enough to know the repo is dirty.
-const REPOS = 'top=$(git -C "$1" rev-parse --show-toplevel 2>/dev/null); printf "%s\\n" "$top"; { [ -n "$top" ] && printf "%s\\n" "$top"; find "$1" -maxdepth 3 -name .git -prune 2>/dev/null | head -200 | sed "s#/\\.git\\$##" | sort; } | awk \'!seen[$0]++\' | head -200 | while IFS= read -r r; do printf "@@%s\\n" "$r"; git --no-optional-locks -c core.fsmonitor=false -C "$r" status --porcelain=v2 --branch --untracked-files=normal 2>/dev/null | head -n 5; done';
+const REPOS = 'top=$(git -C "$1" rev-parse --show-toplevel 2>/dev/null); printf "%s\\n" "$top"; { [ -n "$top" ] && printf "%s\\n" "$top"; find "$1" -mindepth 1 -maxdepth 3 -name node_modules -prune -o -name .git -prune -print 2>/dev/null | head -200 | sed "s#/\\.git\\$##" | sort; } | awk \'!seen[$0]++\' | head -200 | while IFS= read -r r; do printf "@@%s\\n" "$r"; git --no-optional-locks -c core.fsmonitor=false -C "$r" status --porcelain=v2 --branch --untracked-files=normal 2>/dev/null | head -n 5; done';
 
 function parseRepos(text) {
   const lines = text.split("\n"), top = lines.shift() ?? "", repos = [];

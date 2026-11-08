@@ -87,9 +87,9 @@ function dirtyOf(marks) {
   return dirty;
 }
 
-// Git repos below the folder (up to 3 levels), each with its own status: for a folder that holds many projects.
+// Git repos below the folder (up to 3 levels, not inside node_modules), each with its own status: for a folder that holds many projects.
 // Prints "@@<repo>" then that repo's `status -z`. Untracked folders are collapsed to one entry.
-const NESTED_STATUS = 'find "$1" -maxdepth 3 -name .git -prune 2>/dev/null | head -200 | while IFS= read -r g; do r=${g%/.git}; printf "@@%s\\n" "$r"; git --no-optional-locks -c core.fsmonitor=false -C "$r" status --porcelain=v1 -z --no-renames --untracked-files=normal 2>/dev/null; printf "\\n"; done';
+const NESTED_STATUS = 'find "$1" -mindepth 1 -maxdepth 3 -name node_modules -prune -o -name .git -prune -print 2>/dev/null | head -200 | while IFS= read -r g; do r=${g%/.git}; printf "@@%s\\n" "$r"; git --no-optional-locks -c core.fsmonitor=false -C "$r" status --porcelain=v1 -z --no-renames --untracked-files=normal 2>/dev/null; printf "\\n"; done';
 
 async function directory(path, on) {
   const windowsDirectory = async () => {

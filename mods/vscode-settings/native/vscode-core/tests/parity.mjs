@@ -17,7 +17,9 @@ const BIN = resolve(arg("--bin", join(repoRoot, "mods/vscode-settings/native/tar
 const ROOT = arg("--root", "/Volumes/exusb/project");
 // Repos for status/log/commit-files (merges, upstream far ahead, dirty, nested repos), folders for tree.
 const REPOS = ["anamensis", "aws-terraform", "synol-server/chartdb", "dailoop", "pixiv-rust", "herdr-layout-vscode"].map((r) => `${ROOT}/${r}`);
-const TREES = [[ROOT, ["anamensis", "synol-server"]], [`${ROOT}/anamensis`, ["src", "src/main", "nope"]], [`${ROOT}/pixiv-rust`, ["pixiv-go"]]];
+const TREES = [[ROOT, ["anamensis", "synol-server"]], [`${ROOT}/anamensis`, ["src", "src/main", "nope"]], [`${ROOT}/pixiv-rust`, ["pixiv-go"]],
+  // node_modules and .next at the top: the repo scan must not enter node_modules.
+  [`${ROOT}/synol-server/naver-shortcut-page`, ["src", "node_modules"]]];
 
 // QuickJS's localeCompare (Herdr's engine): NFC, then code point order. Node's ICU collation differs.
 String.prototype.localeCompare = function (other) {

@@ -8,8 +8,10 @@ use std::fs;
 pub const MAX: usize = 200;
 const DEPTH: usize = 3;
 
-/// `find <root> -maxdepth 3 -name .git -prune | head -200 | sed s#/.git$##`: the repos below `root`
-/// in find's order (each folder's entries in directory order, depth first; symlinks not followed).
+/// `find <root> -mindepth 1 -maxdepth 3 -name node_modules -prune -o -name .git -prune -print | head -200 | sed s#/.git$##`:
+/// the repos below `root` in find's order (each folder's entries in directory order, depth first; symlinks not
+/// followed). `node_modules` is never entered, as VS Code's `git.repositoryScanIgnoredFolders`: its hundreds of
+/// package folders were most of the reads (332 of a Next.js project's 340).
 pub fn find(root: &str) -> Vec<String> {
     let entries = read(root);
     let mut found: Vec<String> = par::map(&entries, |(name, dir)| {
@@ -30,7 +32,7 @@ fn read(dir: &str) -> Vec<(String, bool)> {
 fn visit(parent: &str, name: &str, dir: bool, depth: usize, out: &mut Vec<String>) {
     if name == ".git" {
         out.push(parent.to_string());
-    } else if dir && depth < DEPTH {
+    } else if dir && depth < DEPTH && name != "node_modules" {
         let path = format!("{parent}/{name}");
         for (n, d) in read(&path) {
             visit(&path, &n, d, depth + 1, out);
@@ -100,6 +102,19 @@ mod tests {
 
     fn row(path: &str, dirty: bool) -> Repo {
         Repo { path: path.into(), name: String::new(), branch: "main".into(), oid: String::new(), dirty, ahead: None, behind: None, upstream: None }
+    }
+
+    #[test]
+    fn the_scan_finds_nested_repos_but_never_enters_node_modules() {
+        let dir = std::env::temp_dir().join(format!("vscode-core-find-{}", std::process::id()));
+        for p in [".git", "app/.git", "node_modules/pkg/.git", "a/node_modules/.git", "a/b/c/.git"] {
+            fs::create_dir_all(dir.join(p)).unwrap();
+        }
+        let root = dir.to_str().unwrap();
+        let mut found = find(root);
+        fs::remove_dir_all(&dir).unwrap();
+        found.sort();
+        assert_eq!(found, [root.to_string(), format!("{root}/app")]);
     }
 
     #[test]
