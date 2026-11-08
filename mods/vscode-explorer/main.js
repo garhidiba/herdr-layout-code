@@ -426,7 +426,7 @@ export default class Files extends View {
   row(r, t, target, focused) {
     const color = GIT_COLOR[r.status], icon = this.icon(r.name, r.dir, r.open), picked = r.path === this.selected;
     const active = r.path === this.active || picked, fill = picked && focused ? t.selection : t.selected;
-    return h_flex().w_full().h(ROW).flex_none().pl(6 + r.depth * 12).pr(8).gap(5).items_center().rounded(4).cursor_pointer()
+    return h_flex().w_full().h(ROW).flex_none().pl(6 + r.depth * 12).pr(16).gap(5).items_center().rounded(4).cursor_pointer()
       .when(active, el => el.bg(fill)).when(!active && target, el => el.bg(t.hover)).when(!active, el => el.hover(s => s.bg(t.hover)))
       .child(r.dir ? svg(`mods/vscode-explorer/chevron-${r.open ? "down" : "right"}.svg`).size(12).flex_none().text_color(t.dim) : div().w(12).flex_none())
       .child(icon ? image(`mods/vscode-explorer/icons/${icon}.svg`).w(16).h(16).flex_none() : div().w(16).flex_none())
