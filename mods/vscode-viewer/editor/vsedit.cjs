@@ -1829,6 +1829,7 @@ class Editor {
     if (dx) this.left = Math.max(0, Math.min(this.left + dx * 2, Math.max(this.left, this.widest(this.top, this.height) - this.textWidth + 5)));
     const p = this.cellToPos(Math.max(this.gutter + 1, Math.min(x, this.gutter + this.textWidth)), Math.max(2, Math.min(y, this.height + 1)));
     this.sel = { anchor: this.sel.anchor, head: p };
+    this.reveal(); // a head left of the view (a short line's end) brings it back, as VS Code does
     return !!(dx || dy);
   }
   stopDragScroll() { clearInterval(this.dragTimer); this.dragTimer = null; }
@@ -1955,13 +1956,13 @@ class Editor {
       const head = ev.x > this.gutter ? { line: p.line, col: down ? e : s }
         : !down ? { line: p.line, col: 0 } : p.line < last ? { line: p.line + 1, col: 0 } : { line: last, col: t.length };
       this.sel = { anchor: a, head };
-      this.buf.seal();
+      this.buf.seal(); this.reveal();
       return;
     }
     if (double && !ev.shift) {
       const t = this.lines[p.line], s = wordLeft(t, Math.min(t.length, W.nextIndex(t, p.col))), e = wordRight(t, s);
       this.sel = { anchor: { line: p.line, col: s }, head: { line: p.line, col: e } };
-      this.buf.seal();
+      this.buf.seal(); this.reveal();
       return;
     }
     this.moveTo(p, ev.shift);

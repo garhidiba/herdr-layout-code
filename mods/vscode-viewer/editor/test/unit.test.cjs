@@ -1932,3 +1932,30 @@ test("quick pick scrolls: keys keep the selection in view, the wheel scrolls the
   assert.equal(picked, "item 18");
   assert.equal(closed, 1);
 });
+
+test("scrolled right, a drag or double-click onto a short line reveals the selection head", async () => {
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "vsedit-dragreveal-")), "a.txt");
+  fs.writeFileSync(file, "x".repeat(200) + "\nshort\n" + "y".repeat(200) + "\n한글탭\tz");
+  const ed = new Editor(file, F.load(file), await H.loadGrammar(null), H.loadTheme(), null);
+  ed.rows = 10; ed.cols = 60;
+  ed.render(0);
+  const shown = () => { const x = ed.rowPos(ed.head).x; return x >= ed.left && x < ed.left + ed.textWidth; };
+  ed.moveTo({ line: 0, col: 150 });
+  assert.ok(ed.left > 100 && shown());
+  click(ed, ed.gutter + 10, 2);
+  assert.equal(ed.sel.head.col, ed.left + 9, "the click's column counts the scroll");
+  ed.handle({ type: "mouse", button: 0, x: ed.gutter + 10, y: 3, release: false, motion: true });
+  assert.deepEqual(ed.sel.head, { line: 1, col: 5 }, "the drag lands at the short line's end");
+  assert.ok(shown(), "and the view follows it left");
+  ed.handle({ type: "mouse", button: 0, x: 1, y: 1, release: true });
+  ed.moveTo({ line: 2, col: 150 });
+  click(ed, ed.gutter + 10, 5); click(ed, ed.gutter + 10, 5);
+  assert.equal(ed.sel.head.line, 3);
+  assert.ok(shown(), "a double-click past a short line's end reveals the word it selects");
+  ed.handle({ type: "mouse", button: 0, x: 1, y: 1, release: true });
+  ed.moveTo({ line: 2, col: 150 });
+  click(ed, ed.gutter + 30, 5);
+  assert.deepEqual(ed.sel.head, { line: 3, col: 5 }, "a click right of a line's end: its end (wide chars and a tab before it)");
+  assert.ok(shown());
+  ed.stopDragScroll();
+});

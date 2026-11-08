@@ -737,6 +737,25 @@ def run_drag_scroll(tmp):
     print("drag auto-scroll + horizontal wheel: ok")
 
 
+def run_drag_reveal(tmp):
+    """Scrolled right, a drag ending on a short line's end scrolls the view back so the caret shows (VS Code)."""
+    file = os.path.join(tmp, "reveal.txt")
+    open(file, "w").write("0123456789" * 40 + "\nshort\n")
+    t = Term(file)
+    assert t.read("Ln 1, Col 1")
+    t.send("\x1b[F", wait=0.3)                    # End: the view scrolls right
+    assert t.read("Ln 1, Col 401")
+    t.out = b""
+    t.send("\x1b[<0;50;2M")                        # press on line 1
+    t.send("\x1b[<32;50;3M", wait=0.3)             # drag onto line 2, right of its end
+    t.send("\x1b[<0;50;3m", wait=0.3)
+    assert t.read("Ln 2, Col 6"), "drag did not land at the short line's end: " + plain(t)[-200:]
+    assert re.search(r"2  s?hort", plain(t)), "the view did not scroll back to the caret: " + plain(t)[-300:]   # the keys' 4-column margin
+    t.send(QUIT)
+    assert t.wait_exit() == 0
+    print("drag onto a short line reveals the caret: ok")
+
+
 def run_shift_click(tmp):
     """XTSHIFTESCAPE on enter (ghostty/xterm report Shift+click instead of selecting) and off on exit; a Shift+press
     extends the selection from the cursor."""
@@ -1553,7 +1572,7 @@ def main():
     open(ISOLATED["VSEDIT_SETTINGS"], "w").write('{"files.autoSave": "off", "files.autoSaveDelay": 1, "editor.inlineSuggest.provider": "off"}\n')
     engines = os.path.join(tmp, "engines.log")
     ISOLATED.update(VSEDIT_ENGINE_LOG=engines, VSEDIT_INLINE_USAGE=os.path.join(tmp, "inline-usage.json"))
-    scenarios = [run_tsx, run_go, run_crlf, run_hex, run_error_page, run_drag_scroll, run_shift_click, run_minified, run_scrollbars, run_decorations,
+    scenarios = [run_tsx, run_go, run_crlf, run_hex, run_error_page, run_drag_scroll, run_drag_reveal, run_shift_click, run_minified, run_scrollbars, run_decorations,
                  run_autoclose, run_git_gutter, run_folding, run_word_wrap, run_menu_and_cmd_save, run_save_dialog, run_close_request, run_warm, run_auto_save, run_hidden_status_bar, run_cursor_style, run_hot_exit,
                  run_keybindings, run_mac_keys, run_format, run_typescript, run_find_and_status, run_symbols_and_problems, run_install_prompt, run_small_batch,
                  run_files_and_navigation, run_picker_scroll, run_medium_language, run_medium_editing, run_inline_suggest, run_references_and_lenses, run_inline_hosted]

@@ -1034,6 +1034,7 @@ impl Editor {
         let py = y.clamp(2, self.height() as i32 + 1);
         let p = self.cell_to_pos(px, py);
         self.sel = Sel { anchor: self.sel.anchor, head: p };
+        self.reveal(); // a head left of the view (a short line's end) brings it back, as VS Code does
         dx != 0 || dy != 0
     }
 
@@ -1214,6 +1215,7 @@ impl Editor {
         if shift && (count > 1 || gutter) {
             self.sel.head = shift_click_head(&self.buf.lines, self.sel.anchor, p, gutter);
             self.buf.seal();
+            self.reveal();
             return;
         }
         if count > 1 && !shift {
@@ -1226,6 +1228,7 @@ impl Editor {
             };
             self.sel = Sel { anchor: s, head: e };
             self.buf.seal();
+            self.reveal();
             return;
         }
         self.move_to(p, shift);

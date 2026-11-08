@@ -3709,6 +3709,38 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn scrolled_right_a_drag_or_double_click_onto_a_short_line_reveals_the_selection_head() {
+        let (xs, ys) = ("x".repeat(200), "y".repeat(200));
+        let mut ed = wrapped(&[xs.as_str(), "short", ys.as_str(), "한글탭\tz"], "off", 10, 60);
+        screen(&mut ed);
+        let gw = ed.gutter() as i32;
+        let shown = |ed: &mut Editor| {
+            let x = ed.row_pos(ed.head()).1;
+            x >= ed.left && x < ed.left + ed.text_width()
+        };
+        let m = |x, y, motion| crate::keys::Mouse { button: 0, x, y, motion, ..Default::default() };
+        let up = crate::keys::Mouse { button: 0, x: 1, y: 1, release: true, ..Default::default() };
+        ed.move_to(pos(0, 150), false);
+        assert!(ed.left > 100 && shown(&mut ed));
+        ed.mouse(&m(gw + 10, 2, false), None);
+        assert_eq!(ed.head().col, ed.left + 9, "the click's column counts the scroll");
+        ed.mouse(&m(gw + 10, 3, true), None);
+        assert_eq!(ed.head(), pos(1, 5), "the drag lands at the short line's end");
+        assert!(shown(&mut ed), "and the view follows it left");
+        ed.mouse(&up, None);
+        ed.move_to(pos(2, 150), false);
+        ed.mouse(&m(gw + 10, 5, false), None);
+        ed.mouse(&m(gw + 10, 5, false), None);
+        assert_eq!(ed.head().line, 3);
+        assert!(shown(&mut ed), "a double-click past a short line's end reveals the word it selects");
+        ed.mouse(&up, None);
+        ed.move_to(pos(2, 150), false);
+        ed.mouse(&m(gw + 30, 5, false), None);
+        assert_eq!(ed.head(), pos(3, 11), "a click right of a line's end: its end (wide chars and a tab before it)");
+        assert!(shown(&mut ed));
+    }
+
+    #[test]
     fn toggle_word_wrap_and_the_status_item_switch_wrapping_for_this_file() {
         let line = "alpha beta gamma delta epsilon zeta eta theta ".repeat(3);
         let mut ed = wrapped(&[line.as_str()], "off", 8, 70);
