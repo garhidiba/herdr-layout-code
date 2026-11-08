@@ -1,4 +1,4 @@
-//! vsedit: the terminal editor of the herdr-layout-vscode mods (mods/vscode-viewer/editor/vsedit.cjs) in Rust.
+//! vsedit: the terminal editor of the herdr-layout-code mods (mods/vscode-viewer/editor/vsedit.cjs) in Rust.
 //! usage: vsedit <file> [--close-on-exit] [--vscode <dir>] [--fallback <vsedit.cjs>]
 //!        vsedit --warm <key> [--close-on-exit] ...   (waits with no file until handed one: warm.rs)
 //!        vsedit --serve [--vscode <dir>]   (the editor for the native editor mod, over a socket: serve.rs)

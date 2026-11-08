@@ -3,7 +3,7 @@ name = "vsedit"
 version = "1.0.0"
 edition = "2021"
 rust-version = "1.92"
-description = "The terminal editor of the herdr-layout-vscode mods (vsedit.cjs) in Rust, colored by the vscode-textmate port"
+description = "The terminal editor of the herdr-layout-code mods (vsedit.cjs) in Rust, colored by the vscode-textmate port"
 publish = false
 
 [dependencies]
