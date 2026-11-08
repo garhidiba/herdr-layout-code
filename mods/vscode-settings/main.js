@@ -459,6 +459,9 @@ export default class Settings extends View {
       .child(this.row(t, "Files", "Insert Final Newline", "End the file with a newline when saving.", this.toggle(t, "files.insertFinalNewline", "Insert Final Newline")))
       .child(this.section(t, "Explorer"))
       .child(this.row(t, "Explorer", "Auto Reveal", "Reveal and select the active editor's file in the Explorer: its folders open and the tree scrolls to it.", this.toggle(t, "explorer.autoReveal", "Auto Reveal")))
+      .child(this.section(t, "Image Viewer"))
+      .child(this.row(t, "Image Viewer", "Scope", "Per Space: each space keeps its own image, fit, zoom and position. Global: one image and view for every space (a remote space's image still loads from its machine). Whether the column shows is one for all either way.",
+        this.segmented(t, "imageViewer.scope", [["space", "Per Space"], ["global", "Global"]])))
       .child(this.section(t, "Editor"))
       .child(this.row(t, "Editor", "Format On Save", "Format the file when saving (needs a formatter for the language).", this.toggle(t, "editor.formatOnSave", "Format On Save")))
       .child(this.row(t, "Editor", "Tab Size", "Spaces a tab equals, for files with no indentation to detect (1–16).",

@@ -21,12 +21,14 @@ export const DEFAULTS = {
   "editor.wrappingIndent": "same",    // "none" | "same" | "indent" | "deepIndent"
   "explorer.autoReveal": true,        // the Explorer reveals and highlights the active editor's file (vscode-explorer)
   "workbench.editor.preloadEditor": true, // each local space keeps an editor started off screen, so a file opens at once (vscode-explorer warm.js)
+  "imageViewer.scope": "space",       // "space": each space keeps its own image and view | "global": one for all (vscode-viewer image.js)
 };
 export const CHOICES = { "core.engine": ["js", "rust"], "editor.engine": ["js", "rust"], "files.autoSave": ["off", "afterDelay", "onFocusChange"],
   "editor.inlineSuggest.provider": ["ollama", "lmstudio", "codestral", "mercury", "off"],
   "editor.cursorStyle": ["line", "block", "underline", "line-thin", "underline-thin", "block-outline"],
   "editor.cursorBlinking": ["blink", "smooth", "phase", "expand", "solid"],
-  "editor.wordWrap": ["off", "on", "wordWrapColumn", "bounded"], "editor.wrappingIndent": ["none", "same", "indent", "deepIndent"] };
+  "editor.wordWrap": ["off", "on", "wordWrapColumn", "bounded"], "editor.wrappingIndent": ["none", "same", "indent", "deepIndent"],
+  "imageViewer.scope": ["space", "global"] };
 // editor.inlineSuggest.enabled: absent, the editor turns suggestions on when the provider can run there (Ollama
 // installed); the dialog shows that as on, and Reset to defaults removes the key again.
 const INLINE_ENABLED = "editor.inlineSuggest.enabled";

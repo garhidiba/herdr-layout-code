@@ -230,3 +230,10 @@ test("each provider keeps its own model and address; switching moves the shared 
   assert.equal(ownKey("lmstudio", "endpoint") in normalize({ [ownKey("lmstudio", "endpoint")]: "nope" }), false);
   assert.deepEqual(withDefaults(raw), { ...DEFAULTS });
 });
+
+test("the image viewer's scope is per space by default; only space or global is kept", () => {
+  assert.equal(normalize(parse(null))["imageViewer.scope"], "space");
+  assert.equal(normalize({ "imageViewer.scope": "global" })["imageViewer.scope"], "global");
+  assert.equal(normalize({ "imageViewer.scope": "tab" })["imageViewer.scope"], "space");
+  assert.equal(JSON.parse(serialize(withSetting({}, "imageViewer.scope", "global")))["imageViewer.scope"], "global");
+});
