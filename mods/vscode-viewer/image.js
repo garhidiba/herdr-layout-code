@@ -385,14 +385,12 @@ export class ImagePanel {
         .child(div().absolute().top(0).left(0).right(0).bottom(0).rounded(10).border_1().border_color(t.border)))
       .when(Boolean(status), el => el.child(div().absolute().left(0).right(0).bottom(0).h(22).px(10).bg(t.background).opacity(0.94).flex().items_center().border_t(1).border_color(t.border).text_size(11.5).text_color(t.dim).truncate().child(status)));
     if (this.modal) return card;
-    // The column: its resize strip (part of the sash, SASH), then the card.
-    const lit = shared(SASH) === true;
+    // The column: its resize strip (part of the sash; only the cursor shows it), then the card.
     return h_flex().id("image-column").size_full().min_h(0)
       .on_size_change((s, cx) => { this.width = s.width; this.saveWidth(cx); })
       .child(div().id("image-resize").w(STRIP).h_full().flex_none().cursor_col_resize()
         .on_hover((on) => setShared(SASH, on))
-        .on_mouse_down("left", (e, cx) => this.startResize(e, cx))
-        .when(lit, el => el.child(div().w(2).h_full().bg(t.accent))))
+        .on_mouse_down("left", (e, cx) => this.startResize(e, cx)))
       .child(card);
   }
 }
