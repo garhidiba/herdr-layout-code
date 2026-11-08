@@ -1,6 +1,7 @@
+import { claudeWindows, presentKeys, barWindows } from "./claude-windows.js";
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, v_flex, HoverCard } from "gpui-base";
-import { spaces, agents, theme, run, window, keys, exec, readTextFile, appHome, nextCommand, openOverlay, notify } from "herdr";
+import { spaces, agents, theme, run, window, keys, exec, readTextFile, appHome, nextCommand, openOverlay, notify, setShared } from "herdr";
 // Herdr starts with PATH=/usr/bin:/bin, so Homebrew/user tools (node, code, codex, trash) are looked up here too.
 const CLAUDE_API = 'tok=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null | /usr/bin/python3 -c "import sys,json;print(json.load(sys.stdin)[\\"claudeAiOauth\\"][\\"accessToken\\"])" 2>/dev/null); [ -n "$tok" ] && curl -s -m 10 -H "Authorization: Bearer $tok" -H "anthropic-beta: oauth-2025-04-20" https://api.anthropic.com/api/oauth/usage';
 const userExec = (cmd, args, opts) => exec("sh", ["-c", 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; exec "$0" "$@"', cmd, ...args], opts);
@@ -15,13 +16,14 @@ const clock = (ms) => { const d = new Date(ms); return `${d.getMonth() + 1}/${d.
 function windowLabel(w) {
   if (!w) return null;
   const ms = w.resets_at * 1000 - Date.now();
-  const title = w.window_minutes >= 10080 ? "Weekly" : `${Math.round(w.window_minutes / 60)}-hour session`;
-  if (!(ms > 0)) return { used: 0, name: "", title, reset: "window has reset" };
+  const base = w.window_minutes >= 10080 ? "Weekly" : `${Math.round(w.window_minutes / 60)}-hour session`;
+  const title = w.model ? `${w.model} ${base.toLowerCase()}` : base, model = w.model ?? null;
+  if (!(ms > 0)) return { used: 0, name: "", title, model, reset: "window has reset" };
   const mins = Math.ceil(ms / 60000);
   const hours = Math.floor(mins / 60);
   // Weekly window: days + hours (hours + minutes once under a day); session window: hours + minutes.
   const name = w.window_minutes >= 10080 && hours >= 24 ? `${Math.floor(hours / 24)}d ${hours % 24}h` : `${hours}h ${mins % 60}m`;
-  return { used: Math.round(w.used_percent), name, title, reset: `resets ${clock(w.resets_at * 1000)} (${name} left)` };
+  return { used: Math.round(w.used_percent), name, title, model, reset: `resets ${clock(w.resets_at * 1000)} (${name} left)` };
 }
 
 // 29412.43 -> "29,412"
@@ -64,12 +66,7 @@ export default class WorkspaceStatus extends View {
         const text = await readTextFile(`${appHome()}/claude-usage.json`);
         const saved = text ? JSON.parse(text) : null, rl = saved?.rate_limits;
         this.claudeAt = saved?.at ? saved.at * 1000 : null;
-        const win = (w, minutes) => {
-          if (!w) return null;
-          const at = typeof w.resets_at === "number" ? w.resets_at : Date.parse(w.resets_at) / 1000;
-          return windowLabel({ used_percent: w.used_percentage ?? w.utilization ?? 0, window_minutes: minutes, resets_at: at });
-        };
-        if (rl) wins = [win(rl.five_hour, 300), win(rl.seven_day, 10080)].filter(Boolean);
+        wins = claudeWindows(rl).map(w => windowLabel(w));
       } catch {}
       this.claude = wins?.length ? wins : [{ name: "", used: null }];
       // The usage API is what claude.ai shows; the statusLine file lags behind it, so a fresh API read wins.
@@ -85,8 +82,9 @@ export default class WorkspaceStatus extends View {
       try {
         const r = await exec("sh", ["-c", CLAUDE_API]);
         const u = r.code === 0 && r.stdout.trim() ? JSON.parse(r.stdout) : null;
-        const win = (w, minutes) => w ? windowLabel({ used_percent: w.utilization ?? 0, window_minutes: minutes, resets_at: Date.parse(w.resets_at) / 1000 }) : null;
-        const wins = u && !u.error ? [win(u.five_hour, 300), win(u.seven_day, 10080)].filter(Boolean) : [];
+        const wins = u && !u.error ? claudeWindows(u).map(w => windowLabel(w)) : [];
+        // Debug: which windows the API returned (key names only) to learn per-model keys.
+        setShared("vscode-status.claude-keys", presentKeys(u));
         if (!wins.length) { this.apiPause = Date.now() + 900000; return; }
         this.api = { at: Date.now(), wins }; this.claude = wins; this.claudeAt = this.api.at;
         cx.notify();
@@ -230,11 +228,11 @@ export default class WorkspaceStatus extends View {
       .children([["claude", "Claude", this.claude, this.claudeCredits, this.claudeAt ? `Updated ${clock(this.claudeAt)}` : null, this.resetLink(t, "Claude")], ["codex", "Codex", this.codex, this.codexCredits, null, this.codexResets(t)]].filter(([, , w]) => w?.length).map(([name, title, wins, extra, note, footer]) =>
         HoverCard.new(`usage-${name}`).anchor("bottom_center").open_delay(200).trigger(
         h_flex().gap(6).items_center().child(image(`mods/vscode-status/${name}.svg`).w(13).h(13).flex_none())
-          .children(wins.map(w => {
+          .children(barWindows(wins).map(w => {
             if (w.used === null) return div().text_color(t.dim).child("–");
             const color = w.used >= 90 ? t.ansi1 : w.used >= 70 ? t.ansi3 : t.ansi2;
             return h_flex().gap(5).items_center()
-              .when(Boolean(w.name), el => el.child(div().text_color(t.dim).child(w.name)))
+              .when(Boolean(w.name), el => el.child(div().text_color(t.dim).child(w.model ?? w.name)))
               .child(div().w(40).h(5).rounded(3).bg(t.border).overflow_hidden().child(div().w(Math.max(2, Math.round(40 * w.used / 100))).h(5).rounded(3).bg(color)))
               .child(div().text_color(w.used >= 90 ? t.ansi1 : t.muted).child(`${w.used}%`));
           }))
