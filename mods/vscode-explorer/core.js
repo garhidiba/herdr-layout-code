@@ -1,5 +1,6 @@
-// The Rust core (<herdr home>/vscode-core/vscode-core) behind the "core.engine" setting. The same file is in
-// vscode-explorer and vscode-scm (a mod can't import another mod's files). No Herdr imports, so node tests load it.
+// The Rust core (<herdr home>/vscode-core/vscode-core) behind the "core.engine" setting, and when a panel reads its
+// folder again (relevant, stampOf, stale). The same file is in vscode-explorer and vscode-scm (a mod can't import
+// another mod's files). No Herdr imports, so node tests load it.
 
 export const CORE_API = 1; // the binary's major version these mods speak (vscode-settings' CORE_API)
 const READ_EVERY = 2000, RETRY = 60000, TOAST_KEY = "vscode-core.toast", TOAST_GAP = 10000;
@@ -54,14 +55,46 @@ export function createCore({ exec, readTextFile, notify, appHome, shared = () =>
     return ready;
   }
 
+  // The same call while one is running (a refresh and a preload of the same folder) shares its result.
+  const running = new Map();
+  function joined(args) {
+    const id = args.join("\0");
+    if (!running.has(id)) running.set(id, call(args).finally(() => running.delete(id)));
+    return running.get(id);
+  }
+
   return async function run(args, on = null) {
     if (on) return null;
     await settings();
     if (engine !== "rust" || (brokenAt !== null && now() - brokenAt < RETRY)) return null;
     if (!(await handshake())) return null;
     try {
-      const out = await call(args);
+      const out = await joined(args);
       return out.error === undefined ? out : null;
     } catch { broken("Rust core call failed — using JavaScript", "It passed its version check; one call failed (a mod reload can do this). Trying again in a minute."); return null; }
   };
+}
+
+// Whether a watchFolder() batch can change what a panel shows: not when every path is one VS Code's files.watcherExclude
+// leaves out by default (git's object store, inside an installed package, Mercurial's store). Empty means unknown: yes.
+const UNWATCHED = /\/\.git\/(objects|subtree-cache)\/|\/node_modules\/[^/]+\/|\/\.hg\/store\//;
+export const relevant = (paths) => !paths?.length || paths.some((p) => !UNWATCHED.test(p));
+
+// One `stat` of the paths (mtime, ctime, size and inode; a missing path prints nothing) as a string to compare, or
+// null when it can't run (Windows). Cheap next to a listing: no folder is read.
+export async function stampOf(exec, paths, platform) {
+  if (platform === "windows" || !paths.length) return null;
+  const format = platform === "macos" ? ["-f", "%N %Fm %Fc %z %i"] : ["-c", "%n %y %z %s %i"];
+  const r = await exec("stat", ["-L", ...format, "--", ...paths]).catch(() => null);
+  return r ? r.stdout : null;
+}
+
+// A watched local panel's 10s timer reads again only 5 minutes after its last read or when the stamp of what it
+// shows moved since then (`seen`: { stamp, at } of that read). The folder watch reads on changes; this catches what it
+// can't see, such as a commit in a repo whose .git is above the watched folder.
+export const FULL_EVERY = 300000;
+export async function stale(seen, stamp, now = Date.now()) {
+  if (!seen || now - seen.at >= FULL_EVERY) return true;
+  const s = await stamp();
+  return s === null || s !== seen.stamp;
 }

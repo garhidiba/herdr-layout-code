@@ -1,7 +1,7 @@
 // node --test mods/vscode-explorer/test/core.test.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
-import { engineOf, createCore } from "../core.js";
+import { engineOf, createCore, relevant, stampOf, stale, FULL_EVERY } from "../core.js";
 
 // A fake Herdr: a settings file, a binary (a function from args to { code, stdout }, or null when it isn't
 // there), a clock, the shared store, and what was run and toasted.
@@ -104,4 +104,52 @@ test("the Explorer and Source Control together show one toast", async () => {
   await a.core(["tree", "/p"]);
   await other(["repos", "/p"]);
   assert.equal(a.toasts.length, 1);
+});
+
+test("the same call while one runs is made once and both get its result", async () => {
+  let release;
+  const f = fake({ binary: (args) => (args[0] !== "tree" ? ok(args[0] === "--version" ? { version: "1.0.0" } : {}) : new Promise((r) => { release = () => r(ok({ args })); })) });
+  await f.core(["repos", "/p"]); // the version check, out of the way
+  const runs = f.runs.length;
+  const a = f.core(["tree", "/p"]), b = f.core(["tree", "/p"]);
+  while (!release) await new Promise((r) => setTimeout(r, 1));
+  release();
+  assert.deepEqual(await a, { args: ["tree", "/p"] });
+  assert.equal(await b, await a);
+  assert.equal(f.runs.length, runs + 1);
+  // Once it is done, the next one runs again.
+  f.binary = (args) => ok({ again: args });
+  assert.deepEqual(await f.core(["tree", "/p"]), { again: ["tree", "/p"] });
+});
+
+test("a watch batch counts unless every path is one VS Code's watcher leaves out", () => {
+  assert.equal(relevant(["/p/.git/objects/ab/cdef", "/p/node_modules/react/index.js", "/p/.hg/store/data"]), false);
+  assert.equal(relevant(["/p/.git/objects/ab/cdef", "/p/.git/index"]), true);
+  assert.equal(relevant(["/p/node_modules/new-package"]), true); // a package added or removed shows in the tree
+  assert.equal(relevant(["/p/src/a.ts"]), true);
+  assert.equal(relevant([]), true);
+  assert.equal(relevant(undefined), true);
+});
+
+test("a stamp is one stat of the paths in the platform's format, and none on Windows", async () => {
+  const runs = [], exec = async (cmd, args) => { runs.push([cmd, ...args]); return { code: 1, stdout: "/p 1.0 1.0 64 7\n", stderr: "/gone: missing" }; };
+  assert.equal(await stampOf(exec, ["/p", "/gone"], "macos"), "/p 1.0 1.0 64 7\n");
+  assert.deepEqual(runs[0], ["stat", "-L", "-f", "%N %Fm %Fc %z %i", "--", "/p", "/gone"]);
+  await stampOf(exec, ["/p"], "linux");
+  assert.deepEqual(runs[1], ["stat", "-L", "-c", "%n %y %z %s %i", "--", "/p"]);
+  assert.equal(await stampOf(exec, ["/p"], "windows"), null);
+  assert.equal(await stampOf(async () => { throw new Error("no stat"); }, ["/p"], "linux"), null);
+  assert.equal(runs.length, 2);
+});
+
+test("a watched panel reads again only when its stamp moved or 5 minutes passed", async () => {
+  const at = 1e12, stamp = (s) => async () => s;
+  assert.equal(await stale(null, stamp("a"), at), true); // never read
+  assert.equal(await stale({ stamp: "a", at }, stamp("a"), at + 10000), false);
+  assert.equal(await stale({ stamp: "a", at }, stamp("b"), at + 10000), true);
+  assert.equal(await stale({ stamp: "a", at }, stamp(null), at + 10000), true); // no stat: read as before
+  assert.equal(await stale({ stamp: null, at }, stamp(null), at + 10000), true);
+  let statted = false;
+  assert.equal(await stale({ stamp: "a", at }, async () => { statted = true; return "a"; }, at + FULL_EVERY), true);
+  assert.equal(statted, false);
 });
