@@ -5,7 +5,7 @@
 // (VS Code's explorer.autoReveal).
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { spaces, panes, focused, terminals, exec, hc, readTextFile, watchFolder, theme, window, appHome, props, shared, setShared, notify, nextCommand, openOverlay } from "herdr";
+import { spaces, panes, focused, terminals, exec, hc, readTextFile, watchFolder, theme, window, appHome, props, shared, setShared, notify, nextCommand, openOverlay, run, layout } from "herdr";
 import { freshRoot, encode, decode } from "./cache.js";
 import { ExplorerMenu, ExplorerDialog, TabMenu, openMenu, openInCode, explorerAction, refreshKey, openFile, splitOpen, remote, warm, REVEAL, terminalRows, IMAGE_OPEN } from "./menu.js";
 import { OPEN_AT } from "./split.js";
@@ -18,6 +18,22 @@ import { ROW, clampTop, rowAt, shown, scrollToShow, dragStarted, dropFolder, dra
 import { createDesktop } from "./desktop.js";
 import { createDetails } from "./details.js";
 import { createOps } from "./ops.js";
+// The Image Viewer column's resize zone reaches over this card's right edge (vscode-viewer image.js SASH: one sash of
+// its strip, the layout's gap and this edge): a press here starts its resize overlay (a double-click gives it back its
+// layout width, 420), a hover lights its line. Only while that column shows, right of this panel.
+const IMAGE_SASH = "vscode-viewer.image-sash";
+const findNode = (n, id) => n?.id === id ? n : (n?.children ?? []).map(c => findNode(c, id)).find(Boolean) ?? null;
+function imageSash(el) {
+  const column = findNode(layout(), "image-panel");
+  if (!column || column.hidden) return el;
+  return el.child(div().id("image-sash").absolute().top(0).bottom(0).right(0).w(4).cursor_col_resize()
+    .on_hover((on) => setShared(IMAGE_SASH, on))
+    .on_mouse_down("left", (e, cx) => {
+      cx.stop_propagation();
+      if (e.click_count === 2) return run("layout.resize", { id: "image-panel", px: 420 });
+      openOverlay({ mod: "vscode-viewer", kind: "window", frame: "none", at: { x: 0, y: 0 }, width: 1, height: 1, props: { imageResize: { x: e.position.x } } });
+    }));
+}
 // vscode-tabs' drag.js DRAG_BACK: its drag overlay hands a file drag back to the tree.
 const DRAG_BACK = "vscode-tabs.drag-back";
 // Herdr starts with PATH=/usr/bin:/bin, so Homebrew/user tools (node, code, codex, trash) are looked up here too.
@@ -584,7 +600,7 @@ export default class Files extends View {
     const target = drag?.folder ?? null;
     const [hiFrom, hiTo] = target ? targetRange(rows, target) : [0, 0];
     const thumb = Math.max(24, height * height / (count * ROW || 1));
-    return v_flex().id("explorer").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
+    return imageSash(v_flex().id("explorer").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
       .child(h_flex().h(36).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .child(div().font_semibold().child("Explorer"))
         .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim).child(this.root?.split(/[\\/]/).pop() ?? "")))
@@ -634,6 +650,6 @@ export default class Files extends View {
               .child(drag.row.name));
           })))
         .when(Boolean(this.error) || !this.entries.get("")?.length, el => el.child(div().p(8).text_size(12).text_color(t.dim).child(this.error || (this.loading ? "Loading files…" : this.root ? "No files" : "No folder"))))
-        .when(this.limited, el => el.child(div().p(8).text_size(11).text_color(t.dim).child("File list limited to 500 entries per folder and 5,000 total"))));
+        .when(this.limited, el => el.child(div().p(8).text_size(11).text_color(t.dim).child("File list limited to 500 entries per folder and 5,000 total")))));
   }
 }

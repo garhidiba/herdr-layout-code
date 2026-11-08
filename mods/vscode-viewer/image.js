@@ -36,7 +36,13 @@ async function screenDensity() {
   density = r?.code === 0 && n >= 1 && n <= 4 ? n : 1;
   return density;
 }
-const COLUMN = "image-panel"; // layouts/vscode.json's Image Viewer column
+const COLUMN = "image-panel", DEFAULT_WIDTH = 420; // layouts/vscode.json's Image Viewer column and its width there
+// The column's resize zone is one sash across the boundary: this column's left strip (outside its card), the layout's
+// gap (Herdr's own) and the side panel's right edge (vscode-explorer / vscode-scm draw a matching strip that opens the
+// same ResizeOverlay, props { imageResize: { x } }). SASH: true while any of them is hovered or a drag runs, which
+// lights the accent line at this strip's outer edge.
+export const SASH = "vscode-viewer.image-sash";
+const STRIP = 6;
 // Here: resamples image $1 to $3 px wide as $2 (format $4), Lanczos through ImageMagick when installed, else macOS's sips;
 // exits 3 with neither (the original is drawn then). Lands whole: written aside, then renamed. Herdr's PATH may leave magick out.
 const RESAMPLE = `PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"; [ -f "$2" ] && exit 0
@@ -244,8 +250,10 @@ export class ImagePanel {
   }
 
   // The column's left edge: a full-window overlay follows the drag (the pointer soon leaves the edge).
+  // A double-click gives the scope back the layout's width (saveWidth keeps it).
   startResize(e, cx) {
     cx.stop_propagation();
+    if (e.click_count === 2) return run("layout.resize", { id: COLUMN, px: DEFAULT_WIDTH });
     openOverlay({ mod: "vscode-viewer", kind: "window", frame: "none", at: { x: 0, y: 0 }, width: 1, height: 1,
       props: { imageResize: { x: e.position.x, px: this.width } } });
   }
@@ -366,9 +374,8 @@ export class ImagePanel {
     const showBars = pinned || this.hover || !this.img || Date.now() < this.flashUntil;
     const bars = v_flex().id("image-bars").absolute().top(0).left(0).right(0).bg(t.background).child(title).child(tools)
       .opacity(showBars ? 0.94 : 0).transition("opacity", 160);
-    return v_flex().id(this.modal ? "image-modal" : "image-panel").size_full().min_h(0).relative().overflow_hidden().bg(t.background).text_color(t.foreground).text_size(13)
-      .when(!this.modal, el => el.rounded(10).border_1().border_color(t.border))
-      .on_size_change((s, cx) => { this.width = s.width; this.saveWidth(cx); })
+    const card = v_flex().id(this.modal ? "image-modal" : "image-panel").min_h(0).relative().overflow_hidden().bg(t.background).text_color(t.foreground).text_size(13)
+      .when(Boolean(this.modal), el => el.size_full()).when(!this.modal, el => el.flex_1().min_w(0).h_full().rounded(10).border_1().border_color(t.border))
       .on_hover((on, cx) => { if (on !== this.hover) { this.hover = on; cx.notify(); } })
       .on_mouse_move((_e, cx) => { if (!this.hover) { this.hover = true; cx.notify(); } })
       .child(body).child(bars)
@@ -376,9 +383,17 @@ export class ImagePanel {
       // ring in the color behind the card (inner radius 10), then the card's 1px border is drawn over it.
       .when(!this.modal, el => el.child(div().absolute().top(-10).left(-10).right(-10).bottom(-10).rounded(20).border(10).border_color(t.canvas))
         .child(div().absolute().top(0).left(0).right(0).bottom(0).rounded(10).border_1().border_color(t.border)))
-      .when(!this.modal, el => el.child(div().id("image-resize").absolute().left(0).top(0).bottom(0).w(5).cursor_col_resize()
-        .on_mouse_down("left", (e, cx) => this.startResize(e, cx))))
       .when(Boolean(status), el => el.child(div().absolute().left(0).right(0).bottom(0).h(22).px(10).bg(t.background).opacity(0.94).flex().items_center().border_t(1).border_color(t.border).text_size(11.5).text_color(t.dim).truncate().child(status)));
+    if (this.modal) return card;
+    // The column: its resize strip (part of the sash, SASH), then the card.
+    const lit = shared(SASH) === true;
+    return h_flex().id("image-column").size_full().min_h(0)
+      .on_size_change((s, cx) => { this.width = s.width; this.saveWidth(cx); })
+      .child(div().id("image-resize").w(STRIP).h_full().flex_none().cursor_col_resize()
+        .on_hover((on) => setShared(SASH, on))
+        .on_mouse_down("left", (e, cx) => this.startResize(e, cx))
+        .when(lit, el => el.child(div().w(2).h_full().bg(t.accent))))
+      .child(card);
   }
 }
 
@@ -393,9 +408,12 @@ export class ResizeOverlay {
     this.from = props().imageResize;
     this.handle = cx.focus_handle();
     this.handle.focus();
+    // From the side panel's edge strip the press doesn't know the column's width: the layout's.
+    this.from = { ...this.from, px: this.from.px ?? findNode(layout(), COLUMN)?.size?.px ?? DEFAULT_WIDTH };
     this.px = this.from.px;
+    setShared(SASH, true);
   }
-  end() { closeOverlay(props().overlay); }
+  end() { setShared(SASH, false); closeOverlay(props().overlay); }
   render() {
     const node = findNode(layout(), COLUMN);
     return div().id("image-resizing").size_full().cursor_col_resize().track_focus(this.handle)
@@ -405,6 +423,10 @@ export class ResizeOverlay {
         if (px !== this.px) { this.px = px; run("layout.resize", { id: COLUMN, px }); }
       })
       .on_mouse_up("left", () => this.end())
-      .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.end(); });
+      .on_mouse_down("left", (e, cx) => {
+        cx.stop_propagation();
+        if (e.click_count === 2) run("layout.resize", { id: COLUMN, px: DEFAULT_WIDTH });
+        this.end();
+      });
   }
 }
