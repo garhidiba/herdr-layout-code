@@ -4,16 +4,18 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createSplitOpen } from "../split.js";
 
-// A fake Herdr: tab "a" has panes p1, p2 (p2 focused); tab "b" has p3, an editor of /p/b.ts. `open` adds a pane beside
+// A fake Herdr: tab "a" has panes p1, p2 (p2 focused); tab "b" has p3, an editor of /p/b.ts, and v4, a viewer of /p/demo.mp4. `open` adds a pane beside
 // the focused one, as openFile with a place does; `focusable` false: a pane.focus that never lands.
 function harness({ focusable = true } = {}) {
-  const panes = [{ pane: "p1", tab: "a", terminal: "t1" }, { pane: "p2", tab: "a", terminal: "t2" }, { pane: "p3", tab: "b", terminal: "t3" }];
+  const panes = [{ pane: "p1", tab: "a", terminal: "t1" }, { pane: "p2", tab: "a", terminal: "t2" }, { pane: "p3", tab: "b", terminal: "t3" },
+    { pane: "v4", tab: "b", terminal: null, mod: "vscode-viewer" }];
   let focus = "p2";
   const calls = [], opened = [], moved = [];
   const run = (name, args) => { calls.push([name, args]); if (name === "pane.focus" && focusable) focus = args.pane; };
   const rows = () => panes.map(p => ({ ...p, focused: p.pane === focus }));
   const open = async (file, opts) => { opened.push([file, opts]); panes.push({ pane: "new", tab: panes.find(p => p.pane === focus).tab, terminal: "tn" }); };
-  const openPane = (file) => (file === "/p/b.ts" ? rows().find(p => p.pane === "p3") : file === "/p/a.ts" ? rows().find(p => p.pane === "p1") : null);
+  const openPane = (file) => (file === "/p/b.ts" ? rows().find(p => p.pane === "p3") : file === "/p/a.ts" ? rows().find(p => p.pane === "p1")
+    : file === "/p/demo.mp4" ? rows().find(p => p.pane === "v4") : null);
   const openAt = createSplitOpen({ run, panes: rows, open, openPane, move: (r) => moved.push(r) });
   const cx = { sleep: async () => {} };
   return { openAt: (ask) => openAt({ folder: "/p", into: "a", ...ask }, cx), calls, opened, moved };
@@ -46,6 +48,13 @@ test("a file open in an editor of that tab is only focused; open in another tab,
   await h.openAt({ file: "/p/b.ts", place: "left", beside: "p2" });
   assert.deepEqual(h.moved, [{ terminal: "t3", into: "a", place: "left", beside: "p2" }]);
   assert.equal(h.opened.length, 0, "never a second editor on one file");
+});
+
+test("a file open in a viewer of another tab: that viewer moves there, no second viewer", async () => {
+  const h = harness();
+  assert.equal(await h.openAt({ file: "/p/demo.mp4", place: "right", beside: "p2" }), true);
+  assert.deepEqual(h.moved, [{ pane: "v4", into: "a", place: "right", beside: "p2" }]);
+  assert.equal(h.opened.length, 0);
 });
 
 test("nothing opens when the target pane never takes focus, for an unknown zone, or a gone tab", async () => {

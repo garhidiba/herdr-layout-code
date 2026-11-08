@@ -71,7 +71,7 @@ const TAB_CLOSE = "vscode-tabs.close";
 const MOVE = "vscode-tabs.move";
 // A file dragged from the tree onto a pane opens beside it (split.js; the tree runs the drop's request).
 export const splitOpen = createSplitOpen({ run, panes, open: openFile,
-  openPane: (file, on) => openPaneOf(file, on, true),
+  openPane: (file, on) => openPaneOf(file, on),
   move: (request) => setShared(MOVE, { ...request, at: Date.now() }) });
 
 // Herdr starts with PATH=/usr/bin:/bin; Homebrew/user tools (code, trash) live elsewhere.
