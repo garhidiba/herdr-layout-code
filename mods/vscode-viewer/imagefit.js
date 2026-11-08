@@ -11,11 +11,12 @@ const MIN = STEPS[0], MAX = STEPS[STEPS.length - 1];
 const clampScale = (s) => Math.min(MAX, Math.max(MIN, s));
 const known = (r) => r?.width > 0 && r?.height > 0;
 
-// The scale a fit gives: contain shows it whole and never enlarges past 100% (VS Code's preview); width / height fill that side.
+// The scale a fit gives: each touches the view's walls (the full inner size, no margin): width the left and right, height
+// the top and bottom, contain the two of the limiting side (small pictures enlarged too).
 export function fitScale(img, view, fit) {
   if (!known(img) || !known(view)) return 1;
   const sw = view.width / img.width, sh = view.height / img.height;
-  return fit === "width" ? sw : fit === "height" ? sh : Math.min(1, sw, sh);
+  return fit === "width" ? sw : fit === "height" ? sh : Math.min(sw, sh);
 }
 
 // One axis: a picture smaller than the view is centered, a larger one always covers it (no empty edge to pan into).
@@ -66,8 +67,18 @@ export function pan(state, img, view, dx, dy) {
 // A fit button: on picks that fit (centered); the one already on goes back to contain.
 export const toggleFit = (state, fit) => ({ fit: state.fit === fit && fit !== "contain" ? "contain" : fit, scale: 1, x: null, y: null });
 
-// Double-click: from contain to 100% at the pointer, from anything else back to contain.
-export const toggleZoom = (state, img, view, at) => state.fit === "contain" ? zoomTo(state, img, view, 1, at) : toggleFit(state, "contain");
+// Double-click: the fit after the shown one (Fit → Fit Width → Fit Height → Fit), skipping one that would show the same
+// scale, so each double-click changes the view; a hand zoom goes to Fit.
+export const FIT_NAMES = { contain: "Fit", width: "Fit Width", height: "Fit Height" };
+export function nextFit(state, img, view) {
+  if (!state.fit) return "contain";
+  const now = place(state, img, view).scale, i = FITS.indexOf(state.fit);
+  for (let k = 1; k < FITS.length; k++) {
+    const fit = FITS[(i + k) % FITS.length];
+    if (Math.abs(fitScale(img, view, fit) - now) > 1e-9) return fit;
+  }
+  return state.fit;
+}
 
 // ----- an image's size from its first bytes (`b`: byte values; PNG, JPEG, GIF, BMP, WebP, ICO), or null -----
 
@@ -123,16 +134,29 @@ export const imagesIn = (names, isImage) => names.filter(n => n && !n.startsWith
 // so a strong downscale aliases; such a picture is drawn from a copy resampled to its drawn size instead -----
 
 export const RESAMPLE_BELOW = 0.9; // a copy only when it would have under this share of the original's pixels
-const RESAMPLE_STEP = 64;          // copy widths are rounded up to this, so small zoom moves reuse one copy
+const QUANTUM = 1;                 // copy widths in whole device px, rounded down
 const KEPT = ["svg", "gif", "ico"]; // SVG draws sharp at any size; a GIF would lose its frames; icons are small
 
-// The pixel width of the copy for a picture `img` drawn `drawn` px wide on a screen of `density` device px per px, or
-// null when the original serves: drawn at or near its own pixels (100% and up always), or a format kept as is (`ext`).
-export function resampleWidth(img, drawn, density = 2, ext = "") {
-  if (!(img?.width > 0) || !(drawn > 0) || KEPT.includes(ext)) return null;
-  const want = Math.ceil(drawn * density / RESAMPLE_STEP) * RESAMPLE_STEP;
-  return want < img.width * RESAMPLE_BELOW ? want : null;
+// The pixel width of the copy for a picture `img` drawn `drawn` px wide on a screen of `density` device px per px: the
+// device px it covers, rounded down (never more, so the GPU never shrinks the copy again: that is what aliases); null
+// when the original serves: drawn at or near its own pixels (100% and up always), or a format kept as is (`ext`).
+export function resampleWidth(img, drawn, density = 1, ext = "") {
+  if (!(img?.width > 0) || !(drawn > 0) || !(density > 0) || KEPT.includes(ext)) return null;
+  const want = Math.floor(drawn * density / QUANTUM) * QUANTUM;
+  return want >= QUANTUM && want < img.width * RESAMPLE_BELOW ? want : null;
 }
+
+// Where a picture placed at `p` (place) is drawn on a screen of `density`: at its place and size (a copy, at most a
+// device px narrower, is stretched by under a pixel, never shrunk), its origin on whole device px; an edge on a wall
+// (0) stays there, so a fit touches the walls.
+export function drawnAt(p, density = 1) {
+  const snap = (v) => Math.round(v * density) / density + 0; // + 0: no -0
+  return { x: snap(p.x), y: snap(p.y), width: p.width, height: p.height };
+}
+
+// The width (px) to give the column for a view's entry (`entry.width`, kept per scope) when `now` px wide: null when the
+// entry keeps none or the column already has it.
+export const widthToApply = (entry, now) => Number.isFinite(entry?.width) && entry.width > 0 && Math.abs(entry.width - (now ?? 0)) >= 1 ? Math.round(entry.width) : null;
 
 // The copy's name in the cache folder: the source's cache id (`id`, preview.js pathHash) + "r" (so cachePreview's
 // sweep of `<id>-*` leaves copies alone), its version (`st`: mtime, size) and the width; a JPEG stays one, else PNG

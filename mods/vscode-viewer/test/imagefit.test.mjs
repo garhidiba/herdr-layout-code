@@ -1,15 +1,15 @@
 // node --test mods/vscode-viewer/test/imagefit.test.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
-import { fitScale, clampPan, place, zoomTo, zoomStep, pan, toggleFit, toggleZoom, imageSize, svgSize, imagesIn, STEPS, resampleWidth, resampleName, scopeOf, stateKey, scopedEntry, withEntry, GLOBAL, viewOf, fromView } from "../imagefit.js";
+import { fitScale, clampPan, place, zoomTo, zoomStep, pan, toggleFit, nextFit, imageSize, svgSize, imagesIn, STEPS, resampleWidth, resampleName, scopeOf, stateKey, scopedEntry, withEntry, GLOBAL, viewOf, fromView, drawnAt, widthToApply } from "../imagefit.js";
 
 const view = { width: 400, height: 300 };
 const wide = { width: 1600, height: 600 }, tall = { width: 300, height: 1200 }, small = { width: 100, height: 50 };
 
-test("contain shows the whole picture and never enlarges a small one; width / height fill their side", () => {
+test("contain shows the whole picture, enlarging a small one too; width / height fill their side", () => {
   assert.equal(fitScale(wide, view, "contain"), 0.25);
   assert.equal(fitScale(tall, view, "contain"), 0.25);
-  assert.equal(fitScale(small, view, "contain"), 1);
+  assert.equal(fitScale(small, view, "contain"), 4);
   assert.equal(fitScale(small, view, "width"), 4);
   assert.equal(fitScale(wide, view, "height"), 0.5);
   assert.equal(fitScale(tall, view, "width"), 400 / 300);
@@ -54,14 +54,22 @@ test("panning stays inside the picture and keeps the fit", () => {
   assert.equal(pan(s, tall, view, 0, -9999).y, -1300);
 });
 
-test("fit buttons toggle back to contain; double-click goes between contain and 100%", () => {
+test("fit buttons toggle back to contain", () => {
   assert.equal(toggleFit({ fit: "contain" }, "width").fit, "width");
   assert.equal(toggleFit({ fit: "width" }, "width").fit, "contain");
   assert.equal(toggleFit({ fit: "contain" }, "contain").fit, "contain");
   assert.equal(toggleFit({ fit: null, scale: 3 }, "height").fit, "height");
-  const z = toggleZoom({ fit: "contain" }, wide, view, { x: 200, y: 150 });
-  assert.equal(z.fit, null); assert.equal(z.scale, 1);
-  assert.equal(toggleZoom(z, wide, view).fit, "contain");
+});
+
+test("double-click cycles Fit → Fit Width → Fit Height, skipping a fit that looks the same; a hand zoom goes to Fit", () => {
+  const tallish = { width: 800, height: 1200 }; // contain 0.25, width 0.5, height 0.25 in the 400×300 view
+  assert.equal(nextFit({ fit: "contain" }, tallish, view), "width");
+  assert.equal(nextFit({ fit: "width" }, tallish, view), "height");
+  assert.equal(nextFit({ fit: "height" }, tallish, view), "width", "contain = height's scale: skipped");
+  assert.equal(nextFit({ fit: "contain" }, wide, view), "height"); // contain 0.25 = width 0.25
+  assert.equal(nextFit({ fit: "height" }, wide, view), "contain");
+  assert.equal(nextFit({ fit: null, scale: 3 }, wide, view), "contain");
+  assert.equal(nextFit({ fit: "contain" }, { width: 400, height: 300 }, view), "contain", "all the same: stays");
 });
 
 const bytes = (...parts) => parts.flatMap(p => typeof p === "string" ? [...p].map(c => c.charCodeAt(0)) : p);
@@ -93,19 +101,56 @@ test("a folder's images in name order, numbers as numbers, hidden files left out
   assert.deepEqual(imagesIn(["img10.png", "img2.png", "notes.txt", ".hidden.png", "", "B.JPG", "a.jpeg"], isImage), ["a.jpeg", "B.JPG", "img2.png", "img10.png"]);
 });
 
-test("a strong downscale is drawn from a copy at the drawn size times the screen density, rounded up to 64 px", () => {
+test("a strong downscale's copy covers exactly the device px it is drawn on, rounded down, never more", () => {
   const tall = { width: 1504, height: 5280 };
-  assert.equal(resampleWidth(tall, 1504 * 0.28, 2), 896); // 842 device px → 896
-  assert.equal(resampleWidth(tall, 1504 * 0.28, 1), 448);
-  assert.equal(resampleWidth(tall, 1504 * 0.46, 2), null, "near its own pixels: the original");
+  assert.equal(resampleWidth(tall, 1504 * 0.28, 1), 421); // 421.1 device px → 421
+  assert.equal(resampleWidth(tall, 1504 * 0.28, 2), 842); // 842.2 → 842
+  for (const density of [1, 1.5, 2]) for (let drawn = 50; drawn < 1300; drawn += 7.3) {
+    const w = resampleWidth(tall, drawn, density);
+    if (w !== null) { assert.ok(w <= drawn * density, `${w} <= ${drawn * density}`); assert.ok(drawn * density - w < 1); }
+  }
+  assert.equal(resampleWidth(tall, 1504 * 0.92, 1), null, "near its own pixels: the original");
+  assert.equal(resampleWidth(tall, 1504 * 0.46, 2), null);
   assert.equal(resampleWidth(tall, 1504, 2), null, "100%");
   assert.equal(resampleWidth(tall, 3008, 1), null, "zoomed in");
   assert.equal(resampleWidth({ width: 4000, height: 10 }, 100, 2, "svg"), null);
   assert.equal(resampleWidth({ width: 4000, height: 10 }, 100, 2, "gif"), null);
   assert.equal(resampleWidth(null, 100), null);
   assert.equal(resampleWidth(tall, 0), null);
-  // Small moves share a copy.
-  assert.equal(resampleWidth(tall, 420, 2), resampleWidth(tall, 440, 2));
+});
+
+test("the picture is drawn at its place with its origin on whole device px", () => {
+  const p = { x: 10.3, y: -20.74, width: 421.1, height: 1478.4 };
+  assert.deepEqual(drawnAt(p, 1), { x: 10, y: -21, width: 421.1, height: 1478.4 });
+  assert.deepEqual(drawnAt(p, 2), { x: 10.5, y: -20.5, width: 421.1, height: 1478.4 });
+});
+
+test("each fit touches its walls with no gap, in odd-sized views too", () => {
+  for (const v of [view, { width: 367, height: 813 }, { width: 401.5, height: 299.25 }]) {
+    for (const img of [wide, tall, small, { width: 1504, height: 5280 }]) {
+      const w = drawnAt(place({ fit: "width" }, img, v), 2), h = drawnAt(place({ fit: "height" }, img, v), 2);
+      assert.equal(w.x, 0); assert.ok(Math.abs(w.x + w.width - v.width) < 1e-9, "width: left and right walls");
+      assert.equal(h.y, 0); assert.ok(Math.abs(h.y + h.height - v.height) < 1e-9, "height: top and bottom walls");
+      const c = place({ fit: "contain" }, img, v);
+      const touchesX = Math.abs(c.width - v.width) < 1e-9 && Math.abs(c.x) < 1e-9, touchesY = Math.abs(c.height - v.height) < 1e-9 && Math.abs(c.y) < 1e-9;
+      assert.ok(touchesX || touchesY, "contain: the limiting side's walls");
+      assert.ok(c.width <= v.width + 1e-9 && c.height <= v.height + 1e-9, "and nothing outside");
+    }
+  }
+});
+
+test("the column takes its scope's kept width, only when it has one and differs", () => {
+  assert.equal(widthToApply({ width: 500 }, 420), 500);
+  assert.equal(widthToApply({ width: 420.4 }, 420), null);
+  assert.equal(widthToApply({}, 420), null);
+  assert.equal(widthToApply(null, 420), null);
+  const live = new Set(["s1", "s2"]);
+  let all = withEntry({}, "space", "s1", live, { file: "/a.png", width: 500 });
+  all = withEntry(all, "space", "s2", live, { file: "/b.png", width: 300 });
+  assert.equal(widthToApply(scopedEntry(all, "space", "s1"), 300), 500);
+  assert.equal(widthToApply(scopedEntry(all, "space", "s2"), 500), 300);
+  all = withEntry(all, "global", "s1", live, { width: 640 });
+  assert.equal(scopedEntry(all, "global", "s2").width, 640, "global: one width");
 });
 
 test("copies are named by the source's cache id, version and width, outside cachePreview's <id>-* sweep", () => {

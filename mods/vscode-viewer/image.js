@@ -10,10 +10,10 @@
 // column's left edge resizes it (ResizeOverlay).
 import { div, svg, image } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { props, shared, setShared, spaces, theme, exec, appHome, readTextFile, pickFolder, openOverlay, closeOverlay, layout, run } from "herdr";
+import { props, shared, setShared, spaces, theme, exec, appHome, readTextFile, pickFolder, openOverlay, closeOverlay, layout, run, window } from "herdr";
 import { CACHE, pathHash, statOf, cachePreview, prune, imageExt } from "./preview.js";
-import { FITS, place, clampPan, zoomTo, zoomStep, pan, toggleFit, toggleZoom, imageSize, svgSize, imagesIn, resampleWidth, resampleName,
-  scopeOf, stateKey, scopedEntry, withEntry, viewOf, fromView } from "./imagefit.js";
+import { FITS, place, clampPan, zoomTo, zoomStep, pan, toggleFit, nextFit, FIT_NAMES, imageSize, svgSize, imagesIn, resampleWidth, resampleName,
+  scopeOf, stateKey, scopedEntry, withEntry, viewOf, fromView, drawnAt, widthToApply } from "./imagefit.js";
 
 // { file, on, at }: show this image in the panel (vscode-explorer and vscode-tabs set it; taken once, within 5 s).
 export const IMAGE_OPEN = "vscode-viewer.image-open";
@@ -23,8 +23,19 @@ const STATE = "vscode-viewer.image-panel";
 // Kept for every space and both views: the toolbar pinned (true) or hiding (default); Smooth downscales (default) or off.
 const PINNED = "vscode-viewer.image-toolbar-pinned", SMOOTH = "vscode-viewer.image-smooth";
 const ICONS = "mods/vscode-viewer/image";
-// Device px per px for the resampled copies: Herdr tells mods no scale factor, so Retina's.
-const DENSITY = 2;
+// Device px per px (the screen's backing scale), for copies drawn 1:1: Herdr tells mods none, so it is asked of macOS
+// (the main screen, again every 30 s: the window may move to another display) or Linux's GDK_SCALE; 1 otherwise.
+let density = 1, densityAt = 0;
+async function screenDensity() {
+  if (Date.now() - densityAt < 30000) return density;
+  densityAt = Date.now();
+  const platform = window()?.platform;
+  const r = platform === "macos" ? await exec("osascript", ["-l", "JavaScript", "-e", 'ObjC.import("AppKit"); $.NSScreen.mainScreen.backingScaleFactor']).catch(() => null)
+    : platform === "linux" ? await exec("sh", ["-c", 'echo "${GDK_SCALE:-1}"']).catch(() => null) : null;
+  const n = Number(r?.stdout?.trim());
+  density = r?.code === 0 && n >= 1 && n <= 4 ? n : 1;
+  return density;
+}
 const COLUMN = "image-panel"; // layouts/vscode.json's Image Viewer column
 // Here: resamples image $1 to $3 px wide as $2 (format $4), Lanczos through ImageMagick when installed, else macOS's sips;
 // exits 3 with neither (the original is drawn then). Lands whole: written aside, then renamed. Herdr's PATH may leave magick out.
@@ -56,15 +67,18 @@ export class ImagePanel {
     this.busy = null; this.error = null; this.drag = null; this.taken = null;
     this.hover = false; this.flashUntil = 0; this.width = 0;
     this.scope = "space"; this.pending = null; this.seenView = null; this.saveToken = 0;
-    // The scope setting, read now and every 2 s (the Settings dialog writes the file).
+    // The scope setting, read now and every 2 s (the Settings dialog writes the file); the screen's density too (30 s).
     cx.spawn(async cx => {
       for (;;) {
+        const before = density;
+        if ((await screenDensity()) !== before) cx.notify();
         const scope = scopeOf(await readTextFile(`${appHome()}/vscode-settings.json`).catch(() => null));
         if (scope !== this.scope) { this.scope = scope; cx.notify(); }
         await cx.sleep(2000);
       }
     });
     this.sharp = null; this.sharpWant = null; this.sharpToken = 0; // the resampled copy shown, the one asked for
+    this.widthKey = null; this.widthToken = 0; // the scope key whose width the column has
   }
 
   space() { return spaces().find(s => s.active)?.id ?? null; }
@@ -201,9 +215,31 @@ export class ImagePanel {
       const dir = `${appHome()}/${CACHE}`, [name, format] = resampleName(img.id, img.st, width, img.ext);
       const r = await exec("sh", ["-c", RESAMPLE, "sh", img.local, `${dir}/${name}`, String(width), format]).catch(() => null);
       if (r?.code !== 0 || this.img?.path !== img.path) return;
-      this.sharp = { of: img.path, path: `${CACHE}/${name}` };
+      this.sharp = { of: img.path, path: `${CACHE}/${name}`, width };
       cx.notify();
       await prune(exec, dir, [name, img.path.split("/").pop()]).catch(() => {});
+    });
+  }
+
+  // The column's width is kept per scope (the entry's `width`): a new scope key (another space, or the scope switched)
+  // gives the column that key's width, when it has one; dragging keeps the new width there (saveWidth).
+  applyWidth(cur, cx) {
+    const key = this.modal ? null : stateKey(this.scope, this.space());
+    if (!key || key === this.widthKey) return;
+    this.widthKey = key;
+    const px = widthToApply(cur, this.columnPx());
+    if (px) cx.spawn(async () => run("layout.resize", { id: COLUMN, px }));
+  }
+  columnPx() { return findNode(layout(), COLUMN)?.size?.px ?? null; }
+  // After the column's size settles (300 ms), its layout width into the entry, when it changed.
+  saveWidth(cx) {
+    if (this.modal) return;
+    const token = ++this.widthToken, key = this.widthKey;
+    cx.spawn(async cx => {
+      await cx.sleep(300);
+      const px = this.columnPx();
+      if (token !== this.widthToken || key !== this.widthKey || !px || Math.round(px) === this.current()?.width) return;
+      this.remember({ width: Math.round(px) });
     });
   }
 
@@ -240,9 +276,12 @@ export class ImagePanel {
     if (ready && this.pending) { this.state = fromView(this.pending, d, v); this.pending = null; }
     const p = ready ? place(this.state, d, v) : null;
     const smooth = shared(SMOOTH) !== false, pinned = shared(PINNED) === true;
-    const sharpWidth = ready && smooth ? resampleWidth(d, p.width, DENSITY, this.img.ext) : null;
+    const sharpWidth = ready && smooth ? resampleWidth(d, p.width, density, this.img.ext) : null;
     if (this.img) this.wantSharp(sharpWidth, cx);
-    const src = sharpWidth && this.sharp?.of === this.img?.path ? this.sharp.path : this.img?.path;
+    // The copy for this size (or an older one, until the new lands), else the original.
+    const copy = sharpWidth && this.sharp?.of === this.img?.path ? this.sharp : null;
+    const src = copy ? copy.path : this.img?.path, drawn = ready ? drawnAt(p, density) : null;
+    this.applyWidth(cur, cx);
     const button = (id, icon, label, action, { on = false, off = false } = {}) => div().id(id).size(24).flex_none().flex().items_center().justify_center().rounded(5)
       .text_color(off ? t.dim : on ? t.foreground : t.muted).when(on, el => el.bg(t.selected)).when(off, el => el.opacity(0.5))
       .when(!off, el => el.cursor_pointer().hover(s => s.bg(t.hover).text_color(t.foreground)).on_click((_e, cx) => action(cx)))
@@ -289,7 +328,12 @@ export class ImagePanel {
       .on_mouse_down("left", (e, cx) => {
         this.handle.focus();
         if (!ready) return;
-        if (e.click_count === 2) { this.drag = null; return this.setState(toggleZoom(this.state, d, v, e.local_position), cx); }
+        if (e.click_count === 2) {
+          const fit = nextFit(this.state, d, v);
+          this.drag = null; this.label = { text: FIT_NAMES[fit], until: Date.now() + 1000 };
+          cx.spawn(async cx => { await cx.sleep(1050); cx.notify(); });
+          return this.setState(toggleFit({ fit: null }, fit), cx);
+        }
         if (large) this.drag = { at: e.position, x: p.x, y: p.y };
       })
       .on_mouse_move((e, cx) => {
@@ -302,9 +346,12 @@ export class ImagePanel {
       .when(large, el => this.drag ? el.cursor_grabbing() : el.cursor_grab());
     const body = this.img
       ? ready
-        ? canvas.child(image(src).absolute().left(p.x).top(p.y).w(p.width).h(p.height))
+        ? canvas.child(image(src).absolute().left(drawn.x).top(drawn.y).w(drawn.width).h(drawn.height))
+          // The fit a double-click picked, named for a moment in the middle of the picture.
+          .when(Boolean(this.label && Date.now() < this.label.until), el => el.child(div().absolute().top(0).left(0).right(0).bottom(0).flex().items_center().justify_center()
+            .child(div().px(12).py(5).rounded(8).bg(t.popover).border_1().border_color(t.border).text_size(13).text_color(t.foreground).child(this.label.text))))
         // A size it couldn't read (TIFF, an odd file): shown whole, without zoom.
-        : canvas.child(v_flex().size_full().items_center().justify_center().p(8).child(image(this.img.path).max_w("100%").max_h("100%")))
+        : canvas.child(v_flex().size_full().items_center().justify_center().child(image(this.img.path).max_w("100%").max_h("100%")))
       : canvas.child(v_flex().size_full().items_center().justify_center().gap(8).p(20)
         .when(Boolean(this.busy || this.error), el => el.child(note(this.busy || this.error)))
         .when(!this.busy && !this.error, el => el.child(svg("mods/vscode-tabs/image.svg").size(36).text_color(t.dim))
@@ -314,26 +361,33 @@ export class ImagePanel {
             .child(svg(`${ICONS}/import.svg`).size(14)).child("Import Folder…"))));
     // A load over a shown image (or its failure) says so at the bottom without hiding the picture.
     const status = this.img && (this.busy || this.error);
-    // Pinned, the rows sit above the picture; else they lie over its top, shown while the pointer is in the view, for a
-    // moment after a new picture, and while there is none.
+    // The rows lie over the picture's top, taking no room from it (a fit touches the walls): pinned always shown, else
+    // while the pointer is in the view, for a moment after a new picture, and while there is none.
     const showBars = pinned || this.hover || !this.img || Date.now() < this.flashUntil;
-    const bars = v_flex().id("image-bars").flex_none().bg(t.background).child(title).child(tools)
-      .when(!pinned, el => el.absolute().top(0).left(0).right(0).opacity(showBars ? 0.94 : 0).transition("opacity", 160));
+    const bars = v_flex().id("image-bars").absolute().top(0).left(0).right(0).bg(t.background).child(title).child(tools)
+      .opacity(showBars ? 0.94 : 0).transition("opacity", 160);
     return v_flex().id(this.modal ? "image-modal" : "image-panel").size_full().min_h(0).relative().overflow_hidden().bg(t.background).text_color(t.foreground).text_size(13)
       .when(!this.modal, el => el.rounded(10).border_1().border_color(t.border))
-      .on_size_change((s) => { this.width = s.width; })
+      .on_size_change((s, cx) => { this.width = s.width; this.saveWidth(cx); })
       .on_hover((on, cx) => { if (on !== this.hover) { this.hover = on; cx.notify(); } })
       .on_mouse_move((_e, cx) => { if (!this.hover) { this.hover = true; cx.notify(); } })
-      .when(pinned, el => el.child(bars)).child(body).when(!pinned, el => el.child(bars))
+      .child(body).child(bars)
+      // The Explorer's card look: GPUI clips children to the rectangle only, so the picture's corners are covered by a
+      // ring in the color behind the card (inner radius 10), then the card's 1px border is drawn over it.
+      .when(!this.modal, el => el.child(div().absolute().top(-10).left(-10).right(-10).bottom(-10).rounded(20).border(10).border_color(t.canvas))
+        .child(div().absolute().top(0).left(0).right(0).bottom(0).rounded(10).border_1().border_color(t.border)))
       .when(!this.modal, el => el.child(div().id("image-resize").absolute().left(0).top(0).bottom(0).w(5).cursor_col_resize()
         .on_mouse_down("left", (e, cx) => this.startResize(e, cx))))
-      .when(Boolean(status), el => el.child(div().h(22).flex_none().px(10).flex().items_center().border_t(1).border_color(t.border).text_size(11.5).text_color(t.dim).truncate().child(status)));
+      .when(Boolean(status), el => el.child(div().absolute().left(0).right(0).bottom(0).h(22).px(10).bg(t.background).opacity(0.94).flex().items_center().border_t(1).border_color(t.border).text_size(11.5).text_color(t.dim).truncate().child(status)));
   }
 }
 
 // The column's drag-resize from its left edge (a frameless full-window overlay, props { imageResize: { x, px } }: where
 // the press was and the column's width then): the column follows the pointer within the layout's min / max
 // (layout.resize, which Herdr keeps); a release, a press or Escape ends it.
+// A layout node by id, or null.
+function findNode(n, id) { return n?.id === id ? n : (n?.children ?? []).map(c => findNode(c, id)).find(Boolean) ?? null; }
+
 export class ResizeOverlay {
   constructor(cx) {
     this.from = props().imageResize;
@@ -343,7 +397,7 @@ export class ResizeOverlay {
   }
   end() { closeOverlay(props().overlay); }
   render() {
-    const node = (function find(n) { return n?.id === COLUMN ? n : (n?.children ?? []).map(find).find(Boolean) ?? null; })(layout());
+    const node = findNode(layout(), COLUMN);
     return div().id("image-resizing").size_full().cursor_col_resize().track_focus(this.handle)
       .on_key_down((e) => { if (e.key === "escape") this.end(); })
       .on_mouse_move((e) => {
