@@ -4,7 +4,7 @@ import { spaces, panes, terminals, run, openOverlay, closeOverlay, props, theme,
 import { tabFileOf, dirtyTabs, TAB_MENU, withDetails, DETAILS } from "./tabfile.js";
 import { createTabCloser, signalCommand, CLOSE_REQUEST } from "./close.js";
 import { createMover, withViewer, fileByName, MOVE_REQUEST, VIEWER_FILES } from "./move.js";
-import { reconcileSide } from "./side.js";
+import { reconcileSide, sideMax } from "./side.js";
 import { find, dragStarted, panesRect, headersRect, paneRects, dropTarget, dropZone, zoneRect, dragSource, panelButtonRect, DRAG_BACK } from "./drag.js";
 // side.js' remembered width of the side panel while it is hidden (shared values outlive a restart).
 const PANEL_WIDTH = "vscode-tabs.panel-width";
@@ -128,6 +128,7 @@ export default class Tabs extends View {
     this.closeAt = null; // the tab menu's last close request taken (close.js CLOSE_REQUEST)
     this.moveAt = null; // the menus' last move request taken (move.js MOVE_REQUEST)
     this.side = null; // side.js reconcileSide's `seen`
+    this.work = null; // the bar's width: the work column's, for side.js sideMax
     // A render may not follow a layout change made elsewhere (the Explorer's menu, cmd-e, a gutter drag): a timer too.
     cx.spawn(async (cx) => {
       for (;;) {
@@ -162,7 +163,7 @@ export default class Tabs extends View {
   // The `side` row's width follows the side panel and the Image Viewer column showing or hiding (side.js).
   sideAsked(cx) {
     const kept = shared(PANEL_WIDTH), mem = Number.isFinite(kept) ? kept : null;
-    const r = reconcileSide(layout(), this.side, mem, Date.now());
+    const tree = layout(), r = reconcileSide(tree, this.side, mem, Date.now(), sideMax(tree, this.work));
     this.side = r.seen;
     if (!r.commands.length && r.mem === mem) return;
     cx.spawn(async () => {
@@ -257,6 +258,7 @@ export default class Tabs extends View {
         }).child(svg(icon).size(18));
     };
     return h_flex().size_full().min_w(0).px(10).pl(lightsPadding).gap(3).items_center().bg(t.chrome).border_b(1).border_color(t.border)
+      .on_size_change((s) => { this.work = s.width; })
       .on_mouse_up("left", (_e, cx) => { this.pressed = null; this.press = null; if (this.dragging) { this.dragging = false; cx.notify(); } })
       // A press on a tab dragged past THRESHOLD is a drag (the tab dims); leaving the bar hands it to the overlay.
       .on_mouse_move((e, cx) => {
