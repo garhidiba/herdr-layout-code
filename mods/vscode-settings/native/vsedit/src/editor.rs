@@ -3829,6 +3829,25 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_drag_held_past_the_right_edge_onto_a_short_line_rests_on_its_end_without_shaking() {
+        let xs = "x".repeat(200);
+        let mut ed = wrapped(&[xs.as_str(), "short"], "off", 10, 60);
+        screen(&mut ed);
+        let (gw, right) = (ed.gutter() as i32, (ed.gutter() + ed.text_width()) as i32);
+        let m = |x, y, motion| crate::keys::Mouse { button: 0, x, y, motion, ..Default::default() };
+        ed.mouse(&m(gw + 10, 2, false), None);
+        ed.mouse(&m(right + 1, 2, true), None);
+        for _ in 0..30 {
+            ed.drag_step(); // the auto-scroll timer
+        }
+        assert!(ed.left > 50, "held past the edge, the long line scrolls");
+        ed.mouse(&m(right + 1, 3, true), None);
+        let lefts: Vec<usize> = (0..6).map(|_| (ed.drag_step(), ed.left).1).collect();
+        assert_eq!(ed.head(), pos(1, 5));
+        assert!(lefts.iter().all(|&l| l == lefts[0] && l <= 5), "the view rests on the short line's end: {lefts:?}");
+    }
+
+    #[test]
     fn toggle_word_wrap_and_the_status_item_switch_wrapping_for_this_file() {
         let line = "alpha beta gamma delta epsilon zeta eta theta ".repeat(3);
         let mut ed = wrapped(&[line.as_str()], "off", 8, 70);

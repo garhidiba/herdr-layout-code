@@ -1023,15 +1023,15 @@ impl Editor {
         if dy != 0 {
             self.scroll_by(dy as i64, None);
         }
-        if dx != 0 {
-            let h = self.height();
-            let widest = self.widest(self.top, h);
-            let max = self.left.max((widest + 5).saturating_sub(self.text_width()));
-            self.left = (self.left as i64 + dx as i64 * 2).clamp(0, max as i64) as usize;
-        }
         let gw = self.gutter() as i32;
         let px = x.clamp(gw + 1, gw + self.text_width() as i32);
         let py = y.clamp(2, self.height() as i32 + 1);
+        if dx != 0 {
+            // only as far as the pointer's line goes (VS Code): past a short line's end it would fight reveal below
+            let line = self.cell_to_pos(px, py).line;
+            let max = self.left.max((self.widest(line, 1) + 5).saturating_sub(self.text_width()));
+            self.left = (self.left as i64 + dx as i64 * 2).clamp(0, max as i64) as usize;
+        }
         let p = self.cell_to_pos(px, py);
         self.sel = Sel { anchor: self.sel.anchor, head: p };
         self.reveal(); // a head left of the view (a short line's end) brings it back, as VS Code does

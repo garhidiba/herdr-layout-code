@@ -749,6 +749,7 @@ def run_drag_reveal(tmp):
     t.out = b""
     t.send("\x1b[<0;50;2M")                        # press on line 1
     t.send("\x1b[<32;50;3M", wait=0.3)             # drag onto line 2, right of its end
+    assert re.search(r"2  s?hort", plain(t)), "the view did not scroll back while dragging: " + plain(t)[-300:]
     t.send("\x1b[<0;50;3m", wait=0.3)
     assert t.read("Ln 2, Col 6"), "drag did not land at the short line's end: " + plain(t)[-200:]
     assert re.search(r"2  s?hort", plain(t)), "the view did not scroll back to the caret: " + plain(t)[-300:]   # the keys' 4-column margin
@@ -759,6 +760,14 @@ def run_drag_reveal(tmp):
         t.send(key, wait=0.3)
         assert t.read("Ln 2, Col 6"), label + " did not land at the short line's end: " + plain(t)[-200:]
         assert re.search(r"2  s?hort", plain(t)), label + " did not scroll back to the caret: " + plain(t)[-300:]
+    t.send("\x1b[A\x1b[H", wait=0.3)               # back to line 1's start
+    t.send("\x1b[<0;50;2M")
+    t.send("\x1b[<32;100;2M", wait=0.6)            # held past the right edge: line 1 auto-scrolls
+    t.out = b""
+    t.send("\x1b[<32;100;3M", wait=0.6)            # down onto line 2, still past the edge, held (the timer keeps ticking)
+    shown = set(re.findall(r"\b2  (\w*)", plain(t)))
+    assert shown and shown <= {"hort", "short"}, "the view shook or left the short line while held past the edge: " + repr(shown)
+    t.send("\x1b[<0;100;3m", wait=0.3)
     t.send(QUIT)
     assert t.wait_exit() == 0
     print("drag onto a short line reveals the caret: ok")

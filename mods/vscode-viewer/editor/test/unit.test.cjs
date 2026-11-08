@@ -1994,6 +1994,25 @@ test("scrolled right, a drag or double-click onto a short line reveals the selec
   ed.stopDragScroll();
 });
 
+test("a drag held past the right edge onto a short line rests on its end without shaking", async () => {
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "vsedit-dragedge-")), "a.txt");
+  fs.writeFileSync(file, "x".repeat(200) + "\nshort");
+  const ed = new Editor(file, F.load(file), await H.loadGrammar(null), H.loadTheme(), null);
+  ed.rows = 10; ed.cols = 60;
+  ed.render(0);
+  const right = ed.gutter + ed.textWidth;
+  click(ed, ed.gutter + 10, 2);
+  ed.handle({ type: "mouse", button: 0, x: right + 1, y: 2, release: false, motion: true });
+  ed.stopDragScroll(); // the test ticks it
+  for (let i = 0; i < 30; i++) ed.dragStep();
+  assert.ok(ed.left > 50, "held past the edge, the long line scrolls");
+  ed.handle({ type: "mouse", button: 0, x: right + 1, y: 3, release: false, motion: true });
+  ed.stopDragScroll();
+  const lefts = Array.from({ length: 6 }, () => (ed.dragStep(), ed.left));
+  assert.deepEqual(ed.sel.head, { line: 1, col: 5 });
+  assert.ok(lefts.every((l) => l === lefts[0] && l <= 5), "the view rests on the short line's end: " + lefts);
+});
+
 test("scrolled right, Up / Down, Shift+Up / Down and Page Up / Down onto a short line scroll back left to the caret", async () => {
   const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "vsedit-keyreveal-")), "a.txt");
   fs.writeFileSync(file, "x".repeat(200) + "\nshort\n" + "y".repeat(200) + "\n한글탭\tz");

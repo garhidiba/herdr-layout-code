@@ -1832,8 +1832,10 @@ class Editor {
   dragStep() {
     const { x, y } = this.drag, { dx, dy } = this.dragOverflow(x, y);
     if (dy) this.scrollBy(dy);
-    if (dx) this.left = Math.max(0, Math.min(this.left + dx * 2, Math.max(this.left, this.widest(this.top, this.height) - this.textWidth + 5)));
-    const p = this.cellToPos(Math.max(this.gutter + 1, Math.min(x, this.gutter + this.textWidth)), Math.max(2, Math.min(y, this.height + 1)));
+    const px = Math.max(this.gutter + 1, Math.min(x, this.gutter + this.textWidth)), py = Math.max(2, Math.min(y, this.height + 1));
+    // only as far as the pointer's line goes (VS Code): past a short line's end it would fight reveal below
+    if (dx) this.left = Math.max(0, Math.min(this.left + dx * 2, Math.max(this.left, this.widest(this.cellToPos(px, py).line, 1) - this.textWidth + 5)));
+    const p = this.cellToPos(px, py);
     this.sel = { anchor: this.sel.anchor, head: p };
     this.reveal(); // a head left of the view (a short line's end) brings it back, as VS Code does
     return !!(dx || dy);
