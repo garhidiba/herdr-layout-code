@@ -5,6 +5,8 @@
 // without one too) or, with NUL bytes, the hex viewer.
 const PREVIEW_EXT = /\.(png|jpe?g|gif|webp|bmp|ico|svg|tiff?|mp4|m4v|mov|webm|mkv|avi)$/i;
 const MARKDOWN_EXT = /\.(md|markdown|mdx|mkd)$/i;
+// What vscode-viewer's image panel shows (its preview.js IMAGES).
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|ico|svg|tiff?)$/i;
 // The editor launcher: the Rust editor when vscode-settings.json picks it (and it is built), else vsedit.cjs.
 export const EDITOR = "mods/vscode-viewer/editor/vsedit.sh";
 
@@ -14,6 +16,7 @@ export const parentOf = (p) => p.slice(0, p.lastIndexOf("/")) || "/";
 // Whether a file opens in the terminal editor (else the viewer): all but images and videos, or when asked.
 export const wantsEditor = (file, how = "auto") => how === "editor" || (how === "auto" && !PREVIEW_EXT.test(baseName(file)));
 export const isMarkdown = (file) => MARKDOWN_EXT.test(baseName(file));
+export const isImage = (file) => IMAGE_EXT.test(baseName(file));
 
 // tab.new args: the terminal editor (started in `folder`, default the file's own), or the vscode-viewer tab
 // (images, videos, Open Preview, or when asked). Every way of opening a file goes through here, the remote ones too:
@@ -129,10 +132,11 @@ export function nameProblem(name, taken) {
 
 // Context menu rows: [label, action, hint] or "-" for a separator. A remote entry has the same items but Reveal in
 // Finder: Finder only sees this computer, and Copy Path already gives the remote path. Markdown adds Open Preview.
-export function menuItems({ dir, remote, canPaste, markdown = false }) {
+export function menuItems({ dir, remote, canPaste, markdown = false, image = false }) {
   const groups = [
     dir ? [["New File…", "newFile"], ["New Folder…", "newFolder"]]
-      : [["Open", "open"], ["Open to the Side", "openSide", "⌘↵"], ...(markdown ? [["Open Preview", "preview"]] : []), ["Open With…", "openWith"]],
+      : [["Open", "open"], ["Open to the Side", "openSide", "⌘↵"], ...(markdown ? [["Open Preview", "preview"]] : []),
+        ...(image ? [["Open in Image Panel", "imagePanel"]] : []), ["Open With…", "openWith"]],
     [...(remote ? [] : [["Reveal in Finder", "reveal", "⌥⌘R"]]), ["Open in Integrated Terminal", "terminal"]],
     [["Cut", "cut", "⌘X"], ["Copy", "copy", "⌘C"], ...(canPaste ? [["Paste", "paste", "⌘V"]] : [])],
     [["Copy Path", "copyPath", "⌥⌘C"], ["Copy Relative Path", "copyRelative", "⇧⌥⌘C"]],

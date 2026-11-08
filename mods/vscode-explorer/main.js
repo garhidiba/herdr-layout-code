@@ -7,11 +7,11 @@ import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { spaces, panes, focused, terminals, exec, hc, readTextFile, watchFolder, theme, window, appHome, props, shared, setShared, notify, nextCommand, openOverlay } from "herdr";
 import { freshRoot, encode, decode } from "./cache.js";
-import { ExplorerMenu, ExplorerDialog, TabMenu, openMenu, openInCode, explorerAction, refreshKey, openFile, splitOpen, remote, warm, REVEAL, terminalRows } from "./menu.js";
+import { ExplorerMenu, ExplorerDialog, TabMenu, openMenu, openInCode, explorerAction, refreshKey, openFile, splitOpen, remote, warm, REVEAL, terminalRows, IMAGE_OPEN } from "./menu.js";
 import { OPEN_AT } from "./split.js";
 import { WARM } from "./warm.js";
 import { createCore } from "./core.js";
-import { editorFileOf, autoRevealOf, revealPath, within, DETAILS } from "./paths.js";
+import { editorFileOf, autoRevealOf, revealPath, within, isImage, DETAILS } from "./paths.js";
 import { treeAction, step } from "./keys.js";
 import { keysOs } from "./remote.js";
 import { ROW, clampTop, rowAt, shown, scrollToShow, dragStarted, dropFolder, dragTarget, targetRange } from "./dnd.js";
@@ -476,14 +476,15 @@ export default class Files extends View {
   }
 
   // A file dragged out of the tree toward the panes: vscode-tabs' drag overlay takes it over (its drag.js props), a drop
-  // on a pane asks OPEN_AT (split.js), the pointer back over the rows hands it back here (DRAG_BACK). Folders don't
-  // leave the tree: that cancels, as before.
+  // on a pane asks OPEN_AT (split.js), the pointer back over the rows hands it back here (DRAG_BACK); an image may also
+  // drop on the panel's Image Viewer button (`image`: IMAGE_OPEN). Folders don't leave the tree: that cancels, as before.
   dragOut(cx) {
     const p = this.pressed, into = spaces().find(s => s.active)?.tabs.find(t => t.active)?.id;
     if (!p?.dragging || p.row.dir || !this.root || !into || !this.rowsBounds) return this.cancelDrag(cx);
     p.out = Date.now(); p.folder = null;
     openOverlay({ mod: "vscode-tabs", kind: "window", frame: "none", at: { x: 0, y: 0 }, width: 1, height: 1, props: { drag: {
-      source: { file: p.row.abs, on: this.on, folder: this.root }, request: OPEN_AT, into, title: p.row.name, back: this.rowsBounds, id: p.out } } });
+      source: { file: p.row.abs, on: this.on, folder: this.root }, request: OPEN_AT, into, title: p.row.name, back: this.rowsBounds, id: p.out,
+      ...(isImage(p.row.abs) ? { image: IMAGE_OPEN } : {}) } } });
     cx.notify();
   }
 

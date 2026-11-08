@@ -5,7 +5,7 @@ import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { exec, hc, run, spaces, panes, terminals, machines, props, openOverlay, closeOverlay, theme, shared, setShared, appHome, home, readTextFile, writeTextFile, notify, window } from "herdr";
 import { createOpenTab, noteViewer } from "./launch.js";
 import { createWarmPool, TIMING } from "./warm.js";
-import { menuItems, menuHeight, openWith, baseName, parentOf, relativeTo, nameProblem, vscodeRemoteArgs, isMarkdown, editorPaneOf,
+import { menuItems, menuHeight, openWith, baseName, parentOf, relativeTo, nameProblem, vscodeRemoteArgs, isMarkdown, isImage, editorPaneOf,
   tabMenuItems, moveRows, outRows, moveOf, closeArgs, fileTabs, splitArgs, clipboardCommand, revealCommand, withDetails, deleteTitle, extraLines, closesForDeleted, DETAILS } from "./paths.js";
 import { createOps } from "./ops.js";
 import { createSplitOpen } from "./split.js";
@@ -79,9 +79,18 @@ const copyText = (text) => osRun(clipboardCommand(os(), text)).catch(() => {});
 // Finder's Trash (or the `trash` command when installed); never rm.
 const TRASH = 'if command -v trash >/dev/null 2>&1; then trash "$1"; else osascript -e "on run argv" -e "tell application \\"Finder\\" to delete POSIX file (item 1 of argv)" -e "end run" "$1" >/dev/null; fi';
 
+// vscode-viewer's image.js IMAGE_OPEN: { file, on, at } shows that image in the side panel's Image Viewer (its `image`
+// child of the panel stack), as vscode-tabs' drag overlay does for a file dropped on the panel's button.
+export const IMAGE_OPEN = "vscode-viewer.image-open";
+export function openInImagePanel(file, on) {
+  setShared(IMAGE_OPEN, { file, on: on ?? null, at: Date.now() });
+  run("layout.select", { stack: "panel-body", child: "image" });
+  run("layout.show", { id: "panel" });
+}
+
 // Opens the menu for an entry: { path (absolute), root, dir, on }.
 export function openMenu(target) {
-  const rows = menuItems({ dir: target.dir, remote: !!target.on, canPaste: !!shared(CLIPBOARD), markdown: isMarkdown(target.path) });
+  const rows = menuItems({ dir: target.dir, remote: !!target.on, canPaste: !!shared(CLIPBOARD), markdown: isMarkdown(target.path), image: !target.dir && isImage(target.path) });
   openOverlay({ mod: "vscode-explorer", kind: "popup", width: 270, height: menuHeight(rows), props: { menu: target } });
 }
 
@@ -141,7 +150,7 @@ export class ExplorerMenu {
 
   rows() {
     const t = this.target;
-    return this.withList ? openWith(!!t.on) : menuItems({ dir: t.dir, remote: !!t.on, canPaste: !!shared(CLIPBOARD), markdown: isMarkdown(t.path) });
+    return this.withList ? openWith(!!t.on) : menuItems({ dir: t.dir, remote: !!t.on, canPaste: !!shared(CLIPBOARD), markdown: isMarkdown(t.path), image: !t.dir && isImage(t.path) });
   }
 
   close() { closeOverlay(props().overlay); }
@@ -154,6 +163,7 @@ export class ExplorerMenu {
     if (action === "open") return open("auto");
     if (action === "openSide") return open("auto", "right");
     if (action === "preview") return open("viewer");
+    if (action === "imagePanel") { this.close(); return openInImagePanel(t.path, t.on); }
     if (action === "editor" || action === "viewer") return open(action);
     this.close();
     return explorerAction(action, t);

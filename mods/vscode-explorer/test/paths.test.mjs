@@ -1,7 +1,7 @@
 // node --test mods/vscode-explorer/test/paths.test.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
-import { openArgs, wantsEditor, isMarkdown, relativeTo, within, copyName, freeName, nameProblem, menuItems, menuHeight, parentOf, openWith, vscodeRemoteArgs, editorFileOf, autoRevealOf, revealPath, normalPath, editorTabOf, editorPaneOf, deleteTitle, extraLines, closesForDeleted } from "../paths.js";
+import { openArgs, wantsEditor, isMarkdown, isImage, relativeTo, within, copyName, freeName, nameProblem, menuItems, menuHeight, parentOf, openWith, vscodeRemoteArgs, editorFileOf, autoRevealOf, revealPath, normalPath, editorTabOf, editorPaneOf, deleteTitle, extraLines, closesForDeleted } from "../paths.js";
 
 test("a dialog grows by the lines a long file name wraps onto, and not for a short one", () => {
   assert.equal(deleteTitle("/p/Invoice-44K7PLUN-0001 copy 2.pdf"), "Are you sure you want to delete 'Invoice-44K7PLUN-0001 copy 2.pdf'?");
@@ -94,6 +94,7 @@ test("the menu groups items like VS Code; a remote entry has every item but Reve
     "New File…", "New Folder…", "-", "Open in Integrated Terminal", "-", "Cut", "Copy", "Paste", "-",
     "Copy Path", "Copy Relative Path", "-", "Rename…", "Delete"]);
   assert.deepEqual(labels(menuItems({ dir: false, remote: false, canPaste: false, markdown: true })).slice(0, 4), ["Open", "Open to the Side", "Open Preview", "Open With…"]);
+  assert.deepEqual(labels(menuItems({ dir: false, remote: true, canPaste: false, image: true })).slice(0, 4), ["Open", "Open to the Side", "Open in Image Panel", "Open With…"]);
   assert.deepEqual(labels(menuItems({ dir: false, remote: true, canPaste: false })), [
     "Open", "Open to the Side", "Open With…", "-", "Open in Integrated Terminal", "-", "Cut", "Copy", "-",
     "Copy Path", "Copy Relative Path", "-", "Rename…", "Delete"]);
@@ -212,4 +213,9 @@ test("deleting a file or a folder closes the panes showing it, and their tab whe
     [["tab.close", { id: "d" }]], "a viewer known only as the focused one");
   assert.deepEqual(of("/p/src/cat.png", "box"), [], "a viewer of this computer's file, not box's");
   assert.deepEqual(of("/p/none.ts"), []);
+});
+
+test("the image panel takes the viewer's image formats, not videos or other files", () => {
+  assert.deepEqual(["a.PNG", "b.jpeg", "c.svg", "d.tif", "e.webp"].map(isImage), [true, true, true, true, true]);
+  assert.deepEqual(["a.mp4", "png", "a.png.txt", "notes.md"].map(isImage), [false, false, false, false]);
 });
