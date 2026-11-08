@@ -5,9 +5,10 @@
 // DragOverlay). Pure rules, window coordinates (logical px). No Herdr imports, so node tests load it.
 
 // The overlay's props, one shape for every drag source (the tab bar, vscode-explorer's tree): { drag: { source, request,
-// into, title, bar?, back?, id? } }. A release over a pane sets the shared value `request` to { ...source, into: the
+// into, title, bar?, back?, id?, image? } }. A release over a pane sets the shared value `request` to { ...source, into: the
 // shown tab, place: the zone, beside: that pane, at } for the source's mod to run (a tab: move.js MOVE_REQUEST; a file:
-// vscode-explorer's split.js). `bar`: the tab bar's bounds (panesRect), else the area comes from the pane headers
+// vscode-explorer's split.js). `image`: an image file's other target, the Image Viewer's panel button: a release there
+// sets that shared value (vscode-viewer's IMAGE_OPEN) to { ...source, at } and shows the panel. `bar`: the tab bar's bounds (panesRect), else the area comes from the pane headers
 // (headersRect). `back`: window bounds the drag may return to (the tree): the pointer over them closes the overlay and
 // sets DRAG_BACK to `id`, so the source picks its drag up again (a drop into a folder there).
 export const DRAG_BACK = "vscode-tabs.drag-back";
@@ -65,6 +66,16 @@ export function paneRects(headers, ids, area, gap = 8) {
     const bottom = Math.min(area.y + area.height, ...below);
     return { pane: h.pane, x: h.x, y: h.y, width: h.width, height: Math.max(0, bottom - h.y) };
   });
+}
+
+// The tab bar's panel button `id` in the window (main.js draws them at the bar's right end, `shown` in that order, then
+// the window buttons when `winButtons`): 28px squares 3px apart, inside the bar's 10px right padding, centered in the
+// bar (layouts/vscode.json's `tabs` block, at the window's top right, less its 1px bottom border). null when not shown.
+export function panelButtonRect(win, tree, shown, id, winButtons = false) {
+  const i = shown.indexOf(id), bar = find(tree, "tabs")?.size?.px;
+  if (i < 0 || !win || !bar) return null;
+  const right = win.width - 10 - (winButtons ? 3 * (26 + 3) : 0) - (shown.length - 1 - i) * (28 + 3);
+  return { x: right - 28, y: (bar - 1 - 28) / 2, width: 28, height: 28 };
 }
 
 // Where a drag over the panes lands: the pane under `pos` (`rects`: paneRects) and its zone, splitting that pane; with

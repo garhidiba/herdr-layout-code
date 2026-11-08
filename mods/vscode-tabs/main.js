@@ -4,9 +4,22 @@ import { spaces, panes, terminals, run, openOverlay, closeOverlay, props, theme,
 import { tabFileOf, dirtyTabs, TAB_MENU, withDetails, DETAILS } from "./tabfile.js";
 import { createTabCloser, signalCommand, CLOSE_REQUEST } from "./close.js";
 import { createMover, withViewer, fileByName, MOVE_REQUEST, VIEWER_FILES } from "./move.js";
-import { find, dragStarted, panesRect, headersRect, paneRects, dropTarget, dropZone, zoneRect, dragSource, DRAG_BACK } from "./drag.js";
+import { find, dragStarted, panesRect, headersRect, paneRects, dropTarget, dropZone, zoneRect, dragSource, panelButtonRect, DRAG_BACK } from "./drag.js";
 // vscode-pane's { [pane]: bounds }: where each shown pane's header is, for dropping onto one pane.
 const PANE_BOUNDS = "vscode-pane.bounds";
+
+// The side panel's pages, as the bar's buttons show them (left to right): [id, label, icon].
+const PANELS = [
+  ["explorer", "Explorer", "mods/vscode-tabs/files.svg"],
+  ["changes", "Source Control", "mods/vscode-tabs/source-control.svg"],
+  ["image", "Image Viewer", "mods/vscode-tabs/image.svg"],
+];
+// The pages with a button: the shared `workspace.panels`. An empty saved list (left by an uninstalled layout) would hide
+// every panel button; treat it as unset.
+function shownPanels() {
+  const saved = shared("workspace.panels"), enabled = saved?.length ? saved : ["explorer", "changes", "image"];
+  return PANELS.filter(([id]) => enabled.includes(id));
+}
 
 // Asks the editor in terminal `address` to close (close.js): its first process from hc, signalled on its machine.
 async function requestClose(address) {
@@ -54,8 +67,16 @@ class DragOverlay {
     return area && dropTarget(paneRects(headers, ids, area), area, pos);
   }
 
+  // An image's other target, the Image Viewer's panel button (drag.js panelButtonRect), and whether `pos` is on it.
+  imageButton(pos) {
+    if (!this.drag.image || !this.win) return null;
+    const rect = panelButtonRect(this.win, layout(), shownPanels().map(([id]) => id), "image", window()?.buttons);
+    const near = rect && { x: rect.x - 4, y: rect.y - 4, width: rect.width + 8, height: rect.height + 8 };
+    return rect && { rect, over: Boolean(pos && dropZone(near, pos)) };
+  }
+
   render() {
-    const t = theme(), d = this.drag, hit = this.target(this.pos);
+    const t = theme(), d = this.drag, button = this.imageButton(this.pos), hit = button?.over ? null : this.target(this.pos);
     const area = hit && zoneRect(hit.rect, hit.zone);
     const box = (r) => div().absolute().left(r.x).top(r.y).w(r.width).h(r.height);
     return div().id("tab-drag").size_full().relative().track_focus(this.handle)
@@ -66,6 +87,12 @@ class DragOverlay {
         this.pos = e.position; cx.notify();
       })
       .on_mouse_up("left", (e) => {
+        if (this.imageButton(e.position)?.over) {
+          setShared(d.image, { ...d.source, at: Date.now() });
+          run("layout.select", { stack: "panel-body", child: "image" });
+          run("layout.show", { id: "panel" });
+          return this.end();
+        }
         const drop = this.target(e.position);
         if (drop && d.request) setShared(d.request, { ...d.source, into: d.into, place: drop.zone, beside: drop.beside, at: Date.now() });
         this.end();
@@ -73,8 +100,11 @@ class DragOverlay {
       .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.end(); })
       .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); this.end(); })
       .when(Boolean(area), el => el.child(box(area).bg(t.accent).opacity(0.2)).child(box(area).border(2).border_color(t.accent).rounded(4)))
+      // While an image is dragged its button is ringed; on it, filled.
+      .when(Boolean(button), el => el.when(button.over, el => el.child(box(button.rect).bg(t.accent).opacity(0.25).rounded(6)))
+        .child(box(button.rect).border(2).border_color(t.accent).rounded(6)))
       .when(Boolean(this.pos), el => el.child(div().absolute().left(this.pos.x + 12).top(this.pos.y + 10).px(8).py(3).rounded(6)
-        .bg(t.raised).border(1).border_color(t.border).text_size(12.8).text_color(t.foreground).child(d.title)));
+        .bg(t.raised).border(1).border_color(t.border).text_size(12.8).text_color(t.foreground).child(button?.over ? `Open ${d.title} in Image Viewer` : d.title)));
   }
 }
 
@@ -180,8 +210,6 @@ export default class Tabs extends View {
       ? Math.max(10, (root.traffic_lights[0] + 64) / settings().zoom - (sidebar?.hidden ? 0 : sidebar?.size?.px ?? 0))
       : 10;
     const panel = find(root, "panel"), body = find(root, "panel-body");
-    // An empty saved list (left by an uninstalled layout) would hide every panel button; treat it as unset.
-    const saved = shared("workspace.panels"), enabled = (saved?.length ? saved : ["explorer", "changes"]).filter(id => id !== "files");
     // Icon-only, as VS Code's Activity Bar: the label is the tooltip; the shown view gets the foreground color and an accent underline.
     const panelButton = (id, label, icon) => {
       const on = panel && !panel.hidden && body?.active === id;
@@ -205,9 +233,7 @@ export default class Tabs extends View {
       .on_scroll_wheel(e => { if (Math.abs(e.delta.y) >= 1) run(e.delta.y > 0 ? "tab.prev" : "tab.next"); })
       .child(h_flex().id("tab-scroll").flex_1().min_w(0).h_full().items_center().gap(3).overflow_x_scrollbar().children(shown.map(item)))
       .child(button("tab-new", "+", () => openOverlay({ mod: "new-menu", kind: "popup", width: 250, height: 512 })))
-      .when(enabled.includes("explorer"), el => el.child(panelButton("explorer", "Explorer", "mods/vscode-tabs/files.svg")))
-      .when(enabled.includes("files"), el => el.child(panelButton("files", "Files", "mods/files/file.svg")))
-      .when(enabled.includes("changes"), el => el.child(panelButton("changes", "Source Control", "mods/vscode-tabs/source-control.svg")))
+      .children(shownPanels().map(([id, label, icon]) => panelButton(id, label, icon)))
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/vscode-tabs/win-min.svg").size(16) : "−", () => run("window.minimize")))
         .child(button("maximize", w.platform === "windows" ? svg(`mods/vscode-tabs/${w.maximized ? "win-restore" : "win-max"}.svg`).size(16) : "□", () => run("window.maximize")))
         .child(button("close-window", w.platform === "windows" ? svg("mods/vscode-tabs/win-close.svg").size(16) : svg("mods/pane/close.svg").size(13), () => run("window.close"))));

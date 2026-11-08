@@ -3,7 +3,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { dragStarted, panesRect, headersRect, paneRects, dropTarget, dropZone, zoneRect, dragSource, find } from "../drag.js";
+import { dragStarted, panesRect, headersRect, paneRects, dropTarget, dropZone, zoneRect, dragSource, panelButtonRect, find } from "../drag.js";
 
 // layouts/vscode.json as shipped: work-body padding 8, gap 8; the side panel 368px, shown; the status bar 28px.
 const shipped = JSON.parse(readFileSync(new URL("../../../layouts/vscode.json", import.meta.url), "utf8"));
@@ -100,4 +100,13 @@ test("a drag from the Explorer (no tab bar bounds) takes the box around the show
   assert.deepEqual(headersRect(headers, ["a", "b"], win, shipped), { x: 276, y: 50, width: 620, height: 714 });
   assert.equal(headersRect(headers, ["c"], win, shipped), null, "no header known: no drop zones");
   assert.equal(headersRect(undefined, ["a"], win, shipped), null);
+});
+
+test("the Image Viewer button sits at the bar's right end, left of the window buttons when drawn", () => {
+  const win = { width: 1400, height: 900 }, shown = ["explorer", "changes", "image"];
+  assert.deepEqual(panelButtonRect(win, shipped, shown, "image"), { x: 1400 - 10 - 28, y: 6.5, width: 28, height: 28 });
+  assert.equal(panelButtonRect(win, shipped, shown, "image", true).x, 1400 - 10 - 87 - 28);
+  assert.equal(panelButtonRect(win, shipped, shown, "explorer").x, 1400 - 10 - 2 * 31 - 28);
+  assert.equal(panelButtonRect(win, shipped, ["explorer"], "image"), null);
+  assert.equal(panelButtonRect(null, shipped, shown, "image"), null);
 });
