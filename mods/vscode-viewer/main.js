@@ -11,6 +11,7 @@ import { View, div, image, PathBuilder, Background } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState, TextView } from "gpui-base";
 import { props, readTextFile, writeTextFile, exec, theme, appHome, nextCommand, focused, panes, spaces, run, shared, setShared } from "herdr";
 import { CACHE, IMAGES, pathHash, statOf as statOn, cachePreview } from "./preview.js";
+import { ImagePanel } from "./image.js";
 import { ownPane, closeOwnArgs } from "./pane.js";
 import { htmlToMarkdown } from "./html.js";
 // Herdr starts with PATH=/usr/bin:/bin, so Homebrew/user tools (node, code, codex, trash) are looked up here too.
@@ -113,6 +114,8 @@ function facts(text) {
 
 export default class Viewer extends View {
   init(given, cx) {
+    // The side panel's Image Viewer and its zoom dialog are this mod too (image.js), sharing its preview cache.
+    if (props()?.imagePanel || props()?.imageModal) return void (this.imageView = new ImagePanel(cx));
     const p = { ...props(), ...given };
     this.file = p.file; this.on = p.on ?? null; this.install = p.on && p.install ? "offer" : null;
     this.text = null;          // what is on disk, as last read or written
@@ -320,7 +323,8 @@ export default class Viewer extends View {
     return Editor.new(this.code).flex_1().min_h(0).bg(EDITOR_BG).text_color(EDITOR_FG);
   }
 
-  render() {
+  render(cx) {
+    if (this.imageView) return this.imageView.render(cx);
     const t = theme(), text = this.kind !== "image" && this.kind !== "video", parts = (this.file ?? "").split("/").filter(Boolean), name = parts[parts.length - 1] ?? "";
     // Ghost buttons like VS Code's editor actions: no fill until hovered or active.
     const button = (id, label, onClick, on = false) => div().id(id).px(7).h(22).flex().items_center().rounded(4).cursor_pointer().text_size(11.5)
