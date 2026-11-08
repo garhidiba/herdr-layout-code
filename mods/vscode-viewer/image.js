@@ -6,7 +6,7 @@
 // drag overlay), a drop from Finder, or Import (Herdr has only a folder picker: the folder's first image, then ‹ ›).
 // Pictures go through the viewer's preview cache (preview.js cachePreview; a remote space's file is fetched first),
 // the placing rules are imagefit.js'. A strong downscale is drawn from a resampled copy (Smooth, the default; imagefit.js
-// resampleWidth). The two toolbar rows hide while the pointer is away (over the picture, fading), unless pinned. The
+// resampleWidth). The two toolbar rows show and hide over the picture with a delay (toolbar.js), unless pinned. The
 // column shares the layout's `side` row with the side panel, so Herdr's own gutter between them trades their widths.
 import { div, svg, image } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
@@ -14,6 +14,7 @@ import { props, shared, setShared, spaces, theme, exec, appHome, readTextFile, p
 import { CACHE, pathHash, statOf, cachePreview, prune, imageExt } from "./preview.js";
 import { FITS, place, clampPan, zoomTo, zoomStep, pan, toggleFit, nextFit, FIT_NAMES, imageSize, svgSize, imagesIn, resampleWidth, resampleName,
   scopeOf, stateKey, scopedEntry, withEntry, viewOf, fromView, drawnAt, widthToApply } from "./imagefit.js";
+import { barsStart, barsShown, barsTick, barsMove, barsLeave, barsOver, barsNext } from "./toolbar.js";
 
 // { file, on, at }: show this image in the panel (vscode-explorer and vscode-tabs set it; taken once, within 5 s).
 export const IMAGE_OPEN = "vscode-viewer.image-open";
@@ -66,7 +67,7 @@ export class ImagePanel {
     this.view = null;     // the picture area's size
     this.list = null;     // { folder, on, names }: the images beside it
     this.busy = null; this.error = null; this.drag = null; this.taken = null;
-    this.hover = false; this.flashUntil = 0;
+    this.bars = barsStart(); this.barsDue = 0; this.flashUntil = 0; // toolbar.js' state, its next wake
     this.scope = "space"; this.pending = null; this.seenView = null; this.saveToken = 0;
     // The scope setting, read now and every 2 s (the Settings dialog writes the file); the screen's density too (30 s).
     cx.spawn(async cx => {
@@ -190,6 +191,23 @@ export class ImagePanel {
     else if (FITS[["f", "w", "h"].indexOf(k.toLowerCase())]) this.setState(toggleFit(this.state, FITS[["f", "w", "h"].indexOf(k.toLowerCase())]), cx);
     else return;
     cx.stop_propagation();
+  }
+
+  // The toolbar's state moved on (toolbar.js): a redraw when the rows show or hide, and a wake at its next deadline (one
+  // pending at a time: an earlier one wakes first and asks again). A drag running holds them shown.
+  setBars(next, cx) {
+    const was = barsShown(this.bars);
+    this.bars = next;
+    if (barsShown(next) !== was) cx.notify();
+    const now = Date.now(), wait = barsNext(next, now, Boolean(this.drag));
+    if (wait === null || (this.barsDue > now && this.barsDue <= now + wait)) return;
+    const due = this.barsDue = now + wait;
+    cx.spawn(async cx => {
+      await cx.sleep(wait + 10);
+      if (this.barsDue !== due) return;
+      this.barsDue = 0;
+      this.setBars(barsTick(this.bars, Date.now(), Boolean(this.drag)), cx);
+    });
   }
 
   // ⌘/Ctrl + wheel zooms at the pointer; a plain wheel pans a picture larger than the view.
@@ -324,7 +342,7 @@ export class ImagePanel {
         const file = (e.paths ?? []).find(f => imageExt(f));
         if (file) this.show(file, null); else { this.error = "Drop an image file (PNG, JPEG, GIF, WebP, BMP, ICO, SVG, TIFF)"; cx.notify(); }
       })
-      .on_scroll_wheel((e, cx) => this.wheel(e, cx))
+      .on_scroll_wheel((e, cx) => { this.setBars(barsMove(this.bars, Date.now()), cx); this.wheel(e, cx); })
       .on_mouse_down("left", (e, cx) => {
         this.handle.focus();
         if (!ready) return;
@@ -341,7 +359,7 @@ export class ImagePanel {
         if (!g || !ready) return;
         this.setState({ ...this.state, ...clampPan({ x: g.x + e.position.x - g.at.x, y: g.y + e.position.y - g.at.y }, d, v, p.scale) }, cx);
       })
-      .on_mouse_up("left", (_e, cx) => { if (this.drag) { this.drag = null; cx.notify(); } })
+      .on_mouse_up("left", (_e, cx) => { if (this.drag) { this.drag = null; this.setBars(this.bars, cx); cx.notify(); } })
       .on_hover((on) => { if (!on) this.drag = null; })
       .when(large, el => this.drag ? el.cursor_grabbing() : el.cursor_grab());
     const body = this.img
@@ -362,14 +380,15 @@ export class ImagePanel {
     // A load over a shown image (or its failure) says so at the bottom without hiding the picture.
     const status = this.img && (this.busy || this.error);
     // The rows lie over the picture's top, taking no room from it (a fit touches the walls): pinned always shown, else
-    // while the pointer is in the view, for a moment after a new picture, and while there is none.
-    const showBars = pinned || this.hover || !this.img || Date.now() < this.flashUntil;
+    // as toolbar.js says for the pointer, for a moment after a new picture, and while there is none.
+    const showBars = pinned || barsShown(this.bars) || !this.img || Date.now() < this.flashUntil;
     const bars = v_flex().id("image-bars").absolute().top(0).left(0).right(0).bg(t.background).child(title).child(tools)
+      .on_hover((on, cx) => this.setBars(barsOver(this.bars, Date.now(), on), cx))
       .opacity(showBars ? 0.94 : 0).transition("opacity", 160);
     const card = v_flex().id(this.modal ? "image-modal" : "image-panel").min_h(0).relative().overflow_hidden().bg(t.background).text_color(t.foreground).text_size(13)
       .when(Boolean(this.modal), el => el.size_full()).when(!this.modal, el => el.flex_1().min_w(0).h_full().rounded(10).border_1().border_color(t.border))
-      .on_hover((on, cx) => { if (on !== this.hover) { this.hover = on; cx.notify(); } })
-      .on_mouse_move((_e, cx) => { if (!this.hover) { this.hover = true; cx.notify(); } })
+      .on_hover((on, cx) => { if (!on) this.setBars(barsLeave(this.bars, Date.now()), cx); })
+      .on_mouse_move((e, cx) => this.setBars(barsMove(this.bars, Date.now(), e.local_position?.y ?? null), cx))
       .child(body).child(bars)
       // The Explorer's card look: GPUI clips children to the rectangle only, so the picture's corners are covered by a
       // ring in the color behind the card (inner radius 10), then the card's 1px border is drawn over it.
