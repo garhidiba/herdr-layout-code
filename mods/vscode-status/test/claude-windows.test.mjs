@@ -1,7 +1,7 @@
 // node --test mods/vscode-status/test/claude-windows.test.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
-import { claudeWindows, presentKeys, barWindows, shapeOf } from "../claude-windows.js";
+import { claudeWindows, barWindows } from "../claude-windows.js";
 
 const iso = "2026-11-10T09:00:00+00:00", sec = Date.parse(iso) / 1000;
 
@@ -30,16 +30,6 @@ test("unknown suffixes and non-seven_day prefixes still show", () => {
 
 test("bad input gives no windows", () => {
   for (const v of [null, undefined, "x", {}, { seven_day: { utilization: 5 } }, { seven_day: { resets_at: iso } }]) assert.deepEqual(claudeWindows(v), []);
-});
-
-test("presentKeys lists non-null key names only", () => {
-  assert.deepEqual(presentKeys({ five_hour: { utilization: 1 }, seven_day_opus: null, x: 0 }), ["five_hour", "x"]);
-  assert.deepEqual(presentKeys(null), []);
-});
-
-test("shapeOf records structure, label-like strings and numbers only", () => {
-  const s = shapeOf({ limits: [{ model: "fable", note: "has some spaces", pct: 12.5, at: null }] });
-  assert.deepEqual(s, { ".": "object", limits: "array(1)", "limits[0]": "object", "limits[0].model": 'string:"fable"', "limits[0].note": "string", "limits[0].pct": "number:12.5", "limits[0].at": "null" });
 });
 
 test("barWindows keeps a per-model window only when it is the tightest", () => {

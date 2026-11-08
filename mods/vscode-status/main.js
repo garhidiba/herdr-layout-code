@@ -1,7 +1,7 @@
-import { claudeWindows, presentKeys, barWindows, shapeOf } from "./claude-windows.js";
+import { claudeWindows, barWindows } from "./claude-windows.js";
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, v_flex, HoverCard } from "gpui-base";
-import { spaces, agents, theme, run, window, keys, exec, readTextFile, appHome, nextCommand, openOverlay, notify, setShared } from "herdr";
+import { spaces, agents, theme, run, window, keys, exec, readTextFile, appHome, nextCommand, openOverlay, notify } from "herdr";
 // Herdr starts with PATH=/usr/bin:/bin, so Homebrew/user tools (node, code, codex, trash) are looked up here too.
 const CLAUDE_API = 'tok=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null | /usr/bin/python3 -c "import sys,json;print(json.load(sys.stdin)[\\"claudeAiOauth\\"][\\"accessToken\\"])" 2>/dev/null); [ -n "$tok" ] && curl -s -m 10 -H "Authorization: Bearer $tok" -H "anthropic-beta: oauth-2025-04-20" https://api.anthropic.com/api/oauth/usage';
 const userExec = (cmd, args, opts) => exec("sh", ["-c", 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; exec "$0" "$@"', cmd, ...args], opts);
@@ -83,9 +83,6 @@ export default class WorkspaceStatus extends View {
         const r = await exec("sh", ["-c", CLAUDE_API]);
         const u = r.code === 0 && r.stdout.trim() ? JSON.parse(r.stdout) : null;
         const wins = u && !u.error ? claudeWindows(u).map(w => windowLabel(w)) : [];
-        // Debug: which windows the API returned (key names only) to learn per-model keys.
-        setShared("vscode-status.claude-keys", presentKeys(u));
-        if (u && !u.error) setShared("vscode-status.claude-shape", Object.fromEntries(["limits", "seven_day_breakdown", "weekly_scoped_shares", "extra_usage"].filter(k => k in u).map(k => [k, shapeOf(u[k])])));
         if (!wins.length) { this.apiPause = Date.now() + 900000; return; }
         this.api = { at: Date.now(), wins }; this.claude = wins; this.claudeAt = this.api.at;
         cx.notify();

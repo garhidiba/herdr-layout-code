@@ -20,24 +20,6 @@ export function claudeWindows(rl) {
   return out.sort((a, b) => rank(a) - rank(b) || a.key.localeCompare(b.key));
 }
 
-/** Top-level keys whose value is not null: key names only, safe to show for debugging. */
-export const presentKeys = (u) => u && typeof u === "object" ? Object.keys(u).filter(k => u[k] != null) : [];
-
-/** Debug: structure of an API answer as {path: description}; no secrets (strings only when they look like a label). */
-export function shapeOf(v, path = "", out = {}, depth = 0) {
-  const here = path || ".";
-  if (v === null) out[here] = "null";
-  else if (Array.isArray(v)) {
-    out[here] = `array(${v.length})`;
-    if (depth < 6) v.slice(0, 3).forEach((x, i) => shapeOf(x, `${path}[${i}]`, out, depth + 1));
-  } else if (typeof v === "object") {
-    out[here] = "object";
-    if (depth < 6) for (const k of Object.keys(v)) shapeOf(v[k], path ? `${path}.${k}` : k, out, depth + 1);
-  } else if (typeof v === "string") out[here] = v.length <= 40 && !/\s/.test(v) ? `string:${JSON.stringify(v)}` : "string";
-  else out[here] = `${typeof v}:${v}`;
-  return out;
-}
-
 /** Windows for the compact bar: the main ones, plus a per-model window only when it is the tightest. */
 export function barWindows(wins) {
   const top = Math.max(0, ...wins.filter(w => !w.model).map(w => w.used));
