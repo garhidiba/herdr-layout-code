@@ -1,4 +1,4 @@
-import { claudeWindows, barWindows } from "./claude-windows.js";
+import { claudeWindows, barWindows, surfaceShares } from "./claude-windows.js";
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, v_flex, HoverCard } from "gpui-base";
 import { spaces, agents, theme, run, window, keys, exec, readTextFile, appHome, nextCommand, openOverlay, notify } from "herdr";
@@ -18,13 +18,17 @@ function windowLabel(w) {
   const ms = w.resets_at * 1000 - Date.now();
   const base = w.window_minutes >= 10080 ? "Weekly" : `${Math.round(w.window_minutes / 60)}-hour session`;
   const title = w.model ? `${w.model} ${base.toLowerCase()}` : base, model = w.model ?? null;
-  if (!(ms > 0)) return { used: 0, name: "", title, model, reset: "window has reset" };
+  const extra = { model, severity: w.severity, share: w.share };
+  if (!(ms > 0)) return { used: 0, name: "", title, ...extra, reset: "window has reset" };
   const mins = Math.ceil(ms / 60000);
   const hours = Math.floor(mins / 60);
   // Weekly window: days + hours (hours + minutes once under a day); session window: hours + minutes.
   const name = w.window_minutes >= 10080 && hours >= 24 ? `${Math.floor(hours / 24)}d ${hours % 24}h` : `${hours}h ${mins % 60}m`;
-  return { used: Math.round(w.used_percent), name, title, model, reset: `resets ${clock(w.resets_at * 1000)} (${name} left)` };
+  return { used: Math.round(w.used_percent), name, title, ...extra, reset: `resets ${clock(w.resets_at * 1000)} (${name} left)` };
 }
+
+// Bar colour: the API's severity when it says so, else by used %.
+const tint = (t, w) => w.severity === "critical" || w.used >= 90 ? t.ansi1 : w.severity === "warning" || w.used >= 70 ? t.ansi3 : t.ansi2;
 
 // 29412.43 -> "29,412"
 const credits = (b) => `${Math.round(Number(b)).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",")}`;
@@ -84,6 +88,7 @@ export default class WorkspaceStatus extends View {
         const u = r.code === 0 && r.stdout.trim() ? JSON.parse(r.stdout) : null;
         const wins = u && !u.error ? claudeWindows(u).map(w => windowLabel(w)) : [];
         if (!wins.length) { this.apiPause = Date.now() + 900000; return; }
+        this.surfaces = surfaceShares(u);
         this.api = { at: Date.now(), wins }; this.claude = wins; this.claudeAt = this.api.at;
         cx.notify();
       } catch { this.apiPause = Date.now() + 900000; }
@@ -194,18 +199,20 @@ export default class WorkspaceStatus extends View {
   }
 
   // The hover card for one provider: every window with its bar, usage and reset time, then `footer` (limit resets).
-  card(t, title, wins, extra, note, footer) {
+  card(t, title, wins, extra, note, footer, surfaces) {
     const bar = (used, color) => div().w_full().h(6).rounded(3).bg(t.border).overflow_hidden().child(div().w(Math.max(2, Math.round(220 * used / 100))).h(6).rounded(3).bg(color));
     return v_flex().w(250).p(12).gap(10).rounded(8).bg(t.popover).border_1().border_color(t.border).text_size(12).text_color(t.foreground)
       .child(div().font_semibold().child(title))
       .children(wins.filter(w => w.used !== null).map(w => {
-        const color = w.used >= 90 ? t.ansi1 : w.used >= 70 ? t.ansi3 : t.ansi2;
+        const color = tint(t, w);
         return v_flex().gap(4)
           .child(h_flex().justify_between().child(div().child(w.title)).child(div().text_color(color).child(`${w.used}% used`)))
           .child(bar(w.used, color))
-          .child(div().text_size(11).text_color(t.dim).child(w.reset));
+          .child(div().text_size(11).text_color(t.dim).child(w.reset))
+          .when(Boolean(w.share), el => el.child(div().text_size(11).text_color(t.dim).child(`${w.share.used}% of weekly · allowance ${w.share.allowance}%`)));
       }))
       .when(wins.every(w => w.used === null), el => el.child(div().text_color(t.dim).child("No data yet. It appears once a session refreshes its status line.")))
+      .when(Boolean(surfaces), el => el.child(div().text_size(11).text_color(t.dim).child(`This week by surface: ${surfaces}`)))
       .when(Boolean(extra), el => el.child(h_flex().justify_between().child(div().text_color(t.muted).child("Credits")).child(div().child(extra))))
       .when(Boolean(note), el => el.child(div().text_size(11).text_color(t.dim).child(note)))
       .when(Boolean(footer), el => el.child(footer));
@@ -223,19 +230,19 @@ export default class WorkspaceStatus extends View {
       .child(h_flex().gap(6).items_center().child(div().size(6).rounded(3).bg(t.dim)).child(`${list.length} agents`)
         .when(needs > 0, el => el.child(div().text_color(t.blocked).child(`· ${needs} needs you`))))
       .child(div().flex_1())
-      .children([["claude", "Claude", this.claude, this.claudeCredits, this.claudeAt ? `Updated ${clock(this.claudeAt)}` : null, this.resetLink(t, "Claude")], ["codex", "Codex", this.codex, this.codexCredits, null, this.codexResets(t)]].filter(([, , w]) => w?.length).map(([name, title, wins, extra, note, footer]) =>
+      .children([["claude", "Claude", this.claude, this.claudeCredits, this.claudeAt ? `Updated ${clock(this.claudeAt)}` : null, this.resetLink(t, "Claude"), this.surfaces], ["codex", "Codex", this.codex, this.codexCredits, null, this.codexResets(t), null]].filter(([, , w]) => w?.length).map(([name, title, wins, extra, note, footer, surfaces]) =>
         HoverCard.new(`usage-${name}`).anchor("bottom_center").open_delay(200).trigger(
         h_flex().gap(6).items_center().child(image(`mods/vscode-status/${name}.svg`).w(13).h(13).flex_none())
           .children(barWindows(wins).map(w => {
             if (w.used === null) return div().text_color(t.dim).child("–");
-            const color = w.used >= 90 ? t.ansi1 : w.used >= 70 ? t.ansi3 : t.ansi2;
+            const color = tint(t, w);
             return h_flex().gap(5).items_center()
               .when(Boolean(w.name), el => el.child(div().text_color(t.dim).child(w.model ?? w.name)))
               .child(div().w(40).h(5).rounded(3).bg(t.border).overflow_hidden().child(div().w(Math.max(2, Math.round(40 * w.used / 100))).h(5).rounded(3).bg(color)))
               .child(div().text_color(w.used >= 90 ? t.ansi1 : t.muted).child(`${w.used}%`));
           }))
           .when(Boolean(extra), el => el.child(div().text_color(t.dim).child(extra))))
-        .content(this.card(t, title, wins, extra, note, footer))))
+        .content(this.card(t, title, wins, extra, note, footer, surfaces))))
       .child(div().id("settings").flex().items_center().text_color(t.dim).cursor_pointer().hover(s => s.text_color(t.foreground))
         .tooltip("Settings").accessibility_label("Settings").on_click(() => run("mod.open", { name: "vscode-settings" }))
         .child(svg("mods/workspace-chrome/settings.svg").size(13)))
