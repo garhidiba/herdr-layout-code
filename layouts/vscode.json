@@ -171,6 +171,16 @@
                       "content": {
                         "mod": "vscode-scm"
                       }
+                    },
+                    {
+                      "id": "image",
+                      "type": "block",
+                      "content": {
+                        "mod": "vscode-viewer",
+                        "props": {
+                          "imagePanel": true
+                        }
+                      }
                     }
                   ]
                 }
