@@ -3,9 +3,9 @@
 // Commits expand to their changed files; a file opens a diff tab (vscode-diff mod).
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list } from "gpui-base";
-import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, run, appHome, notify, shared, setShared, openOverlay, layout } from "herdr";
+import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, run, appHome, notify, shared, setShared, openOverlay, layout, window } from "herdr";
 import { freshRoot, encode, decode } from "./cache.js";
-import { createCore } from "./core.js";
+import { createCore, relevant, stampOf, stale } from "./core.js";
 import { layoutSections, flexSection, sashPair, dragSash } from "./sections.js";
 import { syncAction, syncSteps, syncError, BUSY } from "./sync.js";
 
@@ -41,6 +41,8 @@ const key = () => JSON.stringify(location());
 // Other spaces' repos load in the background: 3s after start, 2 at a time, again every 10 minutes
 // (and when a space appears), skipping ones loaded in the last 2 minutes.
 const CACHE = "vscode-scm.cache", FRESH = 120000, PRELOAD_EVERY = 600000, SAVE_EVERY = 60000;
+// A watched folder reads again at most every 5s while it changes (a build).
+const QUIET = 5000;
 // Reads write nothing under .git (no index refresh or lock, no fsmonitor cookie):
 // the folder watch would see it, and every refresh would start the next one.
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
@@ -188,7 +190,7 @@ export default class SourceControl extends View {
     ({ seen: this.seen, repoCache: this.repoCache, lastSelected: this.lastSelected, chosen: this.chosen } = restored);
     try { for (const c of this.repoCache.values()) c.commits = graph(c.commits); } catch { this.repoCache.clear(); }
     Object.assign(lastRoot, restored.lastRoot);
-    this.repos = []; this.handle = cx.focus_handle(); this.last = 0; this.icons = null;
+    this.repos = []; this.handle = cx.focus_handle(); this.icons = null;
     cx.spawn(async (cx) => {
       try { this.icons = JSON.parse(await readTextFile(`${appHome()}/mods/vscode-explorer/icons.json`)); } catch {}
       cx.notify();
@@ -209,7 +211,7 @@ export default class SourceControl extends View {
     this.input.on("blur", (_e, cx) => { this.typing = false; cx.notify(); });
     this.refresh(cx);
     cx.timer.every(10000, (cx) => {
-      this.refresh(cx);
+      this.tick(cx);
       if (this.known && spaces().some((s) => !this.known.has(s.id))) this.preloadAll(cx);
     });
     cx.timer.after(3000, (cx) => this.preloadAll(cx));
@@ -278,12 +280,25 @@ export default class SourceControl extends View {
     cx.spawn(async (cx) => {
       try {
         while (this.context === context && this.watched === root) {
-          await watchFolder(root);
-          // A busy tree (a build) would refresh nonstop; the 10s timer catches what this skips.
-          if (this.context === context && this.watched === root && Date.now() - this.last > 2000) this.refresh(cx);
+          const paths = await watchFolder(root);
+          // Changes during the pause come in the next batch.
+          if (this.context === context && this.watched === root && relevant(paths)) { this.refresh(cx); await cx.sleep(QUIET); }
         }
       } catch { if (this.context === context) this.watched = null; }
     });
+  }
+
+  // The 10s timer: a remote or unwatched panel reads every time, a watched one only when core.js stale() says so.
+  tick(cx) {
+    const context = this.context;
+    if (key() !== context || this.on || !this.watched) return this.refresh(cx);
+    cx.spawn(async (cx) => { if (await stale(this.read?.context === context ? this.read : null, () => this.stamp()) && key() === context) this.refresh(cx); });
+  }
+
+  // What tick() compares (core.js stampOf): the folder and each listed repo's .git, index, HEAD, FETCH_HEAD and packed-refs.
+  stamp() {
+    const files = ["", "/index", "/HEAD", "/FETCH_HEAD", "/packed-refs"];
+    return stampOf(exec, [location().cwd, ...this.repos.flatMap((r) => files.map((f) => `${r.path}/.git${f}`))], window()?.platform);
   }
 
   refresh(cx) {
@@ -296,9 +311,11 @@ export default class SourceControl extends View {
       this.clearRepo(this.selected); this.error = null; this.watched = null;
     }
     if (!cwd) return;
-    this.loading = true; this.queued = false; this.last = Date.now();
+    this.loading = true; this.queued = false;
     cx.spawn(async (cx) => {
       try {
+        // Taken before the read, so a change during it shows at the next tick.
+        const stamp = on ? null : await this.stamp();
         const { top, repos } = await repoList(cwd, on);
         if (key() !== context) return;
         const selected = pickRepo(repos, top, this.selected);
@@ -307,6 +324,7 @@ export default class SourceControl extends View {
         this.seen.set(context, { repos, at: Date.now() }); this.lastSelected.set(context, selected);
         this.watch(top || cwd, cx);
         if (selected) await this.loadRepo(context, selected);
+        this.read = { context, stamp, at: Date.now() };
         this.changed(cx);
       } catch (e) { if (key() === context) this.error = String(e); }
       finally {

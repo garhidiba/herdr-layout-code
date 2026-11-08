@@ -140,6 +140,18 @@ Limits to respect: `exec` has a 30 s limit and 8 MiB of output. `all` on the 84-
 One-shot `exec` is a drop-in: same call sites, no lifecycle, and it already removes most of the
 cost. A daemon is worth it only if the 10 s refresh and the folder watch still cost too much.
 
+Measured again on a busy USB disk (a Gradle build and an emulator at ~1,500 IOPS): a `tree` call
+costs ~1–24 s of I/O wait at ~1 % CPU, while the process and its git spawns cost ~3 ms
+(`vscode-core --version` ×50: 9 ms each, 6 ms of it `git --version`). A daemon would save ~10 ms
+of that, so the calls were made rarer and cheaper instead:
+
+- The repo scan never enters `node_modules` (VS Code's `git.repositoryScanIgnoredFolders`): in a
+  Next.js project it was 332 of the ~360 folder reads (`find` 0.1–1.4 s → 0.02–0.17 s there).
+- The panels read again on folder-watch batches (VS Code's default `files.watcherExclude` paths don't
+  count; at most every 5 s), and their 10 s timer reads only when a `stat` of the shown folders and
+  the repos' `.git` files moved, or 5 minutes after the last read. Idle: ~18 calls/min → ~0.5/min.
+- Identical calls running at once share one run (`core.js`).
+
 Daemon sketch, if pursued:
 
 - `vscode-core serve --port 0 --detach` binds 127.0.0.1, double-forks with `setsid` (an `exec`'d
