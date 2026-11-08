@@ -1,7 +1,7 @@
 // node --test mods/vscode-viewer/test/imagefit.test.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
-import { fitScale, clampPan, place, zoomTo, zoomStep, pan, toggleFit, toggleZoom, imageSize, svgSize, imagesIn, STEPS } from "../imagefit.js";
+import { fitScale, clampPan, place, zoomTo, zoomStep, pan, toggleFit, toggleZoom, imageSize, svgSize, imagesIn, STEPS, resampleWidth, resampleName } from "../imagefit.js";
 
 const view = { width: 400, height: 300 };
 const wide = { width: 1600, height: 600 }, tall = { width: 300, height: 1200 }, small = { width: 100, height: 50 };
@@ -91,4 +91,27 @@ test("SVG sizes from width / height, else the viewBox", () => {
 test("a folder's images in name order, numbers as numbers, hidden files left out", () => {
   const isImage = (n) => /\.(png|jpe?g)$/i.test(n);
   assert.deepEqual(imagesIn(["img10.png", "img2.png", "notes.txt", ".hidden.png", "", "B.JPG", "a.jpeg"], isImage), ["a.jpeg", "B.JPG", "img2.png", "img10.png"]);
+});
+
+test("a strong downscale is drawn from a copy at the drawn size times the screen density, rounded up to 64 px", () => {
+  const tall = { width: 1504, height: 5280 };
+  assert.equal(resampleWidth(tall, 1504 * 0.28, 2), 896); // 842 device px → 896
+  assert.equal(resampleWidth(tall, 1504 * 0.28, 1), 448);
+  assert.equal(resampleWidth(tall, 1504 * 0.46, 2), null, "near its own pixels: the original");
+  assert.equal(resampleWidth(tall, 1504, 2), null, "100%");
+  assert.equal(resampleWidth(tall, 3008, 1), null, "zoomed in");
+  assert.equal(resampleWidth({ width: 4000, height: 10 }, 100, 2, "svg"), null);
+  assert.equal(resampleWidth({ width: 4000, height: 10 }, 100, 2, "gif"), null);
+  assert.equal(resampleWidth(null, 100), null);
+  assert.equal(resampleWidth(tall, 0), null);
+  // Small moves share a copy.
+  assert.equal(resampleWidth(tall, 420, 2), resampleWidth(tall, 440, 2));
+});
+
+test("copies are named by the source's cache id, version and width, outside cachePreview's <id>-* sweep", () => {
+  const st = { mtime: 1700000000, size: 12345 };
+  assert.deepEqual(resampleName("abc", st, 896, "jpeg"), ["abcr-1700000000-12345-w896.jpg", "jpeg"]);
+  assert.deepEqual(resampleName("abc", st, 896, "webp"), ["abcr-1700000000-12345-w896.png", "png"]);
+  assert.notEqual(resampleName("abc", st, 896, "png")[0], resampleName("abc", { ...st, size: 1 }, 896, "png")[0]);
+  assert.ok(!resampleName("abc", st, 896, "png")[0].startsWith("abc-"));
 });

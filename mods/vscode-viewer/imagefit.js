@@ -104,3 +104,26 @@ export function svgSize(text) {
 // The images of a folder listing (`ls -1` lines), in Finder's order: names compared with their numbers as numbers.
 export const imagesIn = (names, isImage) => names.filter(n => n && !n.startsWith(".") && isImage(n))
   .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
+
+// ----- smooth downscales: the GPU draws a picture smaller than its pixels by plain bilinear sampling, without mipmaps,
+// so a strong downscale aliases; such a picture is drawn from a copy resampled to its drawn size instead -----
+
+export const RESAMPLE_BELOW = 0.9; // a copy only when it would have under this share of the original's pixels
+const RESAMPLE_STEP = 64;          // copy widths are rounded up to this, so small zoom moves reuse one copy
+const KEPT = ["svg", "gif", "ico"]; // SVG draws sharp at any size; a GIF would lose its frames; icons are small
+
+// The pixel width of the copy for a picture `img` drawn `drawn` px wide on a screen of `density` device px per px, or
+// null when the original serves: drawn at or near its own pixels (100% and up always), or a format kept as is (`ext`).
+export function resampleWidth(img, drawn, density = 2, ext = "") {
+  if (!(img?.width > 0) || !(drawn > 0) || KEPT.includes(ext)) return null;
+  const want = Math.ceil(drawn * density / RESAMPLE_STEP) * RESAMPLE_STEP;
+  return want < img.width * RESAMPLE_BELOW ? want : null;
+}
+
+// The copy's name in the cache folder: the source's cache id (`id`, preview.js pathHash) + "r" (so cachePreview's
+// sweep of `<id>-*` leaves copies alone), its version (`st`: mtime, size) and the width; a JPEG stays one, else PNG
+// (keeps transparency). [name, format for the resampler].
+export function resampleName(id, st, width, ext) {
+  const jpeg = ext === "jpg" || ext === "jpeg";
+  return [`${id}r-${st.mtime}-${st.size}-w${width}.${jpeg ? "jpg" : "png"}`, jpeg ? "jpeg" : "png"];
+}
