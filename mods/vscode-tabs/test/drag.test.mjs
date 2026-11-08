@@ -5,13 +5,14 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dragStarted, panesRect, headersRect, paneRects, dropTarget, dropZone, zoneRect, dragSource, panelButtonRect, find } from "../drag.js";
 
-// layouts/vscode.json as shipped: work-body padding 8, gap 8; the side panel 368px, shown; the status bar 28px.
+// layouts/vscode.json as shipped: work-body padding 8, gap 8; the side row 368px (the side panel alone), shown; the
+// status bar 28px.
 const shipped = JSON.parse(readFileSync(new URL("../../../layouts/vscode.json", import.meta.url), "utf8"));
 const bar = { x: 268, y: 0, width: 1012, height: 42 }; // the work column, right of the 268px sidebar
 const win = { width: 1280, height: 800 };
-const withPanel = (panel) => {
+const withSide = (side) => {
   const tree = structuredClone(shipped);
-  Object.assign(find(tree, "panel"), panel);
+  Object.assign(find(tree, "side"), side);
   return tree;
 };
 
@@ -24,20 +25,22 @@ test("a press becomes a drag past 4 px, not before", () => {
 test("the panes are below the bar, left of the side panel while it shows, above the status bar, inside the padding", () => {
   // x 276 .. 1280-8-368-8 = 896; y 50 .. 800-28-8 = 764
   assert.deepEqual(panesRect(bar, win, shipped), { x: 276, y: 50, width: 1012 - 16 - 376, height: 714 });
-  assert.deepEqual(panesRect(bar, win, withPanel({ hidden: true })), { x: 276, y: 50, width: 996, height: 714 });
-  assert.equal(panesRect(bar, win, withPanel({ size: { px: 500 } })).width, 1012 - 16 - 508, "a dragged-wider panel");
+  assert.deepEqual(panesRect(bar, win, withSide({ hidden: true })), { x: 276, y: 50, width: 996, height: 714 });
+  assert.equal(panesRect(bar, win, withSide({ size: { px: 500 } })).width, 1012 - 16 - 508, "a dragged-wider panel");
   // The sidebar collapsed: the bar (and the work column) start further left; the panes follow it.
   assert.equal(panesRect({ ...bar, x: 44, width: 1236 }, win, shipped).x, 52);
 });
 
-test("the Image Viewer column, hidden as shipped, takes its width and a gap from the panes while it shows", () => {
-  const tree = structuredClone(shipped), image = find(tree, "image-panel");
+test("the Image Viewer column, hidden as shipped, shares the side row with the panel, so the panes leave out the row", () => {
+  const tree = structuredClone(shipped), image = find(tree, "image-panel"), side = find(tree, "side");
   assert.equal(image.hidden, true);
   assert.equal(find(find(tree, "panel-body"), "image-panel"), null, "its own column, not a page of the panel stack");
+  assert.deepEqual(side.children.map(c => c.id), ["panel", "image-panel"], "Herdr's gutter between them trades their widths");
+  assert.equal(find(tree, "panel").size, undefined, "the panel fills the row");
+  // side.js widens the row by the column and the gap when it shows.
+  Object.assign(side, { size: { px: 368 + 8 + 420 } });
   image.hidden = false;
   assert.equal(panesRect(bar, win, tree).width, 1012 - 16 - 376 - 428);
-  find(tree, "panel").hidden = true;
-  assert.equal(panesRect(bar, win, tree).width, 1012 - 16 - 428, "the image column alone");
 });
 
 test("with no layout tree, the panes are the whole area below the bar", () => {

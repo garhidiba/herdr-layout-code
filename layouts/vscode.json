@@ -144,53 +144,62 @@
               }
             },
             {
-              "id": "panel",
-              "type": "column",
-              "hidden": false,
+              "id": "side",
+              "type": "row",
               "size": {
                 "px": 368
               },
-              "min": 280,
-              "max": 900,
+              "min": 260,
+              "max": 2108,
+              "gap": 8,
               "children": [
                 {
-                  "id": "panel-body",
-                  "type": "stack",
-                  "active": "explorer",
+                  "id": "panel",
+                  "type": "column",
+                  "hidden": false,
+                  "min": 280,
+                  "max": 900,
                   "children": [
                     {
-                      "id": "explorer",
-                      "type": "block",
-                      "content": {
-                        "mod": "vscode-explorer"
-                      }
-                    },
-                    {
-                      "id": "changes",
-                      "type": "block",
-                      "content": {
-                        "mod": "vscode-scm"
-                      }
+                      "id": "panel-body",
+                      "type": "stack",
+                      "active": "explorer",
+                      "children": [
+                        {
+                          "id": "explorer",
+                          "type": "block",
+                          "content": {
+                            "mod": "vscode-explorer"
+                          }
+                        },
+                        {
+                          "id": "changes",
+                          "type": "block",
+                          "content": {
+                            "mod": "vscode-scm"
+                          }
+                        }
+                      ]
                     }
                   ]
+                },
+                {
+                  "id": "image-panel",
+                  "type": "block",
+                  "hidden": true,
+                  "size": {
+                    "px": 420
+                  },
+                  "min": 260,
+                  "max": 1200,
+                  "content": {
+                    "mod": "vscode-viewer",
+                    "props": {
+                      "imagePanel": true
+                    }
+                  }
                 }
               ]
-            },
-            {
-              "id": "image-panel",
-              "type": "block",
-              "hidden": true,
-              "size": {
-                "px": 420
-              },
-              "min": 260,
-              "max": 1200,
-              "content": {
-                "mod": "vscode-viewer",
-                "props": {
-                  "imagePanel": true
-                }
-              }
             }
           ]
         },

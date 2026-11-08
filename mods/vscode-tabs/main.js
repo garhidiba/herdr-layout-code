@@ -4,7 +4,10 @@ import { spaces, panes, terminals, run, openOverlay, closeOverlay, props, theme,
 import { tabFileOf, dirtyTabs, TAB_MENU, withDetails, DETAILS } from "./tabfile.js";
 import { createTabCloser, signalCommand, CLOSE_REQUEST } from "./close.js";
 import { createMover, withViewer, fileByName, MOVE_REQUEST, VIEWER_FILES } from "./move.js";
+import { reconcileSide } from "./side.js";
 import { find, dragStarted, panesRect, headersRect, paneRects, dropTarget, dropZone, zoneRect, dragSource, panelButtonRect, DRAG_BACK } from "./drag.js";
+// side.js' remembered width of the side panel while it is hidden (shared values outlive a restart).
+const PANEL_WIDTH = "vscode-tabs.panel-width";
 // vscode-pane's { [pane]: bounds }: where each shown pane's header is, for dropping onto one pane.
 const PANE_BOUNDS = "vscode-pane.bounds";
 
@@ -119,6 +122,7 @@ export default class Tabs extends View {
     this.hoverClose = null; // the tab whose close slot the pointer is on
     this.closeAt = null; // the tab menu's last close request taken (close.js CLOSE_REQUEST)
     this.moveAt = null; // the menus' last move request taken (move.js MOVE_REQUEST)
+    this.side = null; // side.js reconcileSide's `seen`
   }
 
   closeList(list, cx) { // not close(): that is the View's own end call
@@ -143,6 +147,18 @@ export default class Tabs extends View {
     cx.spawn(async (cx) => movePane(ask, (ms) => cx.sleep(ms)));
   }
 
+  // The `side` row's width follows the side panel and the Image Viewer column showing or hiding (side.js).
+  sideAsked(cx) {
+    const kept = shared(PANEL_WIDTH), mem = Number.isFinite(kept) ? kept : null;
+    const r = reconcileSide(layout(), this.side, mem, Date.now());
+    this.side = r.seen;
+    if (!r.commands.length && r.mem === mem) return;
+    cx.spawn(async () => {
+      if (r.mem !== mem) setShared(PANEL_WIDTH, r.mem);
+      for (const [name, args] of r.commands) run(name, args);
+    });
+  }
+
   // The side panel (Explorer / Source Control) is one global state: switching spaces leaves it as it is.
 
   // A press dragged out of the bar: the overlay takes it over when the tab has one pane to move into the shown tab.
@@ -158,6 +174,7 @@ export default class Tabs extends View {
     if (this.dragView) return this.dragView.render(cx);
     this.closeAsked(cx);
     this.moveAsked(cx);
+    this.sideAsked(cx);
     const t = theme();
     const space = spaces().find(p => p.active);
     const shown = space?.tabs ?? [];

@@ -27,17 +27,17 @@ export function find(node, id) {
   return null;
 }
 
-// The columns right of the panes in layouts/vscode.json's `work-body` row: the side panel and the Image Viewer.
-export const SIDE_COLUMNS = ["panel", "image-panel"];
+// The row right of the panes in layouts/vscode.json's `work-body` row: the side panel and the Image Viewer (side.js).
+export const SIDE_ROW = "side";
 
-// The shown tab's panes: below the tab bar (`bar`: its bounds; it spans the work column, the side columns' too) inside
-// layouts/vscode.json's `work-body` row (its padding), left of the SIDE_COLUMNS that show (each its width and the
-// row's gap), above the `status` bar; `win` is the window's size, `tree` the shown layout. The sidebar (spaces) is
-// left of the bar already.
+// The shown tab's panes: below the tab bar (`bar`: its bounds; it spans the work column, the side row's too) inside
+// layouts/vscode.json's `work-body` row (its padding), left of the SIDE_ROW while it shows (its width, which covers
+// both columns, and the row's gap), above the `status` bar; `win` is the window's size, `tree` the shown layout. The
+// sidebar (spaces) is left of the bar already.
 export function panesRect(bar, win, tree) {
   const body = find(tree, "work-body");
-  const pad = body?.padding ?? 0, gap = body?.gap ?? 0;
-  const side = SIDE_COLUMNS.map(id => find(tree, id)).reduce((n, c) => n + (c && !c.hidden ? (c.size?.px ?? 0) + gap : 0), 0);
+  const pad = body?.padding ?? 0, gap = body?.gap ?? 0, row = find(tree, SIDE_ROW);
+  const side = row && !row.hidden ? (row.size?.px ?? 0) + gap : 0;
   const top = bar.y + bar.height + pad, bottom = panesBottom(win, tree);
   return { x: bar.x + pad, y: top, width: Math.max(0, bar.width - 2 * pad - side), height: Math.max(0, bottom - top) };
 }

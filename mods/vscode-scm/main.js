@@ -3,28 +3,11 @@
 // Commits expand to their changed files; a file opens a diff tab (vscode-diff mod).
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list } from "gpui-base";
-import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, run, appHome, notify, shared, setShared, openOverlay, layout } from "herdr";
+import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, run, appHome, notify, shared, setShared } from "herdr";
 import { freshRoot, encode, decode } from "./cache.js";
 import { createCore } from "./core.js";
 import { layoutSections, flexSection, sashPair, dragSash } from "./sections.js";
 import { syncAction, syncSteps, syncError, BUSY } from "./sync.js";
-
-// The Image Viewer column's resize zone reaches over this card's right edge (vscode-viewer image.js SASH: one sash of
-// its strip, the layout's gap and this edge): a press here starts its resize overlay (a double-click gives it back its
-// layout width, 420), a hover lights its line. Only while that column shows, right of this panel.
-const IMAGE_SASH = "vscode-viewer.image-sash";
-const findNode = (n, id) => n?.id === id ? n : (n?.children ?? []).map(c => findNode(c, id)).find(Boolean) ?? null;
-function imageSash(el) {
-  const column = findNode(layout(), "image-panel");
-  if (!column || column.hidden) return el;
-  return el.child(div().id("image-sash").absolute().top(0).bottom(0).right(0).w(4).cursor_col_resize()
-    .on_hover((on) => setShared(IMAGE_SASH, on))
-    .on_mouse_down("left", (e, cx) => {
-      cx.stop_propagation();
-      if (e.click_count === 2) return run("layout.resize", { id: "image-panel", px: 420 });
-      openOverlay({ mod: "vscode-viewer", kind: "window", frame: "none", at: { x: 0, y: 0 }, width: 1, height: 1, props: { imageResize: { x: e.position.x } } });
-    }));
-}
 // Push and pull never wait on a prompt (no terminal here): a missing credential fails at once, a merge takes git's message.
 const NO_PROMPT = ["GIT_TERMINAL_PROMPT=0", "GIT_MERGE_AUTOEDIT=no"];
 
@@ -543,7 +526,7 @@ export default class SourceControl extends View {
     // The flex section fills by layout (no rounding gap); the others get their computed height. Both are definite,
     // which a scroll area needs: under a max_h alone its viewport grows with its rows and never scrolls.
     const fit = (id, el) => id === flex ? el.flex_1().min_h(0) : el.flex_none().h(heights[id]);
-    return imageSash(v_flex().id("scm").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13).track_focus(this.handle)
+    return v_flex().id("scm").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13).track_focus(this.handle)
       .on_size_change((size, cx) => { if (size.height !== this.height) { this.height = size.height; cx.notify(); } })
       .on_mouse_move((e, cx) => this.dragTo(e.position.y, cx))
       .on_mouse_up("left", (_e, cx) => this.endDrag(cx))
@@ -580,6 +563,6 @@ export default class SourceControl extends View {
           (range) => items.slice(range.start, range.end).map((item) => item.file || item.note ? this.graphFileRow(item, t) : this.graphRow(item.row, t))).size_full()
           .on_item_click((id, cx) => this.graphClick(id, cx)))
         .child(Scrollbar.vertical("scm-graph").viewport_from_layout().absolute().inset_0())
-        .when(!this.commits.length, (e) => e.child(div().absolute().top(0).w_full().child(empty(repo ? (this.hasHead ? (this.loading ? "Loading commits…" : "No commits") : "No commits yet") : "No repository")))))));
+        .when(!this.commits.length, (e) => e.child(div().absolute().top(0).w_full().child(empty(repo ? (this.hasHead ? (this.loading ? "Loading commits…" : "No commits") : "No commits yet") : "No repository"))))));
   }
 }

@@ -7,7 +7,7 @@
 // Pictures go through the viewer's preview cache (preview.js cachePreview; a remote space's file is fetched first),
 // the placing rules are imagefit.js'. A strong downscale is drawn from a resampled copy (Smooth, the default; imagefit.js
 // resampleWidth). The two toolbar rows hide while the pointer is away (over the picture, fading), unless pinned. The
-// column's left edge resizes it (ResizeOverlay).
+// column shares the layout's `side` row with the side panel, so Herdr's own gutter between them trades their widths.
 import { div, svg, image } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
 import { props, shared, setShared, spaces, theme, exec, appHome, readTextFile, pickFolder, openOverlay, closeOverlay, layout, run, window } from "herdr";
@@ -36,13 +36,8 @@ async function screenDensity() {
   density = r?.code === 0 && n >= 1 && n <= 4 ? n : 1;
   return density;
 }
-const COLUMN = "image-panel", DEFAULT_WIDTH = 420; // layouts/vscode.json's Image Viewer column and its width there
-// The column's resize zone is one sash across the boundary: this column's left strip (outside its card), the layout's
-// gap (Herdr's own) and the side panel's right edge (vscode-explorer / vscode-scm draw a matching strip that opens the
-// same ResizeOverlay, props { imageResize: { x } }). SASH: true while any of them is hovered or a drag runs, which
-// lights the accent line at this strip's outer edge.
-export const SASH = "vscode-viewer.image-sash";
-const STRIP = 6;
+// layouts/vscode.json's Image Viewer column and the row it shares with the side panel (which fills the rest of it).
+const COLUMN = "image-panel", SIDE = "side";
 // Here: resamples image $1 to $3 px wide as $2 (format $4), Lanczos through ImageMagick when installed, else macOS's sips;
 // exits 3 with neither (the original is drawn then). Lands whole: written aside, then renamed. Herdr's PATH may leave magick out.
 const RESAMPLE = `PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"; [ -f "$2" ] && exit 0
@@ -71,7 +66,7 @@ export class ImagePanel {
     this.view = null;     // the picture area's size
     this.list = null;     // { folder, on, names }: the images beside it
     this.busy = null; this.error = null; this.drag = null; this.taken = null;
-    this.hover = false; this.flashUntil = 0; this.width = 0;
+    this.hover = false; this.flashUntil = 0;
     this.scope = "space"; this.pending = null; this.seenView = null; this.saveToken = 0;
     // The scope setting, read now and every 2 s (the Settings dialog writes the file); the screen's density too (30 s).
     cx.spawn(async cx => {
@@ -228,13 +223,19 @@ export class ImagePanel {
   }
 
   // The column's width is kept per scope (the entry's `width`): a new scope key (another space, or the scope switched)
-  // gives the column that key's width, when it has one; dragging keeps the new width there (saveWidth).
+  // gives the column that key's width, when it has one; dragging keeps the new width there (saveWidth). The `side` row
+  // grows by as much while the column shows, so the side panel keeps its width.
   applyWidth(cur, cx) {
     const key = this.modal ? null : stateKey(this.scope, this.space());
     if (!key || key === this.widthKey) return;
     this.widthKey = key;
-    const px = widthToApply(cur, this.columnPx());
-    if (px) cx.spawn(async () => run("layout.resize", { id: COLUMN, px }));
+    const tree = layout(), column = findNode(tree, COLUMN), now = column?.size?.px ?? null, px = widthToApply(cur, now);
+    const side = column && !column.hidden ? findNode(tree, SIDE)?.size?.px : null;
+    if (!px) return;
+    cx.spawn(async () => {
+      if (side && now) run("layout.resize", { id: SIDE, px: Math.round(side + px - now) });
+      run("layout.resize", { id: COLUMN, px });
+    });
   }
   columnPx() { return findNode(layout(), COLUMN)?.size?.px ?? null; }
   // After the column's size settles (300 ms), its layout width into the entry, when it changed.
@@ -247,15 +248,6 @@ export class ImagePanel {
       if (token !== this.widthToken || key !== this.widthKey || !px || Math.round(px) === this.current()?.width) return;
       this.remember({ width: Math.round(px) });
     });
-  }
-
-  // The column's left edge: a full-window overlay follows the drag (the pointer soon leaves the edge).
-  // A double-click gives the scope back the layout's width (saveWidth keeps it).
-  startResize(e, cx) {
-    cx.stop_propagation();
-    if (e.click_count === 2) return run("layout.resize", { id: COLUMN, px: DEFAULT_WIDTH });
-    openOverlay({ mod: "vscode-viewer", kind: "window", frame: "none", at: { x: 0, y: 0 }, width: 1, height: 1,
-      props: { imageResize: { x: e.position.x, px: this.width } } });
   }
 
   expand() {
@@ -385,46 +377,9 @@ export class ImagePanel {
         .child(div().absolute().top(0).left(0).right(0).bottom(0).rounded(10).border_1().border_color(t.border)))
       .when(Boolean(status), el => el.child(div().absolute().left(0).right(0).bottom(0).h(22).px(10).bg(t.background).opacity(0.94).flex().items_center().border_t(1).border_color(t.border).text_size(11.5).text_color(t.dim).truncate().child(status)));
     if (this.modal) return card;
-    // The column: its resize strip (part of the sash; only the cursor shows it), then the card.
-    return h_flex().id("image-column").size_full().min_h(0)
-      .on_size_change((s, cx) => { this.width = s.width; this.saveWidth(cx); })
-      .child(div().id("image-resize").w(STRIP).h_full().flex_none().cursor_col_resize()
-        .on_hover((on) => setShared(SASH, on))
-        .on_mouse_down("left", (e, cx) => this.startResize(e, cx)))
-      .child(card);
+    return h_flex().id("image-column").size_full().min_h(0).on_size_change((_s, cx) => this.saveWidth(cx)).child(card);
   }
 }
 
-// The column's drag-resize from its left edge (a frameless full-window overlay, props { imageResize: { x, px } }: where
-// the press was and the column's width then): the column follows the pointer within the layout's min / max
-// (layout.resize, which Herdr keeps); a release, a press or Escape ends it.
 // A layout node by id, or null.
 function findNode(n, id) { return n?.id === id ? n : (n?.children ?? []).map(c => findNode(c, id)).find(Boolean) ?? null; }
-
-export class ResizeOverlay {
-  constructor(cx) {
-    this.from = props().imageResize;
-    this.handle = cx.focus_handle();
-    this.handle.focus();
-    // From the side panel's edge strip the press doesn't know the column's width: the layout's.
-    this.from = { ...this.from, px: this.from.px ?? findNode(layout(), COLUMN)?.size?.px ?? DEFAULT_WIDTH };
-    this.px = this.from.px;
-    setShared(SASH, true);
-  }
-  end() { setShared(SASH, false); closeOverlay(props().overlay); }
-  render() {
-    const node = findNode(layout(), COLUMN);
-    return div().id("image-resizing").size_full().cursor_col_resize().track_focus(this.handle)
-      .on_key_down((e) => { if (e.key === "escape") this.end(); })
-      .on_mouse_move((e) => {
-        const px = Math.round(Math.min(node?.max ?? 1200, Math.max(node?.min ?? 260, this.from.px + this.from.x - e.position.x)));
-        if (px !== this.px) { this.px = px; run("layout.resize", { id: COLUMN, px }); }
-      })
-      .on_mouse_up("left", () => this.end())
-      .on_mouse_down("left", (e, cx) => {
-        cx.stop_propagation();
-        if (e.click_count === 2) run("layout.resize", { id: COLUMN, px: DEFAULT_WIDTH });
-        this.end();
-      });
-  }
-}

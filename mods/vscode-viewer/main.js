@@ -11,7 +11,7 @@ import { View, div, image, PathBuilder, Background } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState, TextView } from "gpui-base";
 import { props, readTextFile, writeTextFile, exec, theme, appHome, nextCommand, focused, panes, spaces, run, shared, setShared } from "herdr";
 import { CACHE, IMAGES, pathHash, statOf as statOn, cachePreview } from "./preview.js";
-import { ImagePanel, ResizeOverlay } from "./image.js";
+import { ImagePanel } from "./image.js";
 import { ownPane, closeOwnArgs } from "./pane.js";
 import { htmlToMarkdown } from "./html.js";
 // Herdr starts with PATH=/usr/bin:/bin, so Homebrew/user tools (node, code, codex, trash) are looked up here too.
@@ -116,7 +116,6 @@ export default class Viewer extends View {
   init(given, cx) {
     // The side panel's Image Viewer and its zoom dialog are this mod too (image.js), sharing its preview cache.
     if (props()?.imagePanel || props()?.imageModal) return void (this.imageView = new ImagePanel(cx));
-    if (props()?.imageResize) return void (this.imageView = new ResizeOverlay(cx));
     const p = { ...props(), ...given };
     this.file = p.file; this.on = p.on ?? null; this.install = p.on && p.install ? "offer" : null;
     this.text = null;          // what is on disk, as last read or written

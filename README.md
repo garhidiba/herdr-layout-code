@@ -38,7 +38,7 @@ A VS Code-style layout for [Herdr](https://herdr.dev): a file explorer, a termin
 - Its own column right of the Explorer / Source Control panel (its button after Source Control shows and hides it), showing one picture: Fit, Fit Width, Fit Height touching the walls (double-click cycles them), zoom (buttons, ⌘/Ctrl+wheel, + − 0), pan by drag or wheel, ‹ › through the folder's images.
 - Open an image from the Explorer (right-click Open in Image Panel, or drag it onto the Image Viewer button), drop one from Finder, or Import a folder. Local and remote spaces.
 - Expand opens a large zoom dialog with the same controls.
-- The toolbar auto-hides over the picture (pin to keep it), strong downscales are resampled smoothly (Lanczos), the column resizes from its left edge, and each space (or, with Settings → Image Viewer → Scope: Global, all spaces) keeps its image, zoom and position.
+- The toolbar auto-hides over the picture (pin to keep it), strong downscales are resampled smoothly (Lanczos), the boundary between the Explorer and the column trades their widths (Herdr's own gutter), and each space (or, with Settings → Image Viewer → Scope: Global, all spaces) keeps its image, zoom and position.
 
 ### Source Control
 - Every repo under the folder, with changes and commit.
