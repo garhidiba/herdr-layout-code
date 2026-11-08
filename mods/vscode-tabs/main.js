@@ -117,6 +117,8 @@ class DragOverlay {
   }
 }
 
+// While the sash below is dragged, the time it began (0 after): vscode-viewer asks no resampled copy meanwhile.
+const SIDE_RESIZING = "vscode-tabs.side-resizing";
 // The sash between the side panel and the Image Viewer column (side.js): drawn by vscode-explorer, vscode-scm and
 // vscode-viewer, whose press opens this frameless full-window overlay (props { sideResize: { x } }) because the pointer
 // soon leaves the 8 px. Each move sizes the column and the row together (sashDrag); a release, a press or Escape ends it.
@@ -127,8 +129,9 @@ class SideResize {
     this.handle.focus();
     this.win = null;
     this.last = null;
+    setShared(SIDE_RESIZING, Date.now());
   }
-  end() { closeOverlay(props().overlay); }
+  end() { setShared(SIDE_RESIZING, 0); closeOverlay(props().overlay); }
   render() {
     return div().id("side-resizing").size_full().cursor_col_resize().track_focus(this.handle)
       .on_size_change((size) => { this.win = size; })

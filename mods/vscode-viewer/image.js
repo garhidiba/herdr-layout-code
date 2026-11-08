@@ -14,6 +14,7 @@ import { props, shared, setShared, spaces, theme, exec, appHome, readTextFile, p
 import { CACHE, pathHash, statOf, cachePreview, prune, imageExt } from "./preview.js";
 import { FITS, place, clampPan, zoomTo, zoomStep, pan, toggleFit, nextFit, FIT_NAMES, imageSize, svgSize, imagesIn, resampleWidth, resampleName,
   scopeOf, stateKey, scopedEntry, withEntry, viewOf, fromView, drawnAt, widthToApply } from "./imagefit.js";
+import { sharpStart, sharpAsk, sharpDue, sharpStarted, sharpDone, sharpWarmed, sharpShown, WARM_MS } from "./sharp.js";
 import { barsStart, barsShown, barsTick, barsClick, barsEnter, barsLeave, barsOver, barsNext } from "./toolbar.js";
 
 // { file, on, at }: show this image in the panel (vscode-explorer and vscode-tabs set it; taken once, within 5 s).
@@ -40,6 +41,9 @@ async function screenDensity() {
 // layouts/vscode.json's Image Viewer column, the row it shares with the side panel (which fills the rest of it), the panel.
 const COLUMN = "image-panel", SIDE = "side", PANEL = "panel";
 const CLICK_SLOP = 4; // px a click may move before it is a pan
+// vscode-tabs' SideResize: the time its sash drag began (0 when none); no copy is asked meanwhile (sharp.js busy).
+const SIDE_RESIZING = "vscode-tabs.side-resizing";
+const resizing = () => Date.now() - (shared(SIDE_RESIZING) || 0) < 30000;
 // Here: resamples image $1 to $3 px wide as $2 (format $4), Lanczos through ImageMagick when installed, else macOS's sips;
 // exits 3 with neither (the original is drawn then). Lands whole: written aside, then renamed. Herdr's PATH may leave magick out.
 const RESAMPLE = `PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"; [ -f "$2" ] && exit 0
@@ -80,7 +84,7 @@ export class ImagePanel {
         await cx.sleep(2000);
       }
     });
-    this.sharp = null; this.sharpWant = null; this.sharpToken = 0; // the resampled copy shown, the one asked for
+    this.sharp = sharpStart(); this.sharpDue = 0; // sharp.js' state (the copy shown, warming, asked), its next look
     this.widthKey = null; this.widthToken = 0; // the scope key whose width the column has
   }
 
@@ -222,22 +226,34 @@ export class ImagePanel {
     } else this.setState(pan(this.state, d, v, delta.x, delta.y), cx);
   }
 
-  // Asks for the copy at `width` (null: none) 150 ms after the last change of it; the shown copy stays until it lands.
+  // The copy at `width` (null: none) is wanted now; sharp.js says when to make it, which landed copy to warm and show.
   wantSharp(width, cx) {
-    const img = this.img, ask = width && `${img.path}@${width}`;
-    if (ask === this.sharpWant) return;
-    this.sharpWant = ask;
-    const token = ++this.sharpToken;
-    if (!ask) return;
+    this.sharp = sharpAsk(this.sharp, width ? `${this.img.path}@${width}` : null, Date.now());
+    this.pumpSharp(cx);
+  }
+  pumpSharp(cx) {
+    const now = Date.now(), due = sharpDue(this.sharp, now, resizing());
+    if (due?.wait) {
+      if (this.sharpDue > now && this.sharpDue <= now + due.wait) return; // an earlier look comes first
+      const at = this.sharpDue = now + due.wait;
+      return void cx.spawn(async cx => { await cx.sleep(due.wait + 5); if (this.sharpDue === at) { this.sharpDue = 0; this.pumpSharp(cx); } });
+    }
+    if (!due?.start) return;
+    const key = due.start, img = this.img, width = Number(key.slice(key.lastIndexOf("@") + 1));
+    this.sharp = sharpStarted(this.sharp, key);
     cx.spawn(async cx => {
-      await cx.sleep(150);
-      if (token !== this.sharpToken) return;
       const dir = `${appHome()}/${CACHE}`, [name, format] = resampleName(img.id, img.st, width, img.ext);
+      // An existing copy (asked before) returns at once: RESAMPLE exits 0 when the file is there.
       const r = await exec("sh", ["-c", RESAMPLE, "sh", img.local, `${dir}/${name}`, String(width), format]).catch(() => null);
-      if (r?.code !== 0 || this.img?.path !== img.path) return;
-      this.sharp = { of: img.path, path: `${CACHE}/${name}`, width };
-      cx.notify();
-      await prune(exec, dir, [name, img.path.split("/").pop()]).catch(() => {});
+      this.sharp = sharpDone(this.sharp, key, r?.code === 0 && this.img?.path === img.path ? `${CACHE}/${name}` : null);
+      if (this.sharp.warming?.key === key) {
+        cx.notify(); // drawn under the shown picture for WARM_MS, then swapped in
+        await cx.sleep(WARM_MS);
+        this.sharp = sharpWarmed(this.sharp, key);
+        cx.notify();
+        if (this.sharp.shown?.key === key) await prune(exec, dir, [name, img.path.split("/").pop()]).catch(() => {});
+      }
+      this.pumpSharp(cx); // a newer width asked meanwhile
     });
   }
 
@@ -297,8 +313,9 @@ export class ImagePanel {
     const smooth = shared(SMOOTH) !== false, pinned = shared(PINNED) === true;
     const sharpWidth = ready && smooth ? resampleWidth(d, p.width, density, this.img.ext) : null;
     if (this.img) this.wantSharp(sharpWidth, cx);
-    // The copy for this size (or an older one, until the new lands), else the original.
-    const copy = sharpWidth && this.sharp?.of === this.img?.path ? this.sharp : null;
+    // The copy for this size (or an older one, until the new lands), else the original; one landing, warming under it.
+    const copy = this.img && sharpShown(this.sharp, this.img.path);
+    const warming = this.img && this.sharp.warming?.key.startsWith(`${this.img.path}@`) ? this.sharp.warming : null;
     const src = copy ? copy.path : this.img?.path, drawn = ready ? drawnAt(p, density) : null;
     this.applyWidth(cur, cx);
     const button = (id, icon, label, action, { on = false, off = false } = {}) => div().id(id).size(24).flex_none().flex().items_center().justify_center().rounded(5)
@@ -373,7 +390,9 @@ export class ImagePanel {
       .when(large, el => this.drag ? el.cursor_grabbing() : el.cursor_grab());
     const body = this.img
       ? ready
-        ? canvas.child(image(src).absolute().left(drawn.x).top(drawn.y).w(drawn.width).h(drawn.height))
+        // (The warming copy at 1% under the picture: nothing shows it, even through a transparent picture, but GPUI draws it.)
+        ? canvas.when(Boolean(warming), el => el.child(image(warming.path).absolute().left(drawn.x).top(drawn.y).w(drawn.width).h(drawn.height).opacity(0.01)))
+          .child(image(src).absolute().left(drawn.x).top(drawn.y).w(drawn.width).h(drawn.height))
           // The fit a double-click picked, named for a moment in the middle of the picture.
           .when(Boolean(this.label && Date.now() < this.label.until), el => el.child(div().absolute().top(0).left(0).right(0).bottom(0).flex().items_center().justify_center()
             .child(div().px(12).py(5).rounded(8).bg(t.popover).border_1().border_color(t.border).text_size(13).text_color(t.foreground).child(this.label.text))))
