@@ -1108,6 +1108,7 @@ impl Editor {
     }
     /// The word under/before p: (text, start, end).
     pub fn word_at(&self, p: Pos) -> Option<(String, Pos, Pos)> {
+        let p = self.buf.clamp(p); // a head past its line's end (a drag onto a shorter line) must not slice out of bounds
         let t = &self.buf.lines[p.line];
         let s = t[..p.col].char_indices().rev().take_while(|(_, c)| is_word_char(*c)).last().map_or(p.col, |(i, _)| i);
         let e = p.col + t[p.col..].chars().take_while(|c| is_word_char(*c)).map(char::len_utf8).sum::<usize>();
