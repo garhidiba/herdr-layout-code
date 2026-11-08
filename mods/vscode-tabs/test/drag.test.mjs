@@ -38,9 +38,9 @@ test("the Image Viewer column, hidden as shipped, shares the side row with the p
   assert.deepEqual(side.children.map(c => c.id), ["panel", "image-panel"], "Herdr's gutter between them trades their widths");
   assert.equal(find(tree, "panel").size, undefined, "the panel fills the row");
   // side.js widens the row by the column and the gap when it shows.
-  Object.assign(side, { size: { px: 368 + 8 + 420 } });
+  Object.assign(side, { size: { px: 368 + 420 } });
   image.hidden = false;
-  assert.equal(panesRect(bar, win, tree).width, 1012 - 16 - 376 - 428);
+  assert.equal(panesRect(bar, win, tree).width, 1012 - 16 - 376 - 420);
 });
 
 test("with no layout tree, the panes are the whole area below the bar", () => {

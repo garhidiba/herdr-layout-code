@@ -4,7 +4,7 @@ import { spaces, panes, terminals, run, openOverlay, closeOverlay, props, theme,
 import { tabFileOf, dirtyTabs, TAB_MENU, withDetails, DETAILS } from "./tabfile.js";
 import { createTabCloser, signalCommand, CLOSE_REQUEST } from "./close.js";
 import { createMover, withViewer, fileByName, MOVE_REQUEST, VIEWER_FILES } from "./move.js";
-import { reconcileSide, sideMax } from "./side.js";
+import { reconcileSide, sideMax, sashStart, sashDrag, workWidth } from "./side.js";
 import { find, dragStarted, panesRect, headersRect, paneRects, dropTarget, dropZone, zoneRect, dragSource, panelButtonRect, DRAG_BACK } from "./drag.js";
 // side.js' remembered width of the side panel while it is hidden (shared values outlive a restart).
 const PANEL_WIDTH = "vscode-tabs.panel-width";
@@ -117,9 +117,38 @@ class DragOverlay {
   }
 }
 
+// The sash between the side panel and the Image Viewer column (side.js): drawn by vscode-explorer, vscode-scm and
+// vscode-viewer, whose press opens this frameless full-window overlay (props { sideResize: { x } }) because the pointer
+// soon leaves the 8 px. Each move sizes the column and the row together (sashDrag); a release, a press or Escape ends it.
+class SideResize {
+  constructor(cx) {
+    this.from = sashStart(layout(), props().sideResize?.x);
+    this.handle = cx.focus_handle();
+    this.handle.focus();
+    this.win = null;
+    this.last = null;
+  }
+  end() { closeOverlay(props().overlay); }
+  render() {
+    return div().id("side-resizing").size_full().cursor_col_resize().track_focus(this.handle)
+      .on_size_change((size) => { this.win = size; })
+      .on_key_down((e) => { if (e.key === "escape") this.end(); })
+      .on_mouse_move((e) => {
+        const tree = layout(), commands = sashDrag(tree, this.from, e.position.x, this.win ? workWidth(tree, this.win.width) : NaN);
+        const key = JSON.stringify(commands);
+        if (key === this.last) return;
+        this.last = key;
+        for (const [name, args] of commands) run(name, args);
+      })
+      .on_mouse_up("left", () => this.end())
+      .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.end(); });
+  }
+}
+
 export default class Tabs extends View {
   init(_props, cx) {
     if (props()?.drag) return void (this.dragView = new DragOverlay(cx));
+    if (props()?.sideResize) return void (this.dragView = new SideResize(cx));
     this.pressed = null;
     this.press = null; // { id, title, at }: the tab pressed and where, until a release or a drag out of the bar
     this.dragging = false;

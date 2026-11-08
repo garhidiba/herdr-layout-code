@@ -151,7 +151,8 @@
               },
               "min": 260,
               "max": 2108,
-              "gap": 8,
+              "gap": 0,
+              "resizable": false,
               "children": [
                 {
                   "id": "panel",

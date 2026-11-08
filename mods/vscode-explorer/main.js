@@ -5,7 +5,7 @@
 // (VS Code's explorer.autoReveal).
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { spaces, panes, focused, terminals, exec, hc, readTextFile, watchFolder, theme, window, appHome, props, shared, setShared, notify, nextCommand, openOverlay } from "herdr";
+import { spaces, panes, focused, terminals, exec, hc, readTextFile, watchFolder, theme, window, appHome, props, shared, setShared, notify, nextCommand, openOverlay, layout } from "herdr";
 import { freshRoot, encode, decode } from "./cache.js";
 import { ExplorerMenu, ExplorerDialog, TabMenu, openMenu, openInCode, explorerAction, refreshKey, openFile, splitOpen, remote, warm, REVEAL, terminalRows, IMAGE_OPEN } from "./menu.js";
 import { OPEN_AT } from "./split.js";
@@ -18,6 +18,20 @@ import { ROW, clampTop, rowAt, shown, scrollToShow, dragStarted, dropFolder, dra
 import { createDesktop } from "./desktop.js";
 import { createDetails } from "./details.js";
 import { createOps } from "./ops.js";
+// The sash to the Image Viewer column right of this panel (vscode-tabs side.js): this card's right 4 px while the column
+// shows, half of the 8 px between the cards (the column draws the other half); no line, a col-resize pointer. A press
+// opens vscode-tabs' SideResize overlay, which slides this panel as a block while the column resizes.
+const findNode = (n, id) => n?.id === id ? n : (n?.children ?? []).map(c => findNode(c, id)).find(Boolean) ?? null;
+function imageSash(card) {
+  const column = findNode(layout(), "image-panel");
+  if (!column || column.hidden) return card;
+  return h_flex().size_full().min_h(0).child(card.flex_1().min_w(0))
+    .child(div().id("image-sash").w(4).h_full().flex_none().cursor_col_resize()
+      .on_mouse_down("left", (e, cx) => {
+        cx.stop_propagation();
+        openOverlay({ mod: "vscode-tabs", kind: "window", frame: "none", at: { x: 0, y: 0 }, width: 1, height: 1, props: { sideResize: { x: e.position.x } } });
+      }));
+}
 // vscode-tabs' drag.js DRAG_BACK: its drag overlay hands a file drag back to the tree.
 const DRAG_BACK = "vscode-tabs.drag-back";
 // Herdr starts with PATH=/usr/bin:/bin, so Homebrew/user tools (node, code, codex, trash) are looked up here too.
@@ -584,7 +598,7 @@ export default class Files extends View {
     const target = drag?.folder ?? null;
     const [hiFrom, hiTo] = target ? targetRange(rows, target) : [0, 0];
     const thumb = Math.max(24, height * height / (count * ROW || 1));
-    return v_flex().id("explorer").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
+    return imageSash(v_flex().id("explorer").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
       .child(h_flex().h(36).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .child(div().font_semibold().child("Explorer"))
         .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim).child(this.root?.split(/[\\/]/).pop() ?? "")))
@@ -634,6 +648,6 @@ export default class Files extends View {
               .child(drag.row.name));
           })))
         .when(Boolean(this.error) || !this.entries.get("")?.length, el => el.child(div().p(8).text_size(12).text_color(t.dim).child(this.error || (this.loading ? "Loading files…" : this.root ? "No files" : "No folder"))))
-        .when(this.limited, el => el.child(div().p(8).text_size(11).text_color(t.dim).child("File list limited to 500 entries per folder and 5,000 total"))));
+        .when(this.limited, el => el.child(div().p(8).text_size(11).text_color(t.dim).child("File list limited to 500 entries per folder and 5,000 total")))));
   }
 }

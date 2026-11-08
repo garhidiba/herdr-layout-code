@@ -7,7 +7,7 @@
 // Pictures go through the viewer's preview cache (preview.js cachePreview; a remote space's file is fetched first),
 // the placing rules are imagefit.js'. A strong downscale is drawn from a resampled copy (Smooth, the default; imagefit.js
 // resampleWidth). The two toolbar rows show over the picture on a click and hide by themselves (toolbar.js), unless pinned. The
-// column shares the layout's `side` row with the side panel, so Herdr's own gutter between them trades their widths.
+// column shares the layout's `side` row with the side panel; the sash between them is vscode-tabs side.js'.
 import { div, svg, image } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
 import { props, shared, setShared, spaces, theme, exec, appHome, readTextFile, pickFolder, openOverlay, closeOverlay, layout, run, window } from "herdr";
@@ -37,8 +37,8 @@ async function screenDensity() {
   density = r?.code === 0 && n >= 1 && n <= 4 ? n : 1;
   return density;
 }
-// layouts/vscode.json's Image Viewer column and the row it shares with the side panel (which fills the rest of it).
-const COLUMN = "image-panel", SIDE = "side";
+// layouts/vscode.json's Image Viewer column, the row it shares with the side panel (which fills the rest of it), the panel.
+const COLUMN = "image-panel", SIDE = "side", PANEL = "panel";
 const CLICK_SLOP = 4; // px a click may move before it is a pan
 // Here: resamples image $1 to $3 px wide as $2 (format $4), Lanczos through ImageMagick when installed, else macOS's sips;
 // exits 3 with neither (the original is drawn then). Lands whole: written aside, then renamed. Herdr's PATH may leave magick out.
@@ -405,7 +405,16 @@ export class ImagePanel {
         .child(div().absolute().top(0).left(0).right(0).bottom(0).rounded(10).border_1().border_color(t.border)))
       .when(Boolean(status), el => el.child(div().absolute().left(0).right(0).bottom(0).h(22).px(10).bg(t.background).opacity(0.94).flex().items_center().border_t(1).border_color(t.border).text_size(11.5).text_color(t.dim).truncate().child(status)));
     if (this.modal) return card;
-    return h_flex().id("image-column").size_full().min_h(0).on_size_change((_s, cx) => this.saveWidth(cx)).child(card);
+    // The column: the left half of the sash to the side panel while that shows (vscode-tabs side.js; the panel draws the
+    // right 4 px), then the card.
+    const panel = findNode(layout(), PANEL);
+    return h_flex().id("image-column").size_full().min_h(0).on_size_change((_s, cx) => this.saveWidth(cx))
+      .when(Boolean(panel && !panel.hidden), el => el.child(div().id("image-sash").w(4).h_full().flex_none().cursor_col_resize()
+        .on_mouse_down("left", (e, cx) => {
+          cx.stop_propagation();
+          openOverlay({ mod: "vscode-tabs", kind: "window", frame: "none", at: { x: 0, y: 0 }, width: 1, height: 1, props: { sideResize: { x: e.position.x } } });
+        })))
+      .child(card);
   }
 }
 
