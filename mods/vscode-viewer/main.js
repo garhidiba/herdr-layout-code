@@ -179,6 +179,7 @@ export default class Viewer extends View {
 
   // Herdr calls this when the tab closes: keep unsaved text as a hot-exit backup (bounded: one stat and one write).
   async close() {
+    if (this.imageView) return this.imageView.close?.();
     if (!this.code || !this.dirty || this.on) return;
     try {
       const st = await statOf(this.file);

@@ -36,6 +36,20 @@ export function zoomTo(state, img, view, scale, at = { x: view.width / 2, y: vie
   return { fit: null, scale: next, ...clampPan({ x: at.x - (at.x - now.x) * k, y: at.y - (at.y - now.y) * k }, img, view, next) };
 }
 
+// The view kept for coming back (a space switch, a restart, the dialog handing back): the fit, else the hand zoom, and
+// the picture's point at the view's center as shares of its size, so a resized view stays on the same spot.
+export function viewOf(state, img, view) {
+  const p = place(state, img, view);
+  return { fit: state.fit ?? null, scale: p.scale, cx: (view.width / 2 - p.x) / p.width, cy: (view.height / 2 - p.y) / p.height };
+}
+// The view state that shows `saved` (viewOf's) again in `view`; no saved view: contain.
+export function fromView(saved, img, view) {
+  if (!saved) return { fit: "contain", scale: 1, x: null, y: null };
+  const fit = FITS.includes(saved.fit) ? saved.fit : null, scale = fit ? fitScale(img, view, fit) : clampScale(saved.scale ?? 1);
+  const at = (c, size, room) => Number.isFinite(c) ? room / 2 - c * size * scale : null;
+  return { fit, scale, ...clampPan({ x: at(saved.cx, img.width, view.width), y: at(saved.cy, img.height, view.height) }, img, view, scale) };
+}
+
 // One zoom step in (dir > 0) or out from the scale shown now, as the − / + buttons and keys do.
 export function zoomStep(state, img, view, dir, at) {
   const s = place(state, img, view).scale;
@@ -126,4 +140,29 @@ export function resampleWidth(img, drawn, density = 2, ext = "") {
 export function resampleName(id, st, width, ext) {
   const jpeg = ext === "jpg" || ext === "jpeg";
   return [`${id}r-${st.mtime}-${st.size}-w${width}.${jpeg ? "jpg" : "png"}`, jpeg ? "jpeg" : "png"];
+}
+
+// ----- scope: one image per space (default) or one for all spaces (vscode-settings.json "imageViewer.scope") -----
+
+export const GLOBAL = "*"; // the STATE entry every space shares in global scope (space ids never are "*")
+// The scope from vscode-settings.json's text (comments and trailing commas allowed, as VS Code's); "space" unless "global".
+export function scopeOf(text) {
+  try {
+    const o = JSON.parse(String(text ?? "").replace(/("(?:[^"\\]|\\.)*")|\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, (m, s) => s ?? "").replace(/,(\s*[}\]])/g, "$1") || "{}");
+    return o?.["imageViewer.scope"] === "global" ? "global" : "space";
+  } catch { return "space"; }
+}
+// The STATE entry a view keeps: the shown space's, or GLOBAL.
+export const stateKey = (scope, space) => scope === "global" ? GLOBAL : space;
+// The entry a view shows (`all`: STATE): its own, else, so switching the scope never blanks the view, the other
+// scope's (the global one, or the shown space's). Entries keep their machine (`on`), so a remote image still loads.
+export function scopedEntry(all, scope, space) {
+  const own = all?.[stateKey(scope, space)], other = all?.[stateKey(scope === "global" ? "space" : "global", space)];
+  return own?.file ? own : other?.file ? other : own ?? null;
+}
+// STATE with `patch` merged into the view's entry (on top of what it shows), spaces no longer in `live` dropped.
+export function withEntry(all, scope, space, live, patch) {
+  const key = stateKey(scope, space);
+  const kept = Object.fromEntries(Object.entries(all ?? {}).filter(([k]) => k === GLOBAL || live.has(k)));
+  return { ...kept, [key]: { ...scopedEntry(all, scope, space), ...patch } };
 }

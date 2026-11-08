@@ -1,7 +1,7 @@
 // node --test mods/vscode-viewer/test/imagefit.test.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
-import { fitScale, clampPan, place, zoomTo, zoomStep, pan, toggleFit, toggleZoom, imageSize, svgSize, imagesIn, STEPS, resampleWidth, resampleName } from "../imagefit.js";
+import { fitScale, clampPan, place, zoomTo, zoomStep, pan, toggleFit, toggleZoom, imageSize, svgSize, imagesIn, STEPS, resampleWidth, resampleName, scopeOf, stateKey, scopedEntry, withEntry, GLOBAL, viewOf, fromView } from "../imagefit.js";
 
 const view = { width: 400, height: 300 };
 const wide = { width: 1600, height: 600 }, tall = { width: 300, height: 1200 }, small = { width: 100, height: 50 };
@@ -114,4 +114,51 @@ test("copies are named by the source's cache id, version and width, outside cach
   assert.deepEqual(resampleName("abc", st, 896, "webp"), ["abcr-1700000000-12345-w896.png", "png"]);
   assert.notEqual(resampleName("abc", st, 896, "png")[0], resampleName("abc", { ...st, size: 1 }, 896, "png")[0]);
   assert.ok(!resampleName("abc", st, 896, "png")[0].startsWith("abc-"));
+});
+
+test("the scope setting: per space unless vscode-settings.json says global, comments allowed", () => {
+  assert.equal(scopeOf(null), "space");
+  assert.equal(scopeOf("{ // mine\n \"imageViewer.scope\": \"global\", }"), "global");
+  assert.equal(scopeOf('{ "imageViewer.scope": "everywhere" }'), "space");
+  assert.equal(scopeOf("{ not json"), "space");
+});
+
+test("per space each space keeps its image; global one entry for all, a remote image keeping its machine", () => {
+  const live = new Set(["s1", "s2"]);
+  let all = withEntry({}, "space", "s1", live, { file: "/a.png", on: null, fit: "width" });
+  all = withEntry(all, "space", "s2", live, { file: "/b.png", on: "box" });
+  assert.equal(scopedEntry(all, "space", "s1").file, "/a.png");
+  assert.equal(scopedEntry(all, "space", "s2").on, "box");
+  all = withEntry(all, "global", "s2", live, { file: "/r.png", on: "box" });
+  assert.deepEqual(Object.keys(all).sort(), [GLOBAL, "s1", "s2"]);
+  assert.deepEqual(scopedEntry(all, "global", "s1"), { file: "/r.png", on: "box" });
+  assert.equal(stateKey("global", "s1"), GLOBAL);
+  assert.equal(stateKey("space", "s1"), "s1");
+});
+
+test("switching the scope keeps the shown image: an empty entry shows the other scope's until it gets its own", () => {
+  const all = { s1: { file: "/a.png", on: null, fit: "height" } };
+  assert.equal(scopedEntry(all, "global", "s1").file, "/a.png");
+  const next = withEntry(all, "global", "s1", new Set(["s1"]), { fit: "width" });
+  assert.deepEqual(next[GLOBAL], { file: "/a.png", on: null, fit: "width" });
+  assert.equal(scopedEntry({ [GLOBAL]: { file: "/g.png" } }, "space", "s9").file, "/g.png");
+  assert.equal(scopedEntry({}, "space", "s1"), null);
+  assert.deepEqual(Object.keys(withEntry({ gone: { file: "/x" } }, "space", "s1", new Set(["s1"]), {})), ["s1"]);
+});
+
+test("a kept view comes back on the same spot at the same zoom, also in a resized view", () => {
+  const z = zoomTo({ fit: "contain" }, wide, view, 2, { x: 100, y: 100 });
+  const kept = viewOf(z, wide, view);
+  assert.equal(kept.fit, null); assert.equal(kept.scale, 2);
+  const back = fromView(kept, wide, view);
+  assert.deepEqual({ x: back.x, y: back.y, scale: back.scale }, { x: z.x, y: z.y, scale: 2 });
+  // A wider view keeps the same picture point at its center.
+  const big = { width: 800, height: 300 }, there = fromView(kept, wide, big);
+  assert.equal((400 - there.x) / (wide.width * 2), kept.cx);
+  // A fit comes back as the fit (with its scroll), whatever the view's size.
+  const scrolled = pan({ fit: "width", x: null, y: null }, tall, view, 0, 200);
+  const again = fromView(viewOf(scrolled, tall, view), tall, view);
+  assert.equal(again.fit, "width"); assert.equal(again.y, scrolled.y);
+  assert.deepEqual(fromView(null, wide, view), { fit: "contain", scale: 1, x: null, y: null });
+  assert.equal(fromView({ scale: 999, cx: 0.5, cy: 0.5 }, wide, view).scale, 32);
 });

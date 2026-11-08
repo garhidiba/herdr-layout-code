@@ -12,11 +12,13 @@ import { div, svg, image } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
 import { props, shared, setShared, spaces, theme, exec, appHome, readTextFile, pickFolder, openOverlay, closeOverlay, layout, run } from "herdr";
 import { CACHE, pathHash, statOf, cachePreview, prune, imageExt } from "./preview.js";
-import { FITS, place, clampPan, zoomTo, zoomStep, pan, toggleFit, toggleZoom, imageSize, svgSize, imagesIn, resampleWidth, resampleName } from "./imagefit.js";
+import { FITS, place, clampPan, zoomTo, zoomStep, pan, toggleFit, toggleZoom, imageSize, svgSize, imagesIn, resampleWidth, resampleName,
+  scopeOf, stateKey, scopedEntry, withEntry, viewOf, fromView } from "./imagefit.js";
 
 // { file, on, at }: show this image in the panel (vscode-explorer and vscode-tabs set it; taken once, within 5 s).
 export const IMAGE_OPEN = "vscode-viewer.image-open";
-// { [space id]: { file, on, fit } }: each space's image and its last fit, gone spaces dropped.
+// { [space id | "*"]: { file, on, fit, view } }: each space's image (or, in global scope, the one entry "*"), its last
+// fit and its view (imagefit.js viewOf), gone spaces dropped. The scope is vscode-settings.json's "imageViewer.scope".
 const STATE = "vscode-viewer.image-panel";
 // Kept for every space and both views: the toolbar pinned (true) or hiding (default); Smooth downscales (default) or off.
 const PINNED = "vscode-viewer.image-toolbar-pinned", SMOOTH = "vscode-viewer.image-smooth";
@@ -53,22 +55,51 @@ export class ImagePanel {
     this.list = null;     // { folder, on, names }: the images beside it
     this.busy = null; this.error = null; this.drag = null; this.taken = null;
     this.hover = false; this.flashUntil = 0; this.width = 0;
+    this.scope = "space"; this.pending = null; this.seenView = null; this.saveToken = 0;
+    // The scope setting, read now and every 2 s (the Settings dialog writes the file).
+    cx.spawn(async cx => {
+      for (;;) {
+        const scope = scopeOf(await readTextFile(`${appHome()}/vscode-settings.json`).catch(() => null));
+        if (scope !== this.scope) { this.scope = scope; cx.notify(); }
+        await cx.sleep(2000);
+      }
+    });
     this.sharp = null; this.sharpWant = null; this.sharpToken = 0; // the resampled copy shown, the one asked for
   }
 
   space() { return spaces().find(s => s.active)?.id ?? null; }
-  current() { return (shared(STATE) ?? {})[this.space()] ?? null; }
-  // Merges `patch` into the shown space's entry.
+  current() { return scopedEntry(shared(STATE), this.scope, this.space()); }
+  // What this view shows: its entry's key and image.
+  wantKey(cur) { return cur?.file ? `${stateKey(this.scope, this.space())}|${keyOf(cur)}` : null; }
+  // Merges `patch` into the shown entry (the space's, or the global one).
   remember(patch) {
-    const space = this.space(), all = shared(STATE) ?? {}, live = new Set(spaces().map(s => s.id));
-    if (!space) return;
-    setShared(STATE, { ...Object.fromEntries(Object.entries(all).filter(([k]) => live.has(k))), [space]: { ...all[space], ...patch } });
+    const space = this.space();
+    if (space) setShared(STATE, withEntry(shared(STATE), this.scope, space, new Set(spaces().map(s => s.id)), patch));
   }
-  show(file, on) { this.want = null; this.remember({ file, on: on ?? null }); }
+  show(file, on) { this.want = null; this.remember({ file, on: on ?? null, view: null }); }
+  // The view, kept 300 ms after the last zoom or pan (the dialog keeps its own until it closes: close()).
+  saveSoon(cx) {
+    if (this.modal) return;
+    const token = ++this.saveToken, want = this.want;
+    cx.spawn(async cx => {
+      await cx.sleep(300);
+      if (token !== this.saveToken || want !== this.want) return; // another space or image meanwhile
+      const view = this.keptView();
+      if (!view) return;
+      this.seenView = JSON.stringify(view);
+      this.remember({ view, ...(view.fit ? { fit: view.fit } : {}) });
+    });
+  }
+  keptView() { return this.img?.dims && this.view ? viewOf(this.state, this.img.dims, this.view) : null; }
+  // Herdr ends this copy (the dialog closing, by any way): the dialog hands its view back to the panel.
+  close() {
+    const view = this.modal && this.keptView();
+    if (view) this.remember({ view, ...(view.fit ? { fit: view.fit } : {}) });
+  }
 
   // Copies the image into the cache, reads its size, then shows it at the space's fit (the dialog: the panel's).
   load(cur, cx) {
-    const want = (this.want = keyOf(cur)), { file, on = null } = cur;
+    const want = (this.want = this.wantKey(cur)), { file, on = null } = cur;
     this.busy = "Loading…"; this.error = null;
     cx.spawn(async cx => {
       try {
@@ -82,12 +113,15 @@ export class ImagePanel {
         const local = `${dir}/${made.shown}`;
         const dims = ext === "svg" ? svgSize(await readTextFile(local).catch(() => null)) : imageSize(await headBytes(local));
         if (this.want !== want) return;
-        const fit = this.img ? cur.fit : this.modal?.fit ?? cur.fit;
+        // Its kept view (the dialog's first picture: the panel's), applied once the view's size is known (render).
+        const first = !this.img && this.modal, fit = first ? this.modal.fit ?? cur.fit : cur.fit;
+        this.pending = (first ? this.modal.view : cur.view) ?? { fit: FITS.includes(fit) ? fit : "contain" };
+        this.seenView = JSON.stringify(cur.view ?? null);
         this.img = { file, on, path: `${CACHE}/${made.shown}`, dims, local, id, st, ext };
         // A new picture shows the toolbar for a moment.
         this.flashUntil = Date.now() + 1500;
         cx.spawn(async cx => { await cx.sleep(1600); cx.notify(); });
-        this.state = { fit: FITS.includes(fit) ? fit : "contain", scale: 1, x: null, y: null };
+        this.state = fromView(null);
         if (this.list?.folder !== folderOf(file) || this.list?.on !== on) this.list = await this.siblings(folderOf(file), on);
       } catch (e) {
         if (this.want === want) { this.img = null; this.error = String(e?.message ?? e); }
@@ -125,7 +159,7 @@ export class ImagePanel {
   // A fit button's or key's change, kept as the space's fit; a hand zoom isn't kept.
   setState(next, cx) {
     this.state = next;
-    if (next.fit && next.fit !== this.current()?.fit) this.remember({ fit: next.fit });
+    this.saveSoon(cx);
     cx.notify();
   }
 
@@ -181,7 +215,7 @@ export class ImagePanel {
   }
 
   expand() {
-    openOverlay({ mod: "vscode-viewer", kind: "dialog", width: 0.9, height: 0.9, props: { imageModal: { fit: this.state.fit ?? "contain" } } });
+    openOverlay({ mod: "vscode-viewer", kind: "dialog", width: 0.9, height: 0.9, props: { imageModal: { fit: this.state.fit ?? "contain", view: this.keptView() } } });
   }
 
   render(cx) {
@@ -194,11 +228,17 @@ export class ImagePanel {
       }
     }
     const cur = this.current();
-    if (keyOf(cur) !== this.want) {
+    if (this.wantKey(cur) !== this.want) {
       if (cur?.file) this.load(cur, cx);
       else { this.want = null; this.img = null; this.list = null; }
+    } else if (!this.modal && this.img && JSON.stringify(cur?.view ?? null) !== this.seenView) {
+      // A view kept by someone else (the dialog closing): shown here too.
+      this.seenView = JSON.stringify(cur?.view ?? null);
+      this.pending = cur?.view ?? null;
     }
-    const d = this.img?.dims, v = this.view, ready = Boolean(d && v), p = ready ? place(this.state, d, v) : null;
+    const d = this.img?.dims, v = this.view, ready = Boolean(d && v);
+    if (ready && this.pending) { this.state = fromView(this.pending, d, v); this.pending = null; }
+    const p = ready ? place(this.state, d, v) : null;
     const smooth = shared(SMOOTH) !== false, pinned = shared(PINNED) === true;
     const sharpWidth = ready && smooth ? resampleWidth(d, p.width, DENSITY, this.img.ext) : null;
     if (this.img) this.wantSharp(sharpWidth, cx);
@@ -255,8 +295,7 @@ export class ImagePanel {
       .on_mouse_move((e, cx) => {
         const g = this.drag;
         if (!g || !ready) return;
-        this.state = { ...this.state, ...clampPan({ x: g.x + e.position.x - g.at.x, y: g.y + e.position.y - g.at.y }, d, v, p.scale) };
-        cx.notify();
+        this.setState({ ...this.state, ...clampPan({ x: g.x + e.position.x - g.at.x, y: g.y + e.position.y - g.at.y }, d, v, p.scale) }, cx);
       })
       .on_mouse_up("left", (_e, cx) => { if (this.drag) { this.drag = null; cx.notify(); } })
       .on_hover((on) => { if (!on) this.drag = null; })
