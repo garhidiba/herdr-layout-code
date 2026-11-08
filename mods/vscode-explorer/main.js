@@ -10,7 +10,7 @@ import { freshRoot, encode, decode } from "./cache.js";
 import { ExplorerMenu, ExplorerDialog, TabMenu, openMenu, openInCode, explorerAction, refreshKey, openFile, splitOpen, remote, warm, REVEAL, terminalRows, IMAGE_OPEN } from "./menu.js";
 import { OPEN_AT } from "./split.js";
 import { WARM } from "./warm.js";
-import { createCore } from "./core.js";
+import { createCore, relevant, stampOf, stale } from "./core.js";
 import { editorFileOf, autoRevealOf, revealPath, within, isImage, DETAILS } from "./paths.js";
 import { treeAction, step } from "./keys.js";
 import { keysOs } from "./remote.js";
@@ -70,6 +70,8 @@ function activeFile(f, viewer) {
 // Other spaces' trees load in the background: 3s after start, 2 at a time, again every 10 minutes
 // (and when a space appears), skipping ones loaded in the last 2 minutes.
 const CACHE = "vscode-explorer.cache", FRESH = 120000, PRELOAD_EVERY = 600000, SAVE_EVERY = 60000, REMOTE_POLL = 3000;
+// A watched tree reads again at most every 5s while its folder changes (a build); the header spins once a read takes 0.4s.
+const QUIET = 5000, SLOW = 400;
 
 // VS Code's git decoration colors and how severe each state is (a folder shows its worst child).
 const GIT_COLOR = { M: "#e2c08d", A: "#73c991", U: "#73c991", D: "#c74e39", "!": "#e4676b" };
@@ -178,7 +180,7 @@ export default class Files extends View {
     cx.timer.every(10000, cx => {
       cx.spawn(() => desktop.sync(terminals(), panes()));
       this.warmFill(cx, 0);
-      this.refresh(cx);
+      this.tick(cx);
       if (this.known && spaces().some(s => !this.known.has(s.id))) this.preloadAll(cx);
     });
     // Remote folders can't be watched (watchFolder is local), so a remote tree polls in its place.
@@ -262,9 +264,31 @@ export default class Files extends View {
     this.watched = root;
     const context = this.context;
     cx.spawn(async cx => {
-      try { while (this.context === context) { await watchFolder(root); if (this.current(context)) this.refresh(cx); } }
+      try {
+        while (this.context === context) {
+          const paths = await watchFolder(root);
+          // Changes during the pause come in the next batch.
+          if (this.current(context) && relevant(paths)) { this.refresh(cx); await cx.sleep(QUIET); }
+        }
+      }
       catch { if (this.context === context) this.watched = null; }
     });
+  }
+
+  // The 10s timer: a remote or unwatched tree reads every time, a watched one only when core.js stale() says so.
+  tick(cx) {
+    const context = this.context;
+    if (!context || key() !== context.key || this.on || !this.watched) return this.refresh(cx);
+    cx.spawn(async cx => { if (await stale(context.seen, () => this.stamp(context)) && this.current(context)) this.refresh(cx); });
+  }
+
+  // What tick() compares (core.js stampOf): the root, the open folders, and the repo's index and HEAD (its .git may be
+  // above the root, where the watch doesn't look).
+  async stamp(context) {
+    const { cwd } = context;
+    context.gitDir ??= await exec("git", ["rev-parse", "--absolute-git-dir"], { cwd }).then(r => r.code === 0 ? r.stdout.trim() : "", () => "");
+    const git = context.gitDir ? [context.gitDir, `${context.gitDir}/index`, `${context.gitDir}/HEAD`] : [];
+    return stampOf(exec, [cwd, ...[...this.folders].map(f => `${cwd}/${f}`), ...git], window()?.platform);
   }
 
   current(context) {
@@ -296,23 +320,26 @@ export default class Files extends View {
     // change, and a row left for a deleted file would offer to delete it again.
     if (this.loading) { this.again = true; return; }
     const context = this.context;
-    this.loading = true;
-    this.limited = false;
+    this.loading = true; this.loadedFrom = Date.now();
+    cx.timer.after(SLOW, cx => cx.notify());
     cx.spawn(async cx => {
       try {
+        // Taken before the read, so a change during it shows at the next tick.
+        const stamp = on ? null : await this.stamp(context);
         const fast = await coreTree(cwd, on, this.folders);
         if (fast && !this.current(context)) return;
         if (fast) {
           for (const [path, list] of Object.entries(fast.entries)) if (!path || this.folders.has(path)) this.entries.set(path, list);
           this.limited = fast.limited;
         } else for (const path of ["", ...this.folders]) {
+          if (!path) this.limited = false;
           if (!this.current(context)) return;
           // An open folder that is gone (deleted, moved) closes, as preload() drops it.
           await this.loadFolder(path, context).catch(e => { if (!path) throw e; this.forget(path); });
         }
         const marks = fast?.marks ?? await gitMarks(cwd, on);
         if (!this.current(context)) return;
-        this.marks = marks; this.dirty = dirtyOf(marks); this.error = null; this.watch(cwd, cx);
+        this.marks = marks; this.dirty = dirtyOf(marks); this.error = null; context.seen = { stamp, at: Date.now() }; this.watch(cwd, cx);
         this.saved.set(context.key, { folders: this.folders, entries: this.entries, marks, dirty: this.dirty, at: Date.now() });
         this.changed(cx);
       } catch (e) { if (this.current(context)) this.error = String(e); }
@@ -601,6 +628,8 @@ export default class Files extends View {
     return imageSash(v_flex().id("explorer").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
       .child(h_flex().h(36).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .child(div().font_semibold().child("Explorer"))
+        // The shown tree stays while it reads again; a read that takes a while spins here (mods/workspace-chrome is Herdr's).
+        .when(this.loading && Date.now() - this.loadedFrom >= SLOW && Boolean(this.entries.get("")?.length), el => el.child(svg("mods/workspace-chrome/spinner.svg").size(11).flex_none().text_color(t.dim).spin(900)))
         .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim).child(this.root?.split(/[\\/]/).pop() ?? "")))
       .child(v_flex().id("explorer-tree").flex_1().min_h(0).p(4).track_focus(this.handle)
         .on_key_down((e, cx) => {
