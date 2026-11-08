@@ -660,6 +660,7 @@ impl Editor {
             self.wrap_rows.edited(*c);
             lang_ui::shift_lenses(&mut self.lang.lenses, *c);
         }
+        self.top = self.top.min(self.buf.lines.len() - 1); // a shorter text: reveal's row math indexes by it
         self.git.changed();
     }
     fn apply(&mut self, edits: Vec<Edit>, before: Sel, after: Option<Sel>, typing: bool) {
@@ -1167,7 +1168,9 @@ impl Editor {
         let after = Sel { anchor: shift(self.sel.anchor), head: shift(self.sel.head) };
         let end = pos(to, self.buf.lines[to].len());
         self.apply(vec![edit(pos(from, 0), end, text)], before, Some(after), false);
-        self.sel = after;
+        let last = self.buf.lines.len() - 1;
+        let fit = |p: Pos| if p.line > last { pos(last, self.buf.lines[last].len()) } else { p }; // an end at the next line's start, moved past the last line
+        self.sel = Sel { anchor: fit(after.anchor), head: fit(after.head) };
         self.buf.seal();
         self.reveal();
     }
@@ -1206,28 +1209,38 @@ impl Editor {
         let end = if single { (s.line + 1).min(last) } else { e.line };
         let end_len = self.buf.lines[end].len();
         let (mut text, mut back) = (self.buf.lines[s.line].clone(), 0);
-        for t in &self.buf.lines[s.line + 1..=end] {
+        let (mut kept, mut head) = (text.len(), None); // the first line's part left as it was; where e lands
+        for (l, t) in self.buf.lines[s.line + 1..=end].iter().enumerate().map(|(k, t)| (s.line + 1 + k, t)) {
             let Some(i) = t.find(|c| c != ' ' && c != '\t') else {
                 back = 0;
+                if l == e.line {
+                    head = Some(text.len());
+                }
                 continue;
             };
             let mut space = !text.is_empty();
             if space && text.ends_with([' ', '\t']) {
                 space = false;
-                text = text.trim_end_matches(|c: char| c.is_whitespace() || c == '\u{feff}').to_string() + " ";
+                text = text.trim_end_matches(|c: char| c.is_whitespace() || c == '\u{feff}').to_string();
+                kept = kept.min(text.len());
+                text.push(' ');
             }
             if space {
                 text.push(' ');
             }
+            if l == e.line {
+                head = Some(text.len() + e.col.saturating_sub(i)); // an end in the indent: where the text starts
+            }
             text.push_str(&t[i..]);
             back = t.len() - i + space as usize;
         }
+        let first = |p: Pos| pos(s.line, p.col.min(kept)); // a column in trimmed trailing whitespace: the trim point
         let after = if self.empty() {
             caret(pos(s.line, text.len() - back))
         } else if single {
-            Sel { anchor: s, head: e }
+            Sel { anchor: first(s), head: first(e) }
         } else {
-            Sel { anchor: s, head: pos(s.line, text.len() - (end_len - e.col)) }
+            Sel { anchor: first(s), head: pos(s.line, head.unwrap_or(text.len())) }
         };
         if end > s.line {
             let before = self.sel;
@@ -2671,6 +2684,62 @@ pub(crate) mod tests {
         assert_eq!((text(&multi), sel(&multi)), (vec!["a bc", "d"], [0, 0, 0, 3]));
         multi.undo(false);
         assert_eq!(text(&multi), ["a", "", "  bc", "d"]);
+    }
+
+    #[test]
+    fn join_lines_keeps_a_selection_in_trimmed_whitespace_or_an_indent_inside_the_joined_line() {
+        let mut ed = editor("/tmp/.env", &["ADMOB_REWARDED_ID=    ", "x"]);
+        ed.sel = Sel { anchor: pos(0, 0), head: pos(0, 22) }; // into the trailing whitespace the join trims
+        ed.join_lines();
+        assert_eq!((text(&ed), sel(&ed)), (vec!["ADMOB_REWARDED_ID= x"], [0, 0, 0, 18]));
+        let mut ed = editor("/tmp/x.txt", &["a", "    b"]);
+        ed.sel = Sel { anchor: pos(0, 0), head: pos(1, 2) }; // ending in the last line's indent
+        ed.join_lines();
+        assert_eq!((text(&ed), sel(&ed)), (vec!["a b"], [0, 0, 0, 2]));
+        let mut ed = editor("/tmp/x.txt", &["a", "b", "   "]);
+        ed.sel = Sel { anchor: pos(0, 0), head: pos(2, 3) }; // ending on a blank line, which vanishes
+        ed.join_lines();
+        assert_eq!((text(&ed), sel(&ed)), (vec!["a b"], [0, 0, 0, 3]));
+    }
+
+    #[test]
+    fn move_lines_down_with_an_end_at_the_last_lines_start_keeps_the_selection_in_the_text() {
+        let mut ed = editor("/tmp/x.txt", &["a", "b", "c"]);
+        ed.move_to(pos(1, 0), false);
+        run(&mut ed, "expandLineSelection"); // (1,0)-(2,0): line 1 only
+        run(&mut ed, "editor.action.moveLinesDownAction");
+        assert_eq!((text(&ed), sel(&ed)), (vec!["a", "c", "b"], [2, 0, 2, 1]));
+    }
+
+    #[test]
+    fn select_all_and_type_while_wrapped_and_scrolled_down_keeps_the_first_line_in_the_text() {
+        let lines: Vec<String> = (0..60).map(|i| format!("line {i} {}", "w ".repeat(40))).collect();
+        let mut ed = wrapped(&lines.iter().map(String::as_str).collect::<Vec<_>>(), "on", 10, 40);
+        screen(&mut ed);
+        run(&mut ed, "cursorBottom");
+        screen(&mut ed);
+        run(&mut ed, "editor.action.selectAll");
+        ed.handle(&Ev::Text("x".into()), None);
+        assert_eq!((text(&ed), ed.top), (vec!["x"], 0));
+        screen(&mut ed);
+    }
+
+    #[test]
+    fn a_drag_onto_a_shorter_line_past_its_end_leaves_the_head_there_for_the_word_paths() {
+        let mut ed = wrapped(&["ADMOB_APP_ID=ca-app-pub-1234567890", "ADMOB_REWARDED_ID=", "x".repeat(80).as_str()], "off", 10, 60);
+        screen(&mut ed);
+        let gw = ed.gutter() as i32;
+        let m = |x, y, motion| crate::keys::Mouse { button: 0, x, y, motion, ..Default::default() };
+        ed.mouse(&m(gw + 30, 2, false), None);
+        ed.mouse(&m(gw + 40, 3, true), None);
+        ed.mouse(&crate::keys::Mouse { button: 0, x: gw + 40, y: 3, release: true, ..Default::default() }, None);
+        assert_eq!(ed.head(), pos(1, 18));
+        ed.move_to(ed.head(), false);
+        assert_eq!(ed.word_at(ed.head()), None); // after "=": no word
+        screen(&mut ed); // the word highlight and the status bar read the head
+        run(&mut ed, "editor.action.addSelectionToNextFindMatch");
+        run(&mut ed, "actions.find");
+        screen(&mut ed);
     }
 
     #[test]

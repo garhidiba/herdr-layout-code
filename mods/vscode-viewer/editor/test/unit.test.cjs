@@ -1019,6 +1019,40 @@ test("Join Lines joins the next line with one space, drops its indent and blank 
   assert.deepEqual(multi.lines, ["a", "", "  bc", "d"]);
 });
 
+test("Join Lines keeps a selection in trimmed whitespace or an indent inside the joined line", async () => {
+  const at = (al, ac, hl, hc) => ({ anchor: { line: al, col: ac }, head: { line: hl, col: hc } });
+  let ed = await plainEditor(["ADMOB_REWARDED_ID=    ", "x"]);
+  ed.sel = at(0, 0, 0, 22); // into the trailing whitespace the join trims
+  ed.joinLines();
+  assert.deepEqual([ed.lines, sel(ed)], [["ADMOB_REWARDED_ID= x"], [0, 0, 0, 18]]);
+  ed = await plainEditor(["a", "    b"]);
+  ed.sel = at(0, 0, 1, 2); // ending in the last line's indent
+  ed.joinLines();
+  assert.deepEqual([ed.lines, sel(ed)], [["a b"], [0, 0, 0, 2]]);
+  ed = await plainEditor(["a", "b", "   "]);
+  ed.sel = at(0, 0, 2, 3); // ending on a blank line, which vanishes
+  ed.joinLines();
+  assert.deepEqual([ed.lines, sel(ed)], [["a b"], [0, 0, 0, 3]]);
+});
+
+test("Move Line Down with an end at the last line's start keeps the selection in the text", async () => {
+  const ed = await plainEditor(["a", "b", "c"]);
+  ed.moveTo({ line: 1, col: 0 });
+  ed.runCommand("expandLineSelection"); // (1,0)-(2,0): line 1 only
+  ed.runCommand("editor.action.moveLinesDownAction");
+  assert.deepEqual([ed.lines, sel(ed)], [["a", "c", "b"], [2, 0, 2, 1]]);
+});
+
+test("Select All and typing while wrapped and scrolled down keeps the first line in the text", async () => {
+  const ed = await plainEditor(Array.from({ length: 60 }, (_, i) => `line ${i} ${"w ".repeat(40)}`));
+  ed.rows = 10; ed.cols = 40; ed.settings["editor.wordWrap"] = "on";
+  ed.render(0);
+  ed.runCommand("cursorBottom"); ed.render(0);
+  ed.runCommand("editor.action.selectAll");
+  ed.handle({ type: "text", text: "x" });
+  assert.deepEqual([ed.lines, ed.top, ed.topRow], [["x"], 0, 0]);
+});
+
 test("Delete All Right / Left delete the line break at the line's end / start", async () => {
   const ed = await plainEditor(["ab", "cd"]);
   ed.moveTo({ line: 0, col: 1 });

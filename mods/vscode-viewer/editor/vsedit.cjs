@@ -227,6 +227,7 @@ class Editor {
     this.reveal();
   }
   reveal() {
+    this.top = Math.min(this.top, this.lines.length - 1); // a shorter text: the row math indexes by it
     const { line, col } = this.head;
     this.folds.reveal(line); // the cursor in a fold opens it
     const { sub, x } = this.rowPos({ line, col }), v = this.toView(line) + sub, row = v - this.topRow;
@@ -1136,7 +1137,9 @@ class Editor {
     const text = (dir < 0 ? [...block, this.lines[a - 1]] : [this.lines[b + 1], ...block]).join("\n");
     const shift = (p) => ({ line: p.line + dir, col: p.col }), before = this.sel, after = { anchor: shift(this.sel.anchor), head: shift(this.sel.head) };
     this.buf.edit([{ start: { line: from, col: 0 }, end: { line: to, col: this.lines[to].length }, text }], { before, after });
-    this.sel = after; this.buf.seal(); this.reveal();
+    const last = this.lines.length - 1, fit = (p) => (p.line > last ? { line: last, col: this.lines[last].length } : p); // an end at the next line's start, moved past the last line
+    this.sel = { anchor: fit(after.anchor), head: fit(after.head) };
+    this.buf.seal(); this.reveal();
   }
   copyLines(dir) {
     const [a, b] = this.selectedLines(), block = this.lines.slice(a, b + 1).join("\n"), n = b - a + 1;
@@ -1156,17 +1159,20 @@ class Editor {
   joinLines() {
     const [s, e] = this.range(), last = this.lines.length - 1, single = s.line === e.line;
     const end = single ? Math.min(s.line + 1, last) : e.line, endText = this.lines[end];
-    let text = this.lines[s.line], back = 0;
+    let text = this.lines[s.line], back = 0, kept = text.length, head = null; // the first line's part left as it was; where e lands
     for (let l = s.line + 1; l <= end; l++) {
       const t = this.lines[l], i = t.search(/[^ \t]/);
-      if (i === -1) { back = 0; continue; }
+      if (i === -1) { back = 0; if (l === e.line) head = text.length; continue; }
       let space = text !== "";
-      if (space && /[ \t]$/.test(text)) { space = false; text = text.replace(/[\s﻿\xA0]+$/, " "); }
-      text += (space ? " " : "") + t.slice(i);
+      if (space && /[ \t]$/.test(text)) { space = false; text = text.replace(/[\s﻿\xA0]+$/, ""); kept = Math.min(kept, text.length); text += " "; }
+      if (space) text += " ";
+      if (l === e.line) head = text.length + Math.max(0, e.col - i); // an end in the indent: where the text starts
+      text += t.slice(i);
       back = t.length - i + (space ? 1 : 0);
     }
+    const first = (p) => ({ line: s.line, col: Math.min(p.col, kept) }); // a column in trimmed trailing whitespace: the trim point
     const before = this.sel, after = this.empty ? caret({ line: s.line, col: text.length - back })
-      : single ? { anchor: s, head: e } : { anchor: s, head: { line: s.line, col: text.length - (endText.length - e.col) } };
+      : single ? { anchor: first(s), head: first(e) } : { anchor: first(s), head: { line: s.line, col: head ?? text.length } };
     if (end > s.line) this.buf.edit([{ start: { line: s.line, col: 0 }, end: { line: end, col: endText.length }, text }], { before, after });
     this.sel = after; this.buf.seal(); this.reveal();
   }
