@@ -1,4 +1,4 @@
-import { claudeWindows, presentKeys, barWindows } from "./claude-windows.js";
+import { claudeWindows, presentKeys, barWindows, shapeOf } from "./claude-windows.js";
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, v_flex, HoverCard } from "gpui-base";
 import { spaces, agents, theme, run, window, keys, exec, readTextFile, appHome, nextCommand, openOverlay, notify, setShared } from "herdr";
@@ -85,6 +85,7 @@ export default class WorkspaceStatus extends View {
         const wins = u && !u.error ? claudeWindows(u).map(w => windowLabel(w)) : [];
         // Debug: which windows the API returned (key names only) to learn per-model keys.
         setShared("vscode-status.claude-keys", presentKeys(u));
+        if (u && !u.error) setShared("vscode-status.claude-shape", Object.fromEntries(["limits", "seven_day_breakdown", "weekly_scoped_shares", "extra_usage"].filter(k => k in u).map(k => [k, shapeOf(u[k])])));
         if (!wins.length) { this.apiPause = Date.now() + 900000; return; }
         this.api = { at: Date.now(), wins }; this.claude = wins; this.claudeAt = this.api.at;
         cx.notify();
