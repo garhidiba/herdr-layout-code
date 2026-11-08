@@ -1,4 +1,4 @@
-// The side panel's Image Viewer (layouts/vscode.json: the `image` block of the panel stack, props { imagePanel: true })
+// The Image Viewer column right of the side panel (layouts/vscode.json: the `image-panel` block, props { imagePanel: true })
 // and its zoom dialog (props { imageModal: { fit } }, opened by Expand): one picture filling the view, with Fit / Fit
 // Width / Fit Height, zoom (− / % / +, ⌘/Ctrl+wheel, double-click), panning (drag, wheel) and the folder's other
 // images (‹ ›). Both follow the space's image in the shared value STATE, so the dialog shows what the panel does.

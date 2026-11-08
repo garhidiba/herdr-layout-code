@@ -8,7 +8,9 @@ import { find, dragStarted, panesRect, headersRect, paneRects, dropTarget, dropZ
 // vscode-pane's { [pane]: bounds }: where each shown pane's header is, for dropping onto one pane.
 const PANE_BOUNDS = "vscode-pane.bounds";
 
-// The side panel's pages, as the bar's buttons show them (left to right): [id, label, icon].
+// The Image Viewer's own column, right of the side panel (layouts/vscode.json): its button shows and hides it alone.
+const IMAGE_COLUMN = "image-panel";
+// The side panel's pages and the Image Viewer, as the bar's buttons show them (left to right): [id, label, icon].
 const PANELS = [
   ["explorer", "Explorer", "mods/vscode-tabs/files.svg"],
   ["changes", "Source Control", "mods/vscode-tabs/source-control.svg"],
@@ -89,8 +91,7 @@ class DragOverlay {
       .on_mouse_up("left", (e) => {
         if (this.imageButton(e.position)?.over) {
           setShared(d.image, { ...d.source, at: Date.now() });
-          run("layout.select", { stack: "panel-body", child: "image" });
-          run("layout.show", { id: "panel" });
+          run("layout.show", { id: IMAGE_COLUMN });
           return this.end();
         }
         const drop = this.target(e.position);
@@ -211,14 +212,16 @@ export default class Tabs extends View {
       : 10;
     const panel = find(root, "panel"), body = find(root, "panel-body");
     // Icon-only, as VS Code's Activity Bar: the label is the tooltip; the shown view gets the foreground color and an accent underline.
+    const imageColumn = find(root, IMAGE_COLUMN);
     const panelButton = (id, label, icon) => {
-      const on = panel && !panel.hidden && body?.active === id;
+      const on = id === "image" ? Boolean(imageColumn && !imageColumn.hidden) : panel && !panel.hidden && body?.active === id;
       return div().id(`panel-${id}`).size(28).flex_none().flex().items_center().justify_center().rounded(6)
         .border_b(2).border_color(on ? t.accent : t.chrome).bg(on ? t.selected : t.chrome).text_color(on ? t.foreground : t.muted)
         .hover(s => s.bg(t.hover).text_color(t.foreground)).on_mouse_down("left", stop)
         .tooltip(label).accessibility_label(label)
         .on_click(() => {
-          if (on) run("layout.hide", { id: "panel" });
+          if (id === "image") run(on ? "layout.hide" : "layout.show", { id: IMAGE_COLUMN });
+          else if (on) run("layout.hide", { id: "panel" });
           else { run("layout.select", { stack: "panel-body", child: id }); run("layout.show", { id: "panel" }); }
         }).child(svg(icon).size(18));
     };

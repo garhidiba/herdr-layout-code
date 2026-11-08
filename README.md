@@ -35,7 +35,7 @@ A VS Code-style layout for [Herdr](https://herdr.dev): a file explorer, a termin
 - Markdown and HTML files rendered, with Open in Browser.
 
 ### Image Viewer
-- A side panel page (its button after Source Control) showing one picture: Fit, Fit Width, Fit Height, zoom (buttons, ⌘/Ctrl+wheel, double-click, + − 0), pan by drag or wheel, ‹ › through the folder's images.
+- Its own column right of the Explorer / Source Control panel (its button after Source Control shows and hides it), showing one picture: Fit, Fit Width, Fit Height, zoom (buttons, ⌘/Ctrl+wheel, double-click, + − 0), pan by drag or wheel, ‹ › through the folder's images.
 - Open an image from the Explorer (right-click Open in Image Panel, or drag it onto the Image Viewer button), drop one from Finder, or Import a folder. Local and remote spaces.
 - Expand opens a large zoom dialog with the same controls.
 

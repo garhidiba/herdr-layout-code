@@ -30,6 +30,16 @@ test("the panes are below the bar, left of the side panel while it shows, above 
   assert.equal(panesRect({ ...bar, x: 44, width: 1236 }, win, shipped).x, 52);
 });
 
+test("the Image Viewer column, hidden as shipped, takes its width and a gap from the panes while it shows", () => {
+  const tree = structuredClone(shipped), image = find(tree, "image-panel");
+  assert.equal(image.hidden, true);
+  assert.equal(find(find(tree, "panel-body"), "image-panel"), null, "its own column, not a page of the panel stack");
+  image.hidden = false;
+  assert.equal(panesRect(bar, win, tree).width, 1012 - 16 - 376 - 428);
+  find(tree, "panel").hidden = true;
+  assert.equal(panesRect(bar, win, tree).width, 1012 - 16 - 428, "the image column alone");
+});
+
 test("with no layout tree, the panes are the whole area below the bar", () => {
   assert.deepEqual(panesRect(bar, win, null), { x: 268, y: 42, width: 1012, height: 758 });
   assert.equal(panesRect(bar, { width: 10, height: 10 }, shipped).height, 0);

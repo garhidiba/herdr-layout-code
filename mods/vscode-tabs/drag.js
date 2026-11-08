@@ -8,7 +8,7 @@
 // into, title, bar?, back?, id?, image? } }. A release over a pane sets the shared value `request` to { ...source, into: the
 // shown tab, place: the zone, beside: that pane, at } for the source's mod to run (a tab: move.js MOVE_REQUEST; a file:
 // vscode-explorer's split.js). `image`: an image file's other target, the Image Viewer's panel button: a release there
-// sets that shared value (vscode-viewer's IMAGE_OPEN) to { ...source, at } and shows the panel. `bar`: the tab bar's bounds (panesRect), else the area comes from the pane headers
+// sets that shared value (vscode-viewer's IMAGE_OPEN) to { ...source, at } and shows the Image Viewer column. `bar`: the tab bar's bounds (panesRect), else the area comes from the pane headers
 // (headersRect). `back`: window bounds the drag may return to (the tree): the pointer over them closes the overlay and
 // sets DRAG_BACK to `id`, so the source picks its drag up again (a drop into a folder there).
 export const DRAG_BACK = "vscode-tabs.drag-back";
@@ -27,14 +27,17 @@ export function find(node, id) {
   return null;
 }
 
-// The shown tab's panes: below the tab bar (`bar`: its bounds; it spans the work column, the side panel's too) inside
-// layouts/vscode.json's `work-body` row (its padding), left of the side `panel` while it shows (its width and the
+// The columns right of the panes in layouts/vscode.json's `work-body` row: the side panel and the Image Viewer.
+export const SIDE_COLUMNS = ["panel", "image-panel"];
+
+// The shown tab's panes: below the tab bar (`bar`: its bounds; it spans the work column, the side columns' too) inside
+// layouts/vscode.json's `work-body` row (its padding), left of the SIDE_COLUMNS that show (each its width and the
 // row's gap), above the `status` bar; `win` is the window's size, `tree` the shown layout. The sidebar (spaces) is
 // left of the bar already.
 export function panesRect(bar, win, tree) {
-  const body = find(tree, "work-body"), panel = find(tree, "panel");
+  const body = find(tree, "work-body");
   const pad = body?.padding ?? 0, gap = body?.gap ?? 0;
-  const side = panel && !panel.hidden ? (panel.size?.px ?? 0) + gap : 0;
+  const side = SIDE_COLUMNS.map(id => find(tree, id)).reduce((n, c) => n + (c && !c.hidden ? (c.size?.px ?? 0) + gap : 0), 0);
   const top = bar.y + bar.height + pad, bottom = panesBottom(win, tree);
   return { x: bar.x + pad, y: top, width: Math.max(0, bar.width - 2 * pad - side), height: Math.max(0, bottom - top) };
 }

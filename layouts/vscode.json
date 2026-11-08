@@ -171,20 +171,26 @@
                       "content": {
                         "mod": "vscode-scm"
                       }
-                    },
-                    {
-                      "id": "image",
-                      "type": "block",
-                      "content": {
-                        "mod": "vscode-viewer",
-                        "props": {
-                          "imagePanel": true
-                        }
-                      }
                     }
                   ]
                 }
               ]
+            },
+            {
+              "id": "image-panel",
+              "type": "block",
+              "hidden": true,
+              "size": {
+                "px": 420
+              },
+              "min": 260,
+              "max": 1200,
+              "content": {
+                "mod": "vscode-viewer",
+                "props": {
+                  "imagePanel": true
+                }
+              }
             }
           ]
         },

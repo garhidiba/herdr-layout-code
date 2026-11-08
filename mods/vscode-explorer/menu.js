@@ -79,13 +79,12 @@ const copyText = (text) => osRun(clipboardCommand(os(), text)).catch(() => {});
 // Finder's Trash (or the `trash` command when installed); never rm.
 const TRASH = 'if command -v trash >/dev/null 2>&1; then trash "$1"; else osascript -e "on run argv" -e "tell application \\"Finder\\" to delete POSIX file (item 1 of argv)" -e "end run" "$1" >/dev/null; fi';
 
-// vscode-viewer's image.js IMAGE_OPEN: { file, on, at } shows that image in the side panel's Image Viewer (its `image`
-// child of the panel stack), as vscode-tabs' drag overlay does for a file dropped on the panel's button.
+// vscode-viewer's image.js IMAGE_OPEN: { file, on, at } shows that image in the Image Viewer, its own column right of
+// this panel (layouts/vscode.json `image-panel`), as vscode-tabs' drag overlay does for a file dropped on its button.
 export const IMAGE_OPEN = "vscode-viewer.image-open";
 export function openInImagePanel(file, on) {
   setShared(IMAGE_OPEN, { file, on: on ?? null, at: Date.now() });
-  run("layout.select", { stack: "panel-body", child: "image" });
-  run("layout.show", { id: "panel" });
+  run("layout.show", { id: "image-panel" });
 }
 
 // Opens the menu for an entry: { path (absolute), root, dir, on }.
