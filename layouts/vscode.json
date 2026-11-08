@@ -157,8 +157,6 @@
                   "id": "panel",
                   "type": "column",
                   "hidden": false,
-                  "min": 280,
-                  "max": 900,
                   "children": [
                     {
                       "id": "panel-body",

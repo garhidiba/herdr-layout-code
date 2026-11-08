@@ -31,11 +31,33 @@ test("showing the column widens the row by its width and the gap; hiding it give
   assert.deepEqual(run([tree({ side: 796, image: true }), tree({ side: 796 })]).commands, [["layout.resize", { id: "side", px: 368 }]]);
 });
 
-test("the gutter between them trades width: the row stays, until the panel would pass its min or max", () => {
+test("the gutter between them trades width: the row stays while the panel is within its min and max", () => {
   assert.deepEqual(run([tree({ side: 796, image: true }), tree({ side: 796, img: 300, image: true })]).commands, []);
-  // The column dragged to 600: the panel would be 188 < 280, so the column gives back to 508.
+  assert.equal(find(shipped, "panel").min, undefined, "the layout leaves the panel's min to side.js, so Herdr's gutter passes it");
+});
+
+test("the column dragged wider than the panel can give pushes the row (the panel at its min) into the panes", () => {
+  // The column dragged to 600: the panel would be 188 < 280, so the row grows to 280 + 8 + 600.
   assert.deepEqual(run([tree({ side: 796, image: true }), tree({ side: 796, img: 600, image: true })]).commands,
-    [["layout.resize", { id: "image-panel", px: 508 }]]);
+    [["layout.resize", { id: "side", px: 888 }]]);
+});
+
+test("the column dragged narrower than the panel's max allows stops there", () => {
+  assert.deepEqual(run([tree({ side: 1300, image: true }), tree({ side: 1300, img: 300, image: true })]).commands,
+    [["layout.resize", { id: "image-panel", px: 392 }]]);
+});
+
+test("at first sight a row too narrow for both (an older state) gives the panel its remembered width", () => {
+  assert.deepEqual(run([tree({ side: 368, img: 479, image: true })]).commands, [["layout.resize", { id: "side", px: 368 + 8 + 479 }]]);
+  assert.deepEqual(run([tree({ side: 368, img: 479, image: true })], 300).commands, [["layout.resize", { id: "side", px: 300 + 8 + 479 }]]);
+});
+
+test("commands whose result never shows in the layout are reported, then asked again", () => {
+  const show = reconcileSide(tree({ image: true }), reconcileSide(tree(), null, null, 0).seen, null, 10);
+  const again = reconcileSide(tree({ image: true }), show.seen, null, 10000);
+  assert.deepEqual(again.missed, { want: { side: 796, img: 420, hidden: false }, got: { side: 368, img: 420, hidden: false } });
+  assert.deepEqual(again.commands, [["layout.resize", { id: "side", px: 796 }]]);
+  assert.equal(reconcileSide(tree({ side: 796, image: true }), show.seen, null, 20).missed, null);
 });
 
 test("the row dragged past the panel's min or max is held at it", () => {
@@ -85,4 +107,12 @@ test("an older layout state's px on the panel turns back into filling the row", 
 
 test("a layout without the side row is left alone", () => {
   assert.deepEqual(reconcileSide({ id: "root", children: [] }, null, null, 0).commands, []);
+});
+
+test("a push lands while the gutter drag goes on: the next push isn't held back by the column's moving width", () => {
+  const t0 = reconcileSide(tree({ side: 796, image: true }), null, null, 0);
+  const push = reconcileSide(tree({ side: 796, img: 600, image: true }), t0.seen, null, 100);
+  assert.deepEqual(push.commands, [["layout.resize", { id: "side", px: 888 }]]);
+  const next = reconcileSide(tree({ side: 888, img: 650, image: true }), push.seen, null, 200);
+  assert.deepEqual(next.commands, [["layout.resize", { id: "side", px: 938 }]]);
 });

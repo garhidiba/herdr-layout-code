@@ -8,6 +8,11 @@ import { reconcileSide } from "./side.js";
 import { find, dragStarted, panesRect, headersRect, paneRects, dropTarget, dropZone, zoneRect, dragSource, panelButtonRect, DRAG_BACK } from "./drag.js";
 // side.js' remembered width of the side panel while it is hidden (shared values outlive a restart).
 const PANEL_WIDTH = "vscode-tabs.panel-width";
+// side.js' last commands that never showed in the layout ({ at, want, got, commands }), for debugging.
+const SIDE_DEBUG = "vscode-tabs.side-debug";
+// How often the side row is reconciled besides renders (ms): often while the Image Viewer shows (its gutter pushes the
+// row), rarely otherwise.
+const SIDE_TICK = { image: 100, idle: 1000 };
 // vscode-pane's { [pane]: bounds }: where each shown pane's header is, for dropping onto one pane.
 const PANE_BOUNDS = "vscode-pane.bounds";
 
@@ -123,6 +128,13 @@ export default class Tabs extends View {
     this.closeAt = null; // the tab menu's last close request taken (close.js CLOSE_REQUEST)
     this.moveAt = null; // the menus' last move request taken (move.js MOVE_REQUEST)
     this.side = null; // side.js reconcileSide's `seen`
+    // A render may not follow a layout change made elsewhere (the Explorer's menu, cmd-e, a gutter drag): a timer too.
+    cx.spawn(async (cx) => {
+      for (;;) {
+        this.sideAsked(cx);
+        await cx.sleep(find(layout(), "image-panel")?.hidden === false ? SIDE_TICK.image : SIDE_TICK.idle);
+      }
+    });
   }
 
   closeList(list, cx) { // not close(): that is the View's own end call
@@ -154,6 +166,7 @@ export default class Tabs extends View {
     this.side = r.seen;
     if (!r.commands.length && r.mem === mem) return;
     cx.spawn(async () => {
+      if (r.missed) setShared(SIDE_DEBUG, { at: Date.now(), ...r.missed, commands: r.commands });
       if (r.mem !== mem) setShared(PANEL_WIDTH, r.mem);
       for (const [name, args] of r.commands) run(name, args);
     });
@@ -236,10 +249,11 @@ export default class Tabs extends View {
         .border_b(2).border_color(on ? t.accent : t.chrome).bg(on ? t.selected : t.chrome).text_color(on ? t.foreground : t.muted)
         .hover(s => s.bg(t.hover).text_color(t.foreground)).on_mouse_down("left", stop)
         .tooltip(label).accessibility_label(label)
-        .on_click(() => {
+        .on_click((_e, cx) => {
           if (id === "image") run(on ? "layout.hide" : "layout.show", { id: IMAGE_COLUMN });
           else if (on) run("layout.hide", { id: "panel" });
           else { run("layout.select", { stack: "panel-body", child: id }); run("layout.show", { id: "panel" }); }
+          this.sideAsked(cx); // the row's width at once, when the layout already shows the change
         }).child(svg(icon).size(18));
     };
     return h_flex().size_full().min_w(0).px(10).pl(lightsPadding).gap(3).items_center().bg(t.chrome).border_b(1).border_color(t.border)
