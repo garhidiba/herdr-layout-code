@@ -54,3 +54,40 @@ export async function prune(exec, dir, keep, cap = CACHE_MAX) {
   const gone = overflow(files, cap, keep);
   if (gone.length) await exec("rm", ["-f", ...gone.map(n => `${dir}/${n}`)]);
 }
+
+// ----- the preview cache, shared by the viewer tab (main.js) and the image panel (image.js) -----
+
+// image() only loads from the app's folder, so previews are copied to <app>/mods/vscode-viewer/.cache/<id>-<mtime>-<size>.<ext>
+// (a video's still: that name + .png). `id`: pathHash of the path (with its machine for a remote file).
+export const CACHE = "mods/vscode-viewer/.cache";
+export const pathHash = (s) => { let h = 5381; for (const c of s) h = (h * 33 ^ c.charCodeAt(0)) >>> 0; return h.toString(36); };
+// What the viewer previews as an image: extension -> format name.
+export const IMAGES = { png: "PNG", jpg: "JPEG", jpeg: "JPEG", gif: "GIF", webp: "WebP", bmp: "BMP", ico: "ICO", svg: "SVG", tif: "TIFF", tiff: "TIFF" };
+export const imageExt = (name) => { const e = /\.([^./]+)$/.exec(String(name).toLowerCase())?.[1]; return IMAGES[e] ? e : null; };
+
+// { mtime (s), size } of a file here or on machine `on`, or null.
+export async function statOf(exec, file, on = null) {
+  const st = await exec("sh", ["-c", `stat -c '%Y %s' "$1" 2>/dev/null || stat -f '%m %z' "$1"`, "sh", file], { on }).catch(() => null);
+  const [mtime, size] = (st?.stdout ?? "").trim().split(" ").map(Number);
+  return st?.code === 0 && Number.isFinite(size) ? { mtime, size } : null;
+}
+
+// Puts machine `on`'s (null: this computer's) image or video `file`, `st` its statOf, into the cache folder `dir` as
+// `<id>-<mtime>-<size>.<ext>` (a video: its still, that name + .png), dropping the file's other copies there. A whole
+// copy already there is kept (copies land whole: written aside, then renamed), so two views of one file share it. A
+// remote image or video is fetched first (fetchFile, `progress` 0-1). Resolves { name, shown, local } (`shown`: the
+// file image() takes, `local`: the file on this computer) or rejects with why.
+export async function cachePreview(exec, { dir, id, file, on = null, kind, ext, st, progress }) {
+  const name = `${id}-${st.mtime}-${st.size}.${ext}`, shown = kind === "video" ? `${name}.png` : name;
+  const remote = Boolean(on) && FETCHED.includes(kind), local = remote ? `${dir}/${name}` : file;
+  const kept = await exec("sh", ["-c", 'mkdir -p "$1" || exit 2; for f in "$1/$2"-*; do [ "$f" = "$1/$3" ] || [ "$f" = "$1/$4" ] || rm -rf "$f"; done; [ -f "$1/$4" ] && [ -f "$5" ]',
+    "sh", dir, id, name, shown, local]);
+  if (kept.code === 0) return { name, shown, local };
+  if (kept.code !== 1) throw new Error("Cannot write the preview cache");
+  if (remote) await fetchFile(exec, on, file, local, st.size, progress);
+  const made = kind === "video" ? await exec("sh", ["-c", POSTER, "sh", local, `${dir}/${id}-ql`, `${dir}/${shown}`])
+    : remote ? { code: 0 } : await exec("sh", ["-c", 'cp "$1" "$2.part" && mv "$2.part" "$2"', "sh", file, `${dir}/${name}`]);
+  if (made.code !== 0) throw new Error(`Cannot preview this ${kind}`);
+  await prune(exec, dir, [name, shown]).catch(() => {});
+  return { name, shown, local };
+}

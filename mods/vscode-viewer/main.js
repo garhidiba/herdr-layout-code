@@ -10,7 +10,7 @@
 import { View, div, image, PathBuilder, Background } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState, TextView } from "gpui-base";
 import { props, readTextFile, writeTextFile, exec, theme, appHome, nextCommand, focused, panes, spaces, run, shared, setShared } from "herdr";
-import { FETCHED, POSTER, fetchFile, prune } from "./preview.js";
+import { CACHE, IMAGES, pathHash, statOf as statOn, cachePreview } from "./preview.js";
 import { ownPane, closeOwnArgs } from "./pane.js";
 import { htmlToMarkdown } from "./html.js";
 // Herdr starts with PATH=/usr/bin:/bin, so Homebrew/user tools (node, code, codex, trash) are looked up here too.
@@ -52,7 +52,6 @@ const extOf = (name) => { const n = name.toLowerCase(), e = n.includes(".") ? n.
 const EDITOR_BG = "#282c34", EDITOR_FG = "#abb2bf";
 
 // What the tab shows: an image preview, a video still, markdown or HTML (preview + editor) or code. Extension -> format name.
-const IMAGES = { png: "PNG", jpg: "JPEG", jpeg: "JPEG", gif: "GIF", webp: "WebP", bmp: "BMP", ico: "ICO", svg: "SVG", tif: "TIFF", tiff: "TIFF" };
 const VIDEOS = { mp4: "MPEG-4", m4v: "MPEG-4", mov: "QuickTime", webm: "WebM", mkv: "Matroska", avi: "AVI" };
 const MARKDOWN = ["md", "markdown", "mdx", "mkd"], HTML = ["html", "htm"];
 function kindOf(name) {
@@ -65,21 +64,13 @@ function sipsSize(out) {
   const w = /pixelWidth: (\d+)/.exec(out ?? ""), h = /pixelHeight: (\d+)/.exec(out ?? "");
   return w && h ? `${w[1]} × ${h[1]}` : null;
 }
-// image() only loads from the app's folder, so images are copied to <app>/mods/vscode-viewer/.cache/<path hash>-<mtime>-<size>.<ext>
-// (a video's still: that name + .png; a remote file's hash covers its machine too).
-const CACHE = "mods/vscode-viewer/.cache";
-const pathHash = (s) => { let h = 5381; for (const c of s) h = (h * 33 ^ c.charCodeAt(0)) >>> 0; return h.toString(36); };
 // Hot-exit backups: <app>/mods/vscode-viewer/.backups/<path hash>.json, the format editor/backup.cjs reads and writes:
 // { path, text, cursor, time, mtimeMs, size } (mtimeMs/size: the file on disk at backup time; compared to the second).
 const BACKUPS = "mods/vscode-viewer/.backups";
 // Loads in a row (3 s apart, 1 s for a local markdown preview) a file must be missing before its viewer closes.
 const MISSING_CHECKS = 2;
-// { mtime (s), size } of a file here or on machine `on`, or null.
-async function statOf(file, on = null) {
-  const st = await exec("sh", ["-c", `stat -c '%Y %s' "$1" 2>/dev/null || stat -f '%m %z' "$1"`, "sh", file], { on }).catch(() => null);
-  const [mtime, size] = (st?.stdout ?? "").trim().split(" ").map(Number);
-  return st?.code === 0 && Number.isFinite(size) ? { mtime, size } : null;
-}
+// Previews go through the shared cache (preview.js cachePreview: CACHE, pathHash).
+const statOf = (file, on = null) => statOn(exec, file, on);
 // VS Code settings files allow comments and trailing commas.
 const loose = (s) => JSON.parse(s.replace(/^\uFEFF/, "").replace(/("(?:[^"\\]|\\.)*")|\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, (m, str) => str ?? "").replace(/,(\s*[}\]])/g, "$1"));
 // files.autoSave / files.autoSaveDelay (seconds, 0.1-3600) from vscode-settings.json; off when missing or invalid.
@@ -268,24 +259,16 @@ export default class Viewer extends View {
       if (!st) { this.img = null; this.error = "This file is no longer available"; return; }
       const { mtime, size } = st, key = `${mtime}-${size}`;
       if (this.img?.key === key || this.failed === key) return;
-      const dir = `${appHome()}/${CACHE}`, id = pathHash(this.on ? `${this.on}:${this.file}` : this.file), name = `${id}-${key}.${extOf(this.file)}`;
-      const shown = this.kind === "video" ? `${name}.png` : name;
-      const fail = (why) => { this.img = null; this.error = why; this.failed = key; };
-      if ((await exec("sh", ["-c", 'mkdir -p "$1" && rm -rf "$1/$2"-*', "sh", dir, id])).code !== 0) return fail("Cannot write the preview cache");
-      let local = this.file;
-      if (this.on && FETCHED.includes(this.kind)) {
-        local = `${dir}/${name}`;
-        this.img = null; this.error = null; this.fetching = `Fetching from ${this.on}…`; cx.notify();
-        try { await fetchFile(exec, this.on, this.file, local, size, p => { this.fetching = `Fetching from ${this.on}… ${Math.round(p * 100)}%`; cx.notify(); }); }
-        catch (e) { return fail(e.message); }
-        finally { this.fetching = null; }
-      }
-      const made = this.kind === "video" ? await exec("sh", ["-c", POSTER, "sh", local, `${dir}/${id}-ql`, `${dir}/${shown}`])
-        : local === this.file ? await exec("cp", [this.file, `${dir}/${name}`]) : { code: 0 };
-      if (made.code !== 0) return fail(`Cannot preview this ${this.kind}`);
-      const dims = this.kind === "image" ? await exec("sips", ["-g", "pixelWidth", "-g", "pixelHeight", local]).then(r => sipsSize(r.stdout)).catch(() => null) : null;
-      this.img = { key, path: `${CACHE}/${shown}`, local, size, dims }; this.error = null; this.failed = null;
-      await prune(exec, dir, [name, shown]).catch(() => {});
+      const dir = `${appHome()}/${CACHE}`, id = pathHash(this.on ? `${this.on}:${this.file}` : this.file);
+      if (this.on) { this.img = null; this.error = null; this.fetching = `Fetching from ${this.on}…`; cx.notify(); }
+      let made;
+      try {
+        made = await cachePreview(exec, { dir, id, file: this.file, on: this.on, kind: this.kind, ext: extOf(this.file), st,
+          progress: p => { this.fetching = `Fetching from ${this.on}… ${Math.round(p * 100)}%`; cx.notify(); } });
+      } catch (e) { this.img = null; this.error = e.message; this.failed = key; return; }
+      finally { this.fetching = null; }
+      const dims = this.kind === "image" ? await exec("sips", ["-g", "pixelWidth", "-g", "pixelHeight", made.local]).then(r => sipsSize(r.stdout)).catch(() => null) : null;
+      this.img = { key, path: `${CACHE}/${made.shown}`, local: made.local, size, dims }; this.error = null; this.failed = null;
     } finally { this.copying = false; }
   }
 

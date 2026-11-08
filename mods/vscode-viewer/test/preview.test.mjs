@@ -9,7 +9,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, existsSync, readFileSync, readdi
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pieces, fetchFile, overflow, prune, REMOTE_MAX } from "../preview.js";
+import { pieces, fetchFile, overflow, prune, REMOTE_MAX, cachePreview, statOf } from "../preview.js";
 
 function machine() {
   const d = mkdtempSync(join(tmpdir(), "viewer-preview-")), bin = join(d, "home", ".local", "bin"), log = join(d, "on.log");
@@ -78,5 +78,22 @@ test("pruning the cache folder deletes only what overflow names", async () => {
   }
   await prune(exec, dir, ["a-1-1.png"], 200);
   assert.deepEqual(readdirSync(dir).sort(), ["a-1-1.png", "c-1-1.mp4"]);
+  rmSync(d, { recursive: true });
+});
+
+test("the cache keeps one whole copy per file and version, shared by the views that ask for it", async () => {
+  const { d, exec } = machine(), dir = join(d, "cache"), src = join(d, "pic.png");
+  writeFileSync(src, "one");
+  const st = await statOf(exec, src);
+  const first = await cachePreview(exec, { dir, id: "p1", file: src, kind: "image", ext: "png", st });
+  assert.equal(first.shown, `p1-${st.mtime}-3.png`);
+  assert.equal(readFileSync(join(dir, first.shown), "utf8"), "one");
+  writeFileSync(join(dir, first.shown), "kept"); // a second ask finds the copy and leaves it
+  await cachePreview(exec, { dir, id: "p1", file: src, kind: "image", ext: "png", st });
+  assert.equal(readFileSync(join(dir, first.shown), "utf8"), "kept");
+  writeFileSync(src, "changed"); // a new version replaces the old copy
+  const next = await cachePreview(exec, { dir, id: "p1", file: src, kind: "image", ext: "png", st: await statOf(exec, src) });
+  assert.deepEqual(readdirSync(dir), [next.shown]);
+  await assert.rejects(cachePreview(exec, { dir, id: "p2", file: join(d, "gone.png"), kind: "image", ext: "png", st }), /Cannot preview this image/);
   rmSync(d, { recursive: true });
 });
