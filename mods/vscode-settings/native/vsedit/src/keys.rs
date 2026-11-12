@@ -29,6 +29,10 @@ impl Mouse {
     pub fn wheel(&self) -> bool {
         self.button == 64 || self.button == 65
     }
+    /// A click that extends the selection: Shift, or ⌥ (Alt) since Herdr keeps Shift+click for its own text selection.
+    pub fn extend(&self) -> bool {
+        self.shift || self.alt
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -336,6 +340,13 @@ mod tests {
                 m(0, 12, 4, false, true, true), // Shift+drag
             ]
         );
+    }
+
+    #[test]
+    fn sgr_mouse_alt_bit_extends_like_shift_and_ctrl_does_not() {
+        let (ev, _) = parse("\x1b[<8;9;3M\x1b[<40;12;4M\x1b[<16;9;3M");
+        let mice: Vec<Mouse> = ev.into_iter().filter_map(|e| if let Ev::Mouse(m) = e { Some(m) } else { None }).collect();
+        assert_eq!(mice.iter().map(|m| (m.button, m.motion, m.alt, m.extend())).collect::<Vec<_>>(), [(0, false, true, true), (0, true, true, true), (0, false, false, false)], "⌥+press, ⌥+drag, Ctrl+press");
     }
 
     #[test]

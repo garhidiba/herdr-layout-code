@@ -1193,32 +1193,32 @@ impl Editor {
             return;
         }
         let gutter = m.x <= self.gutter() as i32;
-        if m.x == self.gutter() as i32 && !m.shift && self.click_fold(p.line) {
+        if m.x == self.gutter() as i32 && !m.extend() && self.click_fold(p.line) {
             return;
         }
         let now = Instant::now();
         let double = now.duration_since(self.last_click.0) < Duration::from_millis(400) && self.last_click.1 == p;
         self.last_click = (now, p);
-        self.click(p, gutter, m.shift, m.ctrl, if double { 2 } else { 1 });
+        self.click(p, gutter, m.extend(), m.ctrl, if double { 2 } else { 1 });
     }
 
-    /// A press at `p` (on the line numbers when `gutter`): ⌘ (Ctrl) Go to Definition, Shift extends, a second click
-    /// selects the word and a third the line; a drag may follow.
-    pub fn click(&mut self, p: Pos, gutter: bool, shift: bool, cmd: bool, count: u32) {
-        if cmd && !shift && !gutter {
+    /// A press at `p` (on the line numbers when `gutter`): ⌘ (Ctrl) Go to Definition, `extend` (Shift or ⌥)
+    /// extends, a second click selects the word and a third the line; a drag may follow.
+    pub fn click(&mut self, p: Pos, gutter: bool, extend: bool, cmd: bool, count: u32) {
+        if cmd && !extend && !gutter {
             // VS Code's ⌘-click / Ctrl+click: Go to Definition
             self.ls.link = None;
             self.move_to(p, false);
             return self.run_act(crate::commands::Act::GoTo("definition"), None);
         }
         self.dragging = true;
-        if shift && (count > 1 || gutter) {
+        if extend && (count > 1 || gutter) {
             self.sel.head = shift_click_head(&self.buf.lines, self.sel.anchor, p, gutter);
             self.buf.seal();
             self.reveal();
             return;
         }
-        if count > 1 && !shift {
+        if count > 1 && !extend {
             let t = &self.buf.lines[p.line];
             let (s, e) = if count == 2 {
                 let s = word_left(t, next_index(t, p.col).min(t.len()));
@@ -1231,7 +1231,7 @@ impl Editor {
             self.reveal();
             return;
         }
-        self.move_to(p, shift);
+        self.move_to(p, extend);
     }
 }
 

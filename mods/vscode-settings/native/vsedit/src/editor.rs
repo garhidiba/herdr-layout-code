@@ -3829,6 +3829,26 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn alt_click_extends_like_shift_click_by_lines_on_the_gutter_and_keeps_extending_on_a_drag() {
+        let mut ed = wrapped(&["foo bar", "baz qux", "end"], "off", 10, 60);
+        screen(&mut ed);
+        let gw = ed.gutter() as i32;
+        let alt = |x, y, motion| crate::keys::Mouse { button: 0, x, y, motion, alt: true, ..Default::default() };
+        let up = crate::keys::Mouse { button: 0, x: 1, y: 1, release: true, ..Default::default() };
+        ed.mouse(&crate::keys::Mouse { button: 0, x: gw + 3, y: 3, ..Default::default() }, None);
+        ed.mouse(&up, None);
+        ed.mouse(&alt(gw + 2, 2, false), None);
+        assert_eq!(sel(&ed), [1, 2, 0, 1], "⌥-click: anchor to the click");
+        ed.mouse(&alt(gw + 2, 4, true), None);
+        assert_eq!(sel(&ed), [1, 2, 2, 1], "⌥-drag keeps the anchor");
+        ed.mouse(&up, None);
+        ed.mouse(&alt(1, 4, false), None);
+        assert_eq!(sel(&ed), [1, 2, 2, 3], "⌥-click on the gutter: through that line (the last: to its end)");
+        ed.mouse(&alt(1, 2, false), None);
+        assert_eq!(sel(&ed), [1, 2, 0, 0], "above the anchor: the line's start");
+    }
+
+    #[test]
     fn a_drag_held_past_the_right_edge_onto_a_short_line_rests_on_its_end_without_shaking() {
         let xs = "x".repeat(200);
         let mut ed = wrapped(&[xs.as_str(), "short"], "off", 10, 60);

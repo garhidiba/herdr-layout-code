@@ -405,7 +405,7 @@ impl HexView {
             return;
         }
         if let Some(o) = self.offset_at(m.x, m.y) {
-            self.move_to(o as i64, m.motion || m.shift);
+            self.move_to(o as i64, m.motion || m.extend());
         }
     }
     fn input(&mut self, a: HexInput, t: String) -> io::Result<()> {
