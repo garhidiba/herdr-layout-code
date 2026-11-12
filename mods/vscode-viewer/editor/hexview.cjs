@@ -175,7 +175,7 @@ class HexView {
     if (ev.button === 64 || ev.button === 65) return this.scroll(ev.button === 64 ? -3 : 3);
     if (ev.button !== 0 || ev.release) return;
     const o = this.offsetAt(ev.x, ev.y);
-    if (o !== null) this.moveTo(o, ev.motion || ev.shift);
+    if (o !== null) this.moveTo(o, ev.motion || ev.shift || ev.alt);
   }
 
   openGoto() {

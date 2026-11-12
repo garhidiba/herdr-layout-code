@@ -1952,13 +1952,14 @@ class Editor {
     if (this.panel) this.panel.focused = false;
     if (this.peek && !ev.motion) { if (ev.y >= this.peekRow && ev.y < this.peekRow + this.peek.height) return; this.peek = null; }
     if (ev.motion) return;
-    if (ev.x === this.gutter && !ev.shift && this.clickFold(p.line)) return; // the chevron column
-    if (ev.ctrl && !ev.shift && ev.x > this.gutter) { this.link = null; this.moveTo(p); return this.runCommand("editor.action.revealDefinition"); } // VS Code's ⌘-click / Ctrl+click
+    const extend = ev.shift || ev.alt; // ⌥-click extends too: Herdr keeps Shift+click for its own text selection
+    if (ev.x === this.gutter && !extend && this.clickFold(p.line)) return; // the chevron column
+    if (ev.ctrl && !extend && ev.x > this.gutter) { this.link = null; this.moveTo(p); return this.runCommand("editor.action.revealDefinition"); } // VS Code's ⌘-click / Ctrl+click
     const now = Date.now(), c = this.lastClick;
     const double = now - c.time < 400 && c.line === p.line && c.col === p.col;
     this.lastClick = { time: now, line: p.line, col: p.col };
     this.dragging = true;
-    if (ev.shift && (double || ev.x <= this.gutter)) { // VS Code: Shift+click on the gutter extends by whole lines, a Shift+double-click by words
+    if (extend && (double || ev.x <= this.gutter)) { // VS Code: Shift+click on the gutter extends by whole lines, a Shift+double-click by words
       const a = this.sel.anchor, down = cmp(p, a) >= 0, t = this.lines[p.line], last = this.lines.length - 1;
       const s = wordLeft(t, Math.min(t.length, W.nextIndex(t, p.col))), e = wordRight(t, s);
       const head = ev.x > this.gutter ? { line: p.line, col: down ? e : s }
@@ -1967,13 +1968,13 @@ class Editor {
       this.buf.seal(); this.reveal();
       return;
     }
-    if (double && !ev.shift) {
+    if (double && !extend) {
       const t = this.lines[p.line], s = wordLeft(t, Math.min(t.length, W.nextIndex(t, p.col))), e = wordRight(t, s);
       this.sel = { anchor: { line: p.line, col: s }, head: { line: p.line, col: e } };
       this.buf.seal(); this.reveal();
       return;
     }
-    this.moveTo(p, ev.shift);
+    this.moveTo(p, extend);
   }
 
   // ----- drawing -----

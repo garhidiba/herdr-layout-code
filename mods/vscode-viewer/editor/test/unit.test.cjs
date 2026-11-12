@@ -204,6 +204,7 @@ test("function keys, Shift+F10, the menu key and focus reports", () => {
   assert.deepEqual(parse("\x1b[I\x1b[O").events, [{ type: "focus", focused: true }, { type: "focus", focused: false }]);
   assert.deepEqual(parse("\x1b[<2;10;5M").events[0], { type: "mouse", button: 2, x: 10, y: 5, release: false, motion: false, shift: false, alt: false, ctrl: false });
   assert.deepEqual(parse("\x1b[<4;10;5M\x1b[<36;12;6M").events.map(e => [e.button, e.shift, e.motion]), [[0, true, false], [0, true, true]]); // Shift+press, Shift+drag
+  assert.deepEqual(parse("\x1b[<8;10;5M\x1b[<40;12;6M").events.map(e => [e.button, e.alt, e.shift, e.motion]), [[0, true, false, false], [0, true, false, true]]); // ⌥+press, ⌥+drag (SGR bit 8)
   assert.equal(parse("\x1b[115;9").rest, "\x1b[115;9"); // split sequence waits for the rest
 });
 
@@ -788,6 +789,27 @@ test("Shift+click extends from the anchor, keeps extending on a drag, by lines o
   assert.deepEqual(sel(), [1, 2, 0, 0], "above the anchor: the line's start");
   mouse(...at(1, 5), { shift: true }); mouse(...at(1, 5), { shift: true });
   assert.deepEqual(sel(), [1, 2, 1, 7], "Shift+double-click: to the word's end");
+});
+
+test("⌥-click extends like Shift+click (Herdr keeps Shift+click for its own selection): a drag keeps extending, the gutter by lines", async () => {
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "vsedit-alt-")), "a.txt");
+  fs.writeFileSync(file, "foo bar\nbaz qux\nend");
+  const ed = new Editor(file, F.load(file), await H.loadGrammar(null), H.loadTheme(), null);
+  ed.rows = 10; ed.cols = 100;
+  ed.render(0);
+  const at = (line, col) => [ed.gutter + 1 + col, line + 2], mouse = (x, y, more) => ed.handle({ type: "mouse", button: 0, x, y, release: false, motion: false, ...more });
+  const sel = () => [ed.sel.anchor.line, ed.sel.anchor.col, ed.sel.head.line, ed.sel.head.col];
+  const up = () => ed.handle({ type: "mouse", button: 0, x: 1, y: 1, release: true });
+  click(ed, ...at(1, 2)); up();
+  mouse(...at(0, 1), { alt: true });
+  assert.deepEqual(sel(), [1, 2, 0, 1], "⌥-click: anchor to the click");
+  mouse(...at(2, 1), { alt: true, motion: true });
+  assert.deepEqual(sel(), [1, 2, 2, 1], "⌥-drag keeps the anchor");
+  up();
+  mouse(1, 4, { alt: true });
+  assert.deepEqual(sel(), [1, 2, 2, 3], "⌥-click on the gutter: through that line (the last: to its end)");
+  mouse(1, 2, { alt: true });
+  assert.deepEqual(sel(), [1, 2, 0, 0], "above the anchor: the line's start");
 });
 
 test("status bar: Ln/Col opens Go to Line, Spaces picks tabs and a size for this file, LF switches to CRLF on save", async () => {
