@@ -2,6 +2,7 @@
 // (passed in, so the tests run them here). Paths only ever go in as arguments ("$1"), never into a script's text.
 // On a machine Herdr can't reach, exec rejects; that comes out as an Error with `unreachable: true` (a toast).
 import { baseName, parentOf, within, freeName } from "./paths.js";
+import { friendlyError } from "./offline.js";
 
 // Delete on another machine: its `trash`, else `gio trash`, else gone for good (the dialog says so first).
 export const REMOTE_DELETE = 'if command -v trash >/dev/null 2>&1; then trash "$1"; elif command -v gio >/dev/null 2>&1 && gio trash "$1" 2>/dev/null; then :; else rm -rf "$1"; fi';
@@ -30,7 +31,8 @@ done`;
 export function createOps(exec, on = null, hc = null) {
   const run = (cmd, args) => (on ? exec(cmd, args, { on }) : exec(cmd, args)).catch((e) => {
     if (!on) throw e;
-    throw Object.assign(new Error(`${on}: ${e?.message ?? e}`), { unreachable: true });
+    const text = String(e?.message ?? e), short = friendlyError(text);
+    throw Object.assign(new Error(short === text ? `${on}: ${text}` : short), { unreachable: true });
   });
   const must = async (cmd, args, what) => { const r = await run(cmd, args); if (r.code !== 0) throw new Error(r.stderr.trim() || what); };
   // A dangling link is there too: its name is taken and it can be deleted.

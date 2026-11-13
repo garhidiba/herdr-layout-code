@@ -18,6 +18,7 @@ import { ROW, clampTop, rowAt, shown, scrollToShow, dragStarted, dropFolder, dra
 import { createDesktop } from "./desktop.js";
 import { createDetails } from "./details.js";
 import { createOps } from "./ops.js";
+import { friendlyError } from "./offline.js";
 // The sash to the Image Viewer column right of this panel (vscode-tabs side.js): this card's right 4 px while the column
 // shows, half of the 8 px between the cards (the column draws the other half); no line, a col-resize pointer. A press
 // opens vscode-tabs' SideResize overlay, which slides this panel as a block while the column resizes.
@@ -342,7 +343,7 @@ export default class Files extends View {
         this.marks = marks; this.dirty = dirtyOf(marks); this.error = null; context.seen = { stamp, at: Date.now() }; this.watch(cwd, cx);
         this.saved.set(context.key, { folders: this.folders, entries: this.entries, marks, dirty: this.dirty, at: Date.now() });
         this.changed(cx);
-      } catch (e) { if (this.current(context)) this.error = String(e); }
+      } catch (e) { if (this.current(context)) this.error = friendlyError(e); }
       finally {
         if (this.context === context) { this.loading = false; if (this.again) { this.again = false; this.refresh(cx); } }
         cx.notify();
@@ -372,7 +373,7 @@ export default class Files extends View {
     this.pending.add(path);
     cx.spawn(async cx => {
       try { await this.loadFolder(path, context); }
-      catch (e) { if (this.current(context)) this.error = String(e); }
+      catch (e) { if (this.current(context)) this.error = friendlyError(e); }
       finally { if (this.context === context) this.pending.delete(path); cx.notify(); }
     });
   }

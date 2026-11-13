@@ -197,7 +197,9 @@ test("an upload never replaces an entry that appeared meanwhile, and says why it
 
 test("a machine that can't be reached rejects as unreachable; locally the error passes through as is", async () => {
   const down = createOps(async () => { throw new Error("cannot reach box"); }, "box");
-  await assert.rejects(down.mkdir("/x"), (e) => e.unreachable === true && e.message === "box: cannot reach box");
+  await assert.rejects(down.mkdir("/x"), (e) => e.unreachable === true && e.message === "box is offline — turn it on or start Herdr there, then it reconnects.");
+  const odd = createOps(async () => { throw new Error("disk full"); }, "box");
+  await assert.rejects(odd.mkdir("/x"), (e) => e.unreachable === true && e.message === "box: disk full");
   const broken = createOps(async () => { throw new Error("no sh"); }, null);
   await assert.rejects(broken.mkdir("/x"), (e) => !e.unreachable && e.message === "no sh");
 });

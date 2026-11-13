@@ -8,6 +8,7 @@ import { freshRoot, encode, decode } from "./cache.js";
 import { createCore, relevant, stampOf, stale } from "./core.js";
 import { layoutSections, flexSection, sashPair, dragSash } from "./sections.js";
 import { syncAction, syncSteps, syncError, BUSY } from "./sync.js";
+import { friendlyError } from "./offline.js";
 
 // The sash to the Image Viewer column right of this panel (vscode-tabs side.js): this card's right 4 px while the column
 // shows, half of the 8 px between the cards (the column draws the other half); no line, a col-resize pointer. A press
@@ -326,7 +327,7 @@ export default class SourceControl extends View {
         if (selected) await this.loadRepo(context, selected);
         this.read = { context, stamp, at: Date.now() };
         this.changed(cx);
-      } catch (e) { if (key() === context) this.error = String(e); }
+      } catch (e) { if (key() === context) this.error = friendlyError(e); }
       finally {
         this.loading = false;
         if (this.queued) this.refresh(cx);

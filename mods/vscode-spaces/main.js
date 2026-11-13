@@ -12,6 +12,7 @@ import { spaces, machines, panes, agents, run, openOverlay, exec, hc, theme, sha
 import { spaceAgents, fit, describe } from "./agents.js";
 import { sync, interleave, forget, adopt, liveIndex, moveTo, reopenArgs, load } from "./kept.js";
 import { settingsOf, machineOrderOf, sortMachines, dragOrder, writeMachineOrder } from "./order.js";
+import { friendlyError } from "./offline.js";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -310,7 +311,7 @@ export default class Spaces extends View {
         localStorage.setItem("machines.folded", JSON.stringify([...this.folded]));
         delete this.reconnecting[name];
       } catch (e) {
-        state.error = String(e.message ?? e);
+        state.error = friendlyError(e);
         state.busy = false;
       }
       localStorage.setItem("machines.reconnecting", JSON.stringify(this.reconnecting));
