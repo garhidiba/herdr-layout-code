@@ -165,7 +165,7 @@ export function spaceCommand(folder, on, spaces, panes) {
     const cwd = panes.find(p => tabs.has(p.tab) && p.cwd)?.cwd;
     return [s.folder, cwd].some(f => f && normalPath(f) === want);
   };
-  const space = spaces.find(s => (s.machine ?? null) === (on ?? null) && at(s));
+  const space = spaces.find(s => (s.machine || null) === (on || null) && at(s));
   return space ? ["space.select", { id: space.id }] : ["space.new", { name: baseName(want) || want, folder: want, machine: on ?? "" }];
 }
 
