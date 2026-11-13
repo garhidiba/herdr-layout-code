@@ -1,11 +1,14 @@
 // A pane's header: the shipped `pane` mod's (the program's icon, the agent's name or the terminal's title, the folder,
 // the agent's status; split, zoom and close buttons) plus Move to New Tab while the pane shares its tab (an editor or a
 // viewer moved in, vscode-tabs' move.js): it gets a tab of its own again. Props from the app: { pane, terminal }.
-// Click: focus the pane. The shipped buttons' icons are the `pane` mod's (always installed).
+// Click: focus the pane. The shipped buttons' icons are the `pane` mod's (always installed). An editor's header also
+// passes the presses in its pane on to the editor (click.js), since Herdr keeps Shift+click for its own selection.
 
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { panes, props, run, theme, home, shared, setShared } from "herdr";
+import { panes, terminals, props, run, theme, home, shared, setShared, settings, appHome } from "herdr";
+import * as fs from "fs/promises";
+import { CLICK_DIR, isLocalEditor, clickRecord } from "./click.js";
 
 // vscode-tabs' move.js MOVE_REQUEST: the tab bar moves the pane ({ terminal } or { pane }: a viewer).
 const MOVE = "vscode-tabs.move";
@@ -31,6 +34,21 @@ function share(pane, b) {
   if (was && was.x === b.x && was.y === b.y && was.width === b.width && was.height === b.height) return;
   const live = new Set(panes().map((p) => p.pane));
   setShared(BOUNDS, { ...Object.fromEntries(Object.entries(all).filter(([k]) => live.has(k))), [pane]: { x: b.x, y: b.y, width: b.width, height: b.height } });
+}
+
+// An editor pane's press (click.js): written for vsedit to apply. After a Shift+press, Herdr's selection highlight is
+// cleared where Herdr can (terminal.clear_selection and terminals()[].selection, on Herdr's master, not released yet).
+function recordClick(e, p, cx) {
+  const all = shared(BOUNDS) ?? {};
+  const others = panes().filter((x) => x.tab === p.tab && x.pane !== p.pane && all[x.pane]).map((x) => all[x.pane]);
+  const rec = clickRecord(e, e.bounds, others, settings()?.terminal_padding, 8, Date.now()); // 8: layouts/vscode.json's pane gap
+  if (!rec) return;
+  const dir = `${appHome()}/${CLICK_DIR}`, terminal = p.terminal;
+  fs.mkdir(dir, { recursive: true }).then(() => fs.writeFile(`${dir}/${terminal}.json`, JSON.stringify(rec))).catch(() => {});
+  if (rec.kind === "shift") cx.timer.after(250, () => {
+    const t = terminals().find((r) => r.address === terminal);
+    if (t && "selection" in t && t.selection) run("terminal.clear_selection", { terminal });
+  });
 }
 
 export default class Pane extends View {
@@ -77,7 +95,7 @@ export default class Pane extends View {
       .border_color(t.border)
       .text_size(12)
       .on_hover((hovered, cx) => { this.hovered = hovered; cx.notify(); })
-      .on_mouse_down_out((e) => share(pane, e.bounds))
+      .on_mouse_down_out((e, cx) => { share(pane, e.bounds); if (isLocalEditor(p)) recordClick(e, p, cx); })
       .on_mouse_move((e) => share(pane, e.bounds))
       .on_click(() => run("pane.focus", { pane }))
       .when(Boolean(pic), (el) => el.child(pic))
