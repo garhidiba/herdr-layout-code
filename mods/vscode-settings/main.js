@@ -462,6 +462,11 @@ export default class Settings extends View {
       .child(this.section(t, "Image Viewer"))
       .child(this.row(t, "Image Viewer", "Scope", "Per Space: each space keeps its own image, fit, zoom and position. Global: one image and view for every space (a remote space's image still loads from its machine). Whether the column shows is one for all either way.",
         this.segmented(t, "imageViewer.scope", [["space", "Per Space"], ["global", "Global"]])))
+      .child(this.section(t, "Spaces"))
+      .child(this.row(t, "Spaces", "Machine Order", "The order of the machine headers in the Spaces list, below This computer: drag a header there to move it. Machines not listed follow by name.",
+        h_flex().gap(10).items_center()
+          .child(div().max_w(220).truncate().text_size(12).text_color(t.muted).child(this.v["spaces.machineOrder"].join(", ") || "By name"))
+          .when(this.v["spaces.machineOrder"].length > 0, (el) => el.child(this.button(t, "machine-order-reset", "By name", (_e, cx) => this.set("spaces.machineOrder", [], cx))))))
       .child(this.section(t, "Editor"))
       .child(this.row(t, "Editor", "Format On Save", "Format the file when saving (needs a formatter for the language).", this.toggle(t, "editor.formatOnSave", "Format On Save")))
       .child(this.row(t, "Editor", "Tab Size", "Spaces a tab equals, for files with no indentation to detect (1–16).",

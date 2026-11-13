@@ -237,3 +237,11 @@ test("the image viewer's scope is per space by default; only space or global is 
   assert.equal(normalize({ "imageViewer.scope": "tab" })["imageViewer.scope"], "space");
   assert.equal(JSON.parse(serialize(withSetting({}, "imageViewer.scope", "global")))["imageViewer.scope"], "global");
 });
+
+test("the Spaces machine order is a list of names, empty (by name) by default", () => {
+  assert.deepEqual(normalize(parse(null))["spaces.machineOrder"], []);
+  assert.deepEqual(normalize({ "spaces.machineOrder": ["win-amd64", 3, "", "win-amd64", "vps"] })["spaces.machineOrder"], ["win-amd64", "vps"]);
+  assert.deepEqual(normalize({ "spaces.machineOrder": "win-amd64" })["spaces.machineOrder"], []);
+  assert.throws(() => withSetting({}, "spaces.machineOrder", "win-amd64"), /Invalid value/);
+  assert.deepEqual(withSetting({ "my.key": 1 }, "spaces.machineOrder", []), { "my.key": 1, "spaces.machineOrder": [] });
+});

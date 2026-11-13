@@ -22,6 +22,7 @@ export const DEFAULTS = {
   "explorer.autoReveal": true,        // the Explorer reveals and highlights the active editor's file (vscode-explorer)
   "workbench.editor.preloadEditor": true, // each local space keeps an editor started off screen, so a file opens at once (vscode-explorer warm.js)
   "imageViewer.scope": "space",       // "space": each space keeps its own image and view | "global": one for all (vscode-viewer image.js)
+  "spaces.machineOrder": [],          // machine names whose headers come first in the Spaces list, in this order (vscode-spaces order.js)
 };
 export const CHOICES = { "core.engine": ["js", "rust"], "editor.engine": ["js", "rust"], "files.autoSave": ["off", "afterDelay", "onFocusChange"],
   "editor.inlineSuggest.provider": ["ollama", "lmstudio", "codestral", "mercury", "off"],
@@ -61,6 +62,7 @@ export function coerce(key, value) {
   const opt = optional(key);
   if (opt) return typeof value === "string" && (opt !== "endpoint" || !endpointProblem(value)) ? value.trim().replace(/\/+$/, "") : undefined;
   if (key === INLINE_ENABLED) return typeof value === "boolean" ? value : undefined;
+  if (Array.isArray(DEFAULTS[key])) return Array.isArray(value) ? [...new Set(value.filter((m) => typeof m === "string" && m))] : undefined;
   if (CHOICES[key]) return CHOICES[key].includes(value) ? value : undefined;
   if (NUMBERS[key]) {
     const [lo, hi, int] = NUMBERS[key], n = Number(value);
