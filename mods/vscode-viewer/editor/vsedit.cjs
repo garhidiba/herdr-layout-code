@@ -38,6 +38,7 @@ const SYM = require("./symbols.cjs");
 const G = require("./gitgutter.cjs");
 const FD = require("./folding.cjs");
 const SS = require("./smartselect.cjs");
+const CL = require("./clicks.cjs");
 const { editsWithin } = require("./lang/edits.cjs");
 const I = require("./inline.cjs");
 const WR = require("./wrap.cjs");
@@ -1976,6 +1977,13 @@ class Editor {
     }
     this.moveTo(p, extend);
   }
+  // A Shift+press Herdr kept for itself, at cell (x, y) (clicks.cjs): a ⌥+click there; a double one extends by words.
+  // No release follows it, so no drag either.
+  shiftClick({ x, y, count }) {
+    if (count > 1 && y >= 2 && y <= this.height + 1) { const p = this.cellToPos(x, y); this.lastClick = { time: Date.now(), line: p.line, col: p.col }; }
+    this.mouse({ type: "mouse", button: 0, x, y, release: false, motion: false, shift: false, alt: true, ctrl: false });
+    this.dragging = false;
+  }
 
   // ----- drawing -----
   // budget: ms to spend tokenizing toward the viewport before painting the rest in the default color.
@@ -2516,6 +2524,15 @@ async function main() {
     if (reread || rebound) schedule();
   }, 2000).unref();
 
+  // Shift+clicks from the pane header (clicks.cjs), checked every 50 ms.
+  const clickFile = CL.signalFile(), clicks = new CL.Clicks();
+  if (clickFile) fs.watchFile(clickFile, { interval: 50 }, () => {
+    let rec;
+    try { rec = JSON.parse(fs.readFileSync(clickFile, "utf8")); } catch { return; } // gone, or caught mid-write
+    const cell = clicks.record(rec, ed.cols, ed.rows);
+    if (cell) { ed.shiftClick(cell); ed.afterEvent(); schedule(); }
+  }).unref();
+
   let pending = "";
   const log = T.inputLog();
   process.stdin.on("data", (chunk) => {
@@ -2524,6 +2541,7 @@ async function main() {
     pending = rest;
     let changed = !events.length;
     for (const ev of events) {
+      if (clickFile && CL.plainPress(ev)) clicks.pressed(ev.x, ev.y);
       const out = ed.hover(ev); // hover motion repaints only the bar it changed, without a frame
       if (out === null) { ed.handle(ev); ed.afterEvent(); changed = true; } else if (out) process.stdout.write(out);
     }

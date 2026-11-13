@@ -807,6 +807,52 @@ def run_alt_click(tmp):
     print("alt+click: ok")
 
 
+def run_shift_click_signal(tmp):
+    """Herdr keeps Shift+click for its own selection, so the pane header (vscode-pane) writes each press in the editor's
+    pane to $HERDR_APP_HOME/data/vsedit-click/<terminal>.json: a fresh Shift record extends the selection at its cell,
+    placed from the pane's box at first and from plain presses paired with their SGR cells after; a double one extends
+    by words; a stale one does nothing."""
+    env, _ = herdr_stub(tmp)
+    env["HERDR_APP_HOME"] = os.path.join(tmp, "app")
+    folder = os.path.join(env["HERDR_APP_HOME"], "data", "vsedit-click")
+    os.makedirs(folder, exist_ok=True)
+    signal_file = os.path.join(folder, env["HC_TERMINAL_ID"] + ".json")
+
+    def write(kind, x, y, area, count=1, age=0):
+        rec = {"x": x, "y": y, "count": count, "at": int(time.time() * 1000) - age, "kind": kind, "area": area}
+        with open(signal_file, "w") as f:
+            f.write(json.dumps(rec))
+        time.sleep(0.01)
+
+    file = os.path.join(tmp, "signal.txt")
+    open(file, "w").write("foo bar\nbaz qux\n" + "0123456789" * 6 + "\nend\n")
+    t = Term(file, env=env)
+    assert t.read("Ln 1, Col 1")
+    exact = {"x": 100, "y": 200, "width": 800, "height": 480}     # 100 x 30 cells of 8 x 16 px
+    at = lambda c, r, w=8, h=16: (100 + (c - 0.5) * w, 200 + (r - 0.5) * h)
+    t.send("\x1b[<0;9;3M\x1b[<0;9;3m", wait=0.3)                    # click line 2, column 3
+    write("shift", *at(8, 2), exact)                                 # Shift+click line 1, column 2
+    assert t.read("Ln 1, Col 2 (9 selected)", timeout=2), "Shift record did not extend: " + plain(t)[-200:]
+    write("shift", *at(7, 2), exact, age=5000)
+    assert not t.read("Ln 1, Col 1 (10 selected)", timeout=0.5), "a stale record was applied"
+
+    # The box says 8 px cells and no height; they are 9 x 18: two plain presses calibrate it.
+    wide = {"x": 100, "y": 200, "width": 800, "height": None}
+    real = lambda c, r: at(c, r, 9, 18)
+    for c, r in [(9, 3), (40, 4)]:
+        os.write(t.fd, f"\x1b[<0;{c};{r}M\x1b[<0;{c};{r}m".encode())
+        write("plain", *real(c, r), wide)
+        t.read(timeout=0.3)
+    assert t.read("Ln 3, Col 34"), "plain clicks did not land: " + plain(t)[-200:]
+    write("shift", *real(56, 4), wide)                               # column 50 (the box alone says 57)
+    assert t.read("Ln 3, Col 50 (16 selected)", timeout=2), "calibrated Shift record missed: " + plain(t)[-200:]
+    write("shift", *real(12, 2), wide, count=2)                      # Shift+double-click on "bar": to the word's start
+    assert t.read("Ln 1, Col 5", timeout=2), "double Shift record did not extend by words: " + plain(t)[-200:]
+    t.send(QUIT)
+    assert t.wait_exit() == 0
+    print("shift+click from the signal file: ok")
+
+
 def run_minified(tmp):
     """A 300 KB one-line bundle is colored on screen (keywords #C678DD) and stays responsive to typing."""
     file = os.path.join(tmp, "bundle.min.js")
@@ -1606,7 +1652,7 @@ def main():
     open(ISOLATED["VSEDIT_SETTINGS"], "w").write('{"files.autoSave": "off", "files.autoSaveDelay": 1, "editor.inlineSuggest.provider": "off"}\n')
     engines = os.path.join(tmp, "engines.log")
     ISOLATED.update(VSEDIT_ENGINE_LOG=engines, VSEDIT_INLINE_USAGE=os.path.join(tmp, "inline-usage.json"))
-    scenarios = [run_tsx, run_go, run_crlf, run_hex, run_error_page, run_drag_scroll, run_drag_reveal, run_shift_click, run_alt_click, run_minified, run_scrollbars, run_decorations,
+    scenarios = [run_tsx, run_go, run_crlf, run_hex, run_error_page, run_drag_scroll, run_drag_reveal, run_shift_click, run_alt_click, run_shift_click_signal, run_minified, run_scrollbars, run_decorations,
                  run_autoclose, run_git_gutter, run_folding, run_word_wrap, run_menu_and_cmd_save, run_save_dialog, run_close_request, run_warm, run_auto_save, run_hidden_status_bar, run_cursor_style, run_hot_exit,
                  run_keybindings, run_mac_keys, run_format, run_typescript, run_find_and_status, run_symbols_and_problems, run_install_prompt, run_small_batch,
                  run_files_and_navigation, run_picker_scroll, run_medium_language, run_medium_editing, run_inline_suggest, run_references_and_lenses, run_inline_hosted]
