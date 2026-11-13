@@ -8,9 +8,10 @@
 
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { spaces, machines, panes, agents, run, openOverlay, exec, hc, theme, shared, setShared, watchFolder, window, layout, notify } from "herdr";
+import { spaces, machines, panes, agents, run, openOverlay, exec, hc, theme, shared, setShared, watchFolder, window, layout, notify, appHome, readTextFile, writeTextFile } from "herdr";
 import { spaceAgents, fit, describe } from "./agents.js";
 import { sync, interleave, forget, adopt, liveIndex, moveTo, reopenArgs, load } from "./kept.js";
+import { settingsOf, machineOrderOf, sortMachines, dragOrder, writeMachineOrder } from "./order.js";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -33,6 +34,7 @@ function place(s, ps) {
 const rowHeight = ({ tree }) => (tree ? 28 : 30);
 const where = (s, ps) => JSON.stringify([s.machine ?? null, place(s, ps)]);
 const base = (path) => path.replace(/\/+$/, "").split("/").pop();
+const settingsPath = () => `${appHome()}/vscode-settings.json`;
 // Changes made outside Herdr (an editor's save, a commit in another app): looked
 // for this often, in repos the list shows, while the window is in front.
 const FALLBACK = 60000;
@@ -81,6 +83,11 @@ export default class Spaces extends View {
     this.kept = load(localStorage.getItem("vscode-spaces.kept"));
     this.reopening = null; // { id, machine, before, at } while space.new runs for a kept row
     this.askAt = shared("vscode-spaces.ask")?.at ?? 0; // the menu's last request, already seen
+    // The machine headers' order (order.js), read again every 2s as other mods read vscode-settings.json.
+    this.machineOrder = [];
+    this.orderReadAt = -Infinity;
+    this.draggedMachine = null;
+    this.overMachine = null;
     this.refreshMachines(cx);
     cx.timer.every(15000, cx => this.refreshMachines(cx));
     // `git status` walks the whole tree, on another machine a process there:
@@ -94,12 +101,40 @@ export default class Spaces extends View {
     for (const s of sp) if (!this.shown.has(s.id)) this.born[s.id] ??= now;
     const due = this.due(now, sp, panes());
     if (due.size) this.refreshGit(due, cx);
+    if (now - this.orderReadAt >= 2000) this.readOrder(now, cx);
     const keptMoved = this.keep(now, sp, cx);
     // An agent starting, stopping or changing state redraws its space's icons.
     const sig = agents().map((a) => `${a.space}:${a.address}:${a.status}:${a.program?.key}`).join("|");
     const moved = sig !== this.agentSig;
     this.agentSig = sig;
     if (keptMoved || moved || sp.some((s) => !this.shown.has(s.id)) || this.orderingDue(now)) cx.notify();
+  }
+
+  // spaces.machineOrder from vscode-settings.json; redraws when it changed.
+  readOrder(now, cx) {
+    this.orderReadAt = now;
+    cx.spawn(async (cx) => {
+      const text = await readTextFile(settingsPath()).catch(() => null);
+      if (text === this.settingsText) return;
+      this.settingsText = text;
+      this.machineOrder = machineOrderOf(settingsOf(text));
+      cx.notify();
+    });
+  }
+
+  // `from`'s header dropped on `to`'s: shown in that order at once, then saved as spaces.machineOrder.
+  dropMachine(shown, from, to, cx) {
+    const next = dragOrder(this.machineOrder, shown, from, to);
+    if (!next) return;
+    this.machineOrder = next;
+    cx.spawn(async () => {
+      const io = { read: () => readTextFile(settingsPath()), write: (text, expected) => writeTextFile(settingsPath(), text, expected) };
+      try { await writeMachineOrder(io, next); }
+      catch (e) {
+        notify({ title: "Machine order not saved", body: `vscode-settings.json can't be rewritten safely (${e?.message ?? e}). Set "spaces.machineOrder" there by hand.`, level: "warning" });
+      }
+      this.settingsText = undefined; // the next read shows the file's order
+    });
   }
 
   // Brings the kept list up to date with spaces(); true when it changed.
@@ -415,7 +450,7 @@ export default class Spaces extends View {
   grouped(t, collapsed) {
     const rows = this.ordered();
     const draw = (r) => (r.kept ? this.keptRow(r.kept, t, collapsed) : collapsed ? this.compact(r, t) : this.row(r, t));
-    const remote = [...new Set([...rows.map(r => r.w.machine).filter(Boolean), ...this.machines.map(m => m.name), ...Object.keys(this.reconnecting)])].sort();
+    const remote = sortMachines([...new Set([...rows.map(r => r.w.machine).filter(Boolean), ...this.machines.map(m => m.name), ...Object.keys(this.reconnecting)])], this.machineOrder);
     const loading = m => {
       const layout = machines().find(k => k.name === m)?.layout;
       return layout === "loading" || (!layout && this.machines.some(k => k.name === m && k.state === "connected"))
@@ -431,8 +466,28 @@ export default class Spaces extends View {
       const connected = !m || machine?.state === "connected";
       const rebuilt = this.rebuilt(machine) || !!repair;
       const folded = this.folded.has(m);
-      const head = h_flex().id(`machine-${m ?? "local"}`).h(26).flex_none().px(collapsed ? 2 : 8).gap(7).items_center().text_size(11).text_color(t.dim)
+      // Another machine's header drags to reorder them (This computer stays first), as a space's row does.
+      const dragged = this.draggedMachine;
+      const head = h_flex().relative().id(`machine-${m ?? "local"}`).h(26).flex_none().px(collapsed ? 2 : 8).gap(7).items_center().text_size(11).text_color(t.dim)
         .cursor_pointer().hover(s => s.bg(t.hover))
+        .when(Boolean(m) && dragged === m && this.overMachine !== m, el => el.opacity(0.5))
+        .when(Boolean(m) && dragged !== null && dragged !== m && this.overMachine === m, el => el.child(
+          div().absolute().left(0).right(0).h(2).bg(t.accent)
+            .when(remote.indexOf(dragged) < remote.indexOf(m), line => line.bottom(0))
+            .when(remote.indexOf(dragged) > remote.indexOf(m), line => line.top(0)),
+        ))
+        .when(Boolean(m), el => el
+          .on_mouse_down("left", () => { this.draggedMachine = m; this.overMachine = m; })
+          .on_mouse_move((_e, cx) => {
+            if (this.draggedMachine !== null && this.overMachine !== m) { this.overMachine = m; cx.notify(); }
+          })
+          .on_mouse_up("left", (_e, cx) => {
+            const from = this.draggedMachine;
+            this.draggedMachine = null;
+            this.overMachine = null;
+            if (from !== null && from !== m) this.dropMachine(remote, from, m, cx);
+            cx.notify();
+          }))
         .on_click((_e, cx) => {
           folded ? this.folded.delete(m) : this.folded.add(m);
           localStorage.setItem("machines.folded", JSON.stringify([...this.folded]));
@@ -621,7 +676,7 @@ export default class Spaces extends View {
         .child(div().id("space-new").size(26).flex_none().flex().items_center().justify_center().rounded(6).hover(s => s.bg(t.hover).text_color(t.foreground))
           .on_click(() => run("space.new")).child(svg("mods/workspace-chrome/plus.svg").size(14))))
       .child(v_flex().flex_1().min_h(0).px(8).pb(14).overflow_y_scrollbar().mode("always")
-        .on_mouse_up("left", (_e, cx) => { this.pressed = null; cx.notify(); })
+        .on_mouse_up("left", (_e, cx) => { this.pressed = null; this.draggedMachine = null; this.overMachine = null; cx.notify(); })
         .children(this.grouped(t, collapsed)));
   }
 }
