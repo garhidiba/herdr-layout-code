@@ -9,7 +9,7 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { theme, props, run, exec, hc, spaces, appHome, readTextFile, writeTextFile, closeOverlay, keys } from "herdr";
 import { FILE, normalize, parse, loose, withSetting, withDefaults, rewrite, updateFile, stepDelay, coreStatus, coreCurrent, DEFAULTS,
-  PAGE_FILE, requestedPage, editorStatus, editorCurrent, BUILD_STATUS, buildStatus, HOSTED_PROVIDERS, modelChoices, chosenModel, defaultModel, modelStatus, installHint, modelWarning, keyLine, LOCAL_PROVIDERS, endpointProblem, withProvider, withOwn, ownValue } from "./settings.js";
+  PAGE_FILE, requestedPage, editorStatus, editorCurrent, BUILD_STATUS, BUILD_PID, BUILD_KEEP_JS, buildStatus, HOSTED_PROVIDERS, modelChoices, chosenModel, defaultModel, modelStatus, installHint, modelWarning, keyLine, LOCAL_PROVIDERS, endpointProblem, withProvider, withOwn, ownValue } from "./settings.js";
 import { FILE as KB_FILE, fromHerdr, label, matchesRow, conflicts, parseFile, serializeFile, withKey, withoutKey, withReset,
   hasUserEntries, herdrRoute, withPassthrough, recordStep } from "./keybindings.js";
 import { createOpenTab } from "./launch.js";
@@ -21,6 +21,10 @@ const keysPath = () => `${appHome()}/keys.json`;
 const corePath = () => `${appHome()}/vscode-core/vscode-core`;
 const editorPath = () => `${appHome()}/vscode-core/vsedit`; // the Rust editor, built with the core
 const statusPath = () => `${appHome()}/${BUILD_STATUS}`; // the build's progress line (native/install.sh)
+const buildFile = (name) => `${appHome()}/${name}`;
+// True while install.sh's recorded process runs (no record yet: the tab is starting, so true).
+const buildAlive = () => exec("/bin/sh", ["-c", 'p=$(cat "$0" 2>/dev/null) || exit 0; kill -0 "$p" 2>/dev/null', buildFile(BUILD_PID)])
+  .then((r) => r.code === 0, () => true);
 const EDITOR = "mods/vscode-viewer/editor/vsedit.sh"; // same launcher the Explorer opens files with
 const KB_TABLE = "mods/vscode-viewer/editor/keybindings.cjs"; // `--table <file>`: the editor's commands and keys in effect
 // The editor's inline suggestion rules and key store: `--models`, `--key`, `--save-key <file>`, `--remove-key`, `--test`.
@@ -138,6 +142,8 @@ export default class Settings extends View {
   // without Rust or a C compiler keeps JavaScript.
   set(key, value, cx) {
     const rust = /^(core|editor)\.engine$/.test(key) && value === "rust";
+    if (key === "core.engine" && this.toRust && value === "js") // the running build must not switch to Rust at its end
+      exec("/bin/sh", ["-c", ': > "$0"', buildFile(BUILD_KEEP_JS)]).catch(() => null);
     if (key === "core.engine") this.toRust = false;
     if (rust && key === "core.engine" && !this.built) {
       this.toRust = true;
@@ -291,7 +297,9 @@ export default class Settings extends View {
       this.editor = editorStatus(e?.code === 0 ? e.stdout : null);
       const status = this.building ? buildStatus(await readTextFile(statusPath()).catch(() => null)) : null;
       if (status) this.buildNote = status.state === "done" ? null : status;
-      if (!this.needsBuild() || status?.over) this.building = this.toRust = false;
+      if (this.building && !status?.over && !(await buildAlive())) // its tab was closed mid-build
+        this.buildNote = { state: "failed", text: "The build stopped before it finished; press Build Rust core to start it again." };
+      if (!this.needsBuild() || status?.over || this.buildNote?.state === "failed") this.building = this.toRust = false;
       cx.notify();
     });
   }
@@ -300,7 +308,7 @@ export default class Settings extends View {
   async buildCore(cx, args = []) {
     this.building = true; this.buildNote = null;
     cx.notify();
-    await exec("/bin/rm", ["-f", statusPath()]).catch(() => null);
+    await exec("/bin/rm", ["-f", statusPath(), buildFile(BUILD_PID), buildFile(BUILD_KEEP_JS)]).catch(() => null);
     return openTab({ name: "Build Rust core", folder: appHome(), argv: ["sh", `${appHome()}/mods/vscode-settings/build-core.sh`, appHome(), ...args] }, cx);
   }
 

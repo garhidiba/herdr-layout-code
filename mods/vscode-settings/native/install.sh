@@ -15,7 +15,9 @@
 # `rustup default stable`). A C compiler is needed too (rustc links with cc): on macOS it opens the Command Line Tools
 # installer (xcode-select --install) and stops until that is done; on Linux it names the package to install (no sudo).
 # Each step goes to <herdr home>/vscode-core/build-status too ("running|failed|warn|done <message>"; the Settings
-# dialog shows it). Any failure leaves "core.engine" as it was, so the mods keep using JavaScript.
+# dialog shows it), and its process id to build-pid (the dialog notices a build that stopped without saying so).
+# Any failure leaves "core.engine" as it was, so the mods keep using JavaScript. --engine rust leaves it too when
+# <herdr home>/vscode-core/build-keep-js exists at the end (the dialog writes it when JavaScript is picked meanwhile).
 # This script leaves the setting alone unless asked:
 #   install.sh                 build and install the binary
 #   install.sh --engine rust   build, install, then set "core.engine": "rust"
@@ -34,7 +36,7 @@ while [ $# -gt 0 ]; do
   case $1 in
     --engine) [ $# -ge 2 ] || fail "--engine needs rust or js"; engine=$2; shift 2 ;;
     --engine=*) engine=${1#*=}; shift ;;
-    -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) fail "unknown option $1 (see --help)" ;;
   esac
 done
@@ -67,6 +69,7 @@ if [ "$engine" = js ]; then set_engine js; exit 0; fi
 out=$home/vscode-core
 mkdir -p "$out"
 status=$out/build-status
+echo $$ > "$out/build-pid"
 say "checking the build tools"
 . "$here/toolchain.sh"
 ensure_rust
@@ -106,5 +109,7 @@ if [ "$engine" = rust ] || [ "$(value 'core\.engine')" = rust ] || [ "$(value 'e
   fi
 fi
 
-if [ "$engine" = rust ]; then set_engine rust; fi
+if [ "$engine" = rust ] && [ -e "$out/build-keep-js" ]; then
+  rm -f "$out/build-keep-js"; say "JavaScript was picked during the build: \"core.engine\" stays as it is"
+elif [ "$engine" = rust ]; then set_engine rust; fi
 if [ -n "$note" ]; then printf 'warn %s\n' "$note" > "$status"; else printf 'done installed\n' > "$status"; fi

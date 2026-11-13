@@ -245,6 +245,8 @@ export function editorStatus(stdout) {
 // The build's progress file, <herdr home>/vscode-core/build-status (native/install.sh writes one line,
 // "running|failed|warn|done <message>") -> { state, text, over }, or null when there is none (yet) or it can't be read.
 export const BUILD_STATUS = "vscode-core/build-status";
+export const BUILD_PID = "vscode-core/build-pid"; // install.sh's process id while it runs
+export const BUILD_KEEP_JS = "vscode-core/build-keep-js"; // JavaScript picked during a --engine rust build: it skips the switch
 export function buildStatus(text) {
   const m = /^(running|failed|warn|done) (.*)/.exec(String(text ?? "").trim());
   return m ? { state: m[1], text: m[2], over: m[1] !== "running" } : null;
