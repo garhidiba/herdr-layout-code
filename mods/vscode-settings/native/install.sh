@@ -10,6 +10,12 @@
 # (the Settings dialog switches it). When the Rust engine is chosen ("core.engine" or "editor.engine" is "rust", or
 # --engine rust) it also builds the Rust editor, <herdr home>/vscode-core/vsedit (it compiles Oniguruma, so it needs a C
 # compiler; when that build fails the editor stays JavaScript and the core is still installed).
+# On a fresh machine it first gets what the build needs (toolchain.sh): without cargo/rustc it installs Rust with
+# rustup (https://sh.rustup.rs, -y --profile minimal, into ~/.cargo and ~/.rustup; rustup with no toolchain gets
+# `rustup default stable`). A C compiler is needed too (rustc links with cc): on macOS it opens the Command Line Tools
+# installer (xcode-select --install) and stops until that is done; on Linux it names the package to install (no sudo).
+# Each step goes to <herdr home>/vscode-core/build-status too ("running|failed|warn|done <message>"; the Settings
+# dialog shows it). Any failure leaves "core.engine" as it was, so the mods keep using JavaScript.
 # This script leaves the setting alone unless asked:
 #   install.sh                 build and install the binary
 #   install.sh --engine rust   build, install, then set "core.engine": "rust"
@@ -20,13 +26,15 @@ here=$(cd "$(dirname "$0")" && pwd)
 home=${HERDR_APP_HOME:-$HOME/.config/herdr-app}
 engine=
 
-fail() { printf 'vscode-core: %s\n' "$1" >&2; exit 1; }
+status= # <herdr home>/vscode-core/build-status, once the build starts
+say() { printf 'vscode-core: %s\n' "$1"; if [ -n "$status" ]; then printf 'running %s\n' "$1" > "$status"; fi; }
+fail() { printf 'vscode-core: %s\n' "$1" >&2; if [ -n "$status" ]; then printf 'failed %s\n' "$1" > "$status"; fi; exit 1; }
 
 while [ $# -gt 0 ]; do
   case $1 in
     --engine) [ $# -ge 2 ] || fail "--engine needs rust or js"; engine=$2; shift 2 ;;
     --engine=*) engine=${1#*=}; shift ;;
-    -h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) fail "unknown option $1 (see --help)" ;;
   esac
 done
@@ -56,24 +64,27 @@ set_engine() {
 
 if [ "$engine" = js ]; then set_engine js; exit 0; fi
 
-# Herdr starts programs with PATH=/usr/bin:/bin; rustup puts cargo and rustc in ~/.cargo/bin.
-PATH="$HOME/.cargo/bin:$PATH"; export PATH
-cargo=$(command -v cargo 2>/dev/null) || fail "cargo not found. Install Rust (https://rustup.rs) and run this again; the mods keep using the JavaScript core."
 out=$home/vscode-core
 mkdir -p "$out"
+status=$out/build-status
+say "checking the build tools"
+. "$here/toolchain.sh"
+ensure_rust
+ensure_cc
+cargo=$(command -v cargo)
 
 if ! "$cargo" fetch --locked --offline --manifest-path "$here/Cargo.toml" >/dev/null 2>&1; then
-  printf 'vscode-core: downloading the crates it needs from crates.io (first build on this machine)\n'
+  say "downloading the crates it needs from crates.io (first build on this machine)"
   "$cargo" fetch --locked --manifest-path "$here/Cargo.toml" || fail "could not get the crates (offline?); the mods keep using the JavaScript core."
 fi
-printf 'vscode-core: building with %s\n' "$cargo"
+say "building with $cargo"
 "$cargo" build --release --locked --offline --manifest-path "$here/Cargo.toml" --target-dir "$out/target" \
-  || fail "the build failed (see above); the mods keep using the JavaScript core."
+  || fail "the build failed (see the Build Rust core tab); the mods keep using the JavaScript core."
 
 # Copied beside it, then renamed over it: a mod running the old binary right now is not affected.
 cp "$out/target/release/vscode-core" "$out/vscode-core.tmp.$$"
 mv -f "$out/vscode-core.tmp.$$" "$out/vscode-core"
-printf 'vscode-core: installed %s\n' "$("$out/vscode-core" --version)"
+say "installed $("$out/vscode-core" --version)"
 
 # The wrapper: builds again from these sources (quoted for sh: ' becomes '\'').
 quoted=$(printf '%s' "$here/install.sh" | sed "s/'/'\\\\''/g")
@@ -81,16 +92,19 @@ printf '#!/bin/sh\n# Written by %s: builds the Rust core again from those source
 mv -f "$out/install.sh.tmp.$$" "$out/install.sh"
 
 # The Rust editor, when the Rust engine is (or is about to be) chosen.
+note=
 value() { sed -n -e '/^[[:space:]]*\/\//d' -e 's/.*"'"$1"'"[[:space:]]*:[[:space:]]*"\([a-z]*\)".*/\1/p' "$home/vscode-settings.json" 2>/dev/null | head -n 1; }
 if [ "$engine" = rust ] || [ "$(value 'core\.engine')" = rust ] || [ "$(value 'editor\.engine')" = rust ]; then
-  printf 'vscode-core: building the Rust editor (vsedit)\n'
+  say "building the Rust editor (vsedit)"
   if "$cargo" build --release --locked --offline --manifest-path "$here/Cargo.toml" --target-dir "$out/target" -p vsedit; then
     cp "$out/target/release/vsedit" "$out/vsedit.tmp.$$"
     mv -f "$out/vsedit.tmp.$$" "$out/vsedit"
-    printf 'vscode-core: installed %s\n' "$("$out/vsedit" --version)"
+    say "installed $("$out/vsedit" --version)"
   else
-    printf 'vscode-core: the Rust editor did not build (a C compiler is needed: xcode-select --install); files keep opening in the JavaScript editor.\n' >&2
+    note="the Rust core is installed, but the Rust editor did not build (see the Build Rust core tab); files keep opening in the JavaScript editor."
+    printf 'vscode-core: %s\n' "$note" >&2
   fi
 fi
 
 if [ "$engine" = rust ]; then set_engine rust; fi
+if [ -n "$note" ]; then printf 'warn %s\n' "$note" > "$status"; else printf 'done installed\n' > "$status"; fi

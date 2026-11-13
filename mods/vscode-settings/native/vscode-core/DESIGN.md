@@ -194,7 +194,8 @@ Cargo workspace, `Cargo.lock` and `install.sh`. No clone, no network for the sou
   own `native/install.sh` (so the binary matches the installed mods), else the
   `<herdr home>/vscode-core/install.sh` wrapper an earlier build wrote.
 - **`install.sh`** puts `~/.cargo/bin` in front of PATH (Herdr starts programs with
-  `/usr/bin:/bin`), runs `cargo fetch --locked --offline` and only when that fails a plain
+  `/usr/bin:/bin`), installs Rust with rustup when there is none (`toolchain.sh`: `-y --profile minimal`;
+  a C compiler it can only ask for: `xcode-select --install` on macOS, the package name on Linux), runs `cargo fetch --locked --offline` and only when that fails a plain
   `cargo fetch --locked` (the one network use: the 17 crates, first build on a machine without
   them in cargo's cache), then `cargo build --release --locked --offline` with
   `--target-dir <herdr home>/vscode-core/target` — never under `mods/`, which Herdr watches and

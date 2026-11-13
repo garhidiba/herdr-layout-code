@@ -14,8 +14,9 @@
 #   <out>/<platform>/manifest.json   {version, platform, sha256, size, files: {<name>: sha256}}; version = <vsedit
 #                                    version>-<first 12 hex digits of the bundle's sha256>, its folder on the machine
 # <out> defaults to <herdr home>/vscode-core/remote; cargo's build folder is <out>/target.
-# Needs: rustup targets (rustup target add aarch64-unknown-linux-musl x86_64-unknown-linux-musl aarch64-apple-darwin
-# x86_64-apple-darwin x86_64-pc-windows-gnu aarch64-pc-windows-gnullvm), zig (brew install zig) and cargo-zigbuild
+# Needs: zig (brew install zig) and a C compiler (toolchain.sh says how to get one). It installs the rest when missing:
+# Rust (rustup, as install.sh does), the rustup targets (aarch64-unknown-linux-musl x86_64-unknown-linux-musl
+# aarch64-apple-darwin x86_64-apple-darwin x86_64-pc-windows-gnu aarch64-pc-windows-gnullvm) and cargo-zigbuild
 # (cargo install cargo-zigbuild --locked). On Linux the macos bundle is skipped.
 # usage: sh build-remote.sh [--out <dir>]
 set -eu
@@ -25,6 +26,7 @@ mods=$(cd "$here/../.." && pwd)
 home=${HERDR_APP_HOME:-$HOME/.config/herdr-app}
 out=$home/vscode-core/remote
 
+say() { printf 'build-remote: %s\n' "$1"; }
 fail() { printf 'build-remote: %s\n' "$1" >&2; exit 1; }
 while [ $# -gt 0 ]; do
   case $1 in
@@ -39,13 +41,20 @@ MAC_TARGETS="aarch64-apple-darwin x86_64-apple-darwin"
 PLATFORMS="linux-aarch64 linux-x86_64 windows-x86_64 windows-aarch64"
 if [ "$(uname -s)" = Darwin ]; then PLATFORMS="$PLATFORMS macos"; else MAC_TARGETS=; printf 'build-remote: not on macOS, skipping the macos bundle\n'; fi
 
-PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; export PATH
-command -v cargo-zigbuild >/dev/null || fail "cargo-zigbuild not found: cargo install cargo-zigbuild --locked"
+PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"; export PATH
+. "$here/toolchain.sh"
 command -v zig >/dev/null || fail "zig not found: brew install zig"
+ensure_rust
+ensure_cc
+command -v rustup >/dev/null || fail "the cross targets need rustup (this Rust isn't from it): install Rust from https://rustup.rs"
 installed=$(rustup target list --installed 2>/dev/null || true)
 for t in $ZIG_TARGETS $MAC_TARGETS; do
-  case $installed in *"$t"*) ;; *) fail "rustup target $t missing: rustup target add $t" ;; esac
+  case $installed in *"$t"*) ;; *) say "adding rustup target $t"; rustup target add "$t" || fail "rustup target add $t failed (offline?)" ;; esac
 done
+if ! command -v cargo-zigbuild >/dev/null; then
+  say "installing cargo-zigbuild (first time)"
+  cargo install cargo-zigbuild --locked || fail "cargo install cargo-zigbuild --locked failed (see above)"
+fi
 
 sha() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
 # The same bytes for the same files: no owners, no macOS metadata, gzip without a name or time.
