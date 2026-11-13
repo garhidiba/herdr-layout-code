@@ -72,9 +72,9 @@ Optional Claude meter: set Claude Code's `statusLine.command` to `sh ~/.config/h
 
 The Explorer and Source Control read folders and git with a **JavaScript core** that works out of the box: nothing to build.
 
-The optional **Rust core** (`vscode-core`) does the same reads in one parallel process, about 3-4x faster (an 84-repo folder: 6.5 s to 0.9 s). Its sources ship in `mods/vscode-settings/native/`. It needs Rust (`cargo`, from [rustup.rs](https://rustup.rs)) and runs on this machine only; remote spaces keep the JavaScript core. To use it, either:
+The optional **Rust core** (`vscode-core`) does the same reads in one parallel process, about 3-4x faster (an 84-repo folder: 6.5 s to 0.9 s). Its sources ship in `mods/vscode-settings/native/`. Building it needs Rust and a C compiler; on a machine without Rust the build installs it first with rustup ([rustup.rs](https://rustup.rs), minimal profile, into `~/.cargo`), and without a C compiler it opens the Command Line Tools installer on macOS (`xcode-select --install`; build again once it finishes) or names the package on Linux. It runs on this machine only; remote spaces keep the JavaScript core. To use it, either:
 
-- open Settings (gear, `cmd-,`), pick **Rust** as the core engine and press **Build Rust core**, or
+- open Settings (gear, `cmd-,`) and pick **Rust** as the core engine: when the core isn't built yet, that starts the build in a tab (the dialog shows each step) and switches to Rust once it works; a failed build leaves JavaScript on. Or
 - run `sh ~/.config/herdr-app/mods/vscode-settings/native/install.sh --engine rust`. It builds into `~/.config/herdr-app/vscode-core/` and sets `"core.engine": "rust"` in `vscode-settings.json`. Without `--engine` it only builds; `--engine js` switches back.
 
 If Rust is chosen but the binary is missing, out of date or broken, the layout uses JavaScript and says so once, then tries the binary again later.
@@ -88,7 +88,7 @@ If Rust is chosen but the binary is missing, out of date or broken, the layout u
 - Needs `sh`, `git`, `find` and `node` (on PATH). macOS tools are used where present: `pbcopy`/`pbpaste`, `open`, `trash` or `osascript`, `sips`, `qlmanage`.
 - Language servers start on first use and only when installed: `tsserver`, `rust-analyzer`, `clangd`, `sourcekit-lsp`, JSON/CSS/HTML servers, `yaml-language-server`, `taplo`, `basedpyright` or `pyright`, `bash-language-server`, `gopls`, `docker-langserver`, `marksman`. A missing one is offered once in the status bar and installs only when you click. Without a server, Go to Definition falls back to `git grep` / `grep`, and Format Document to `gofmt`, `rustfmt` or `prettier`.
 - Remote spaces run commands on that machine through `hc exec`.
-- `code` (Open in VS Code), `cargo` (only when you click Build Rust core), `codex app-server` (Codex usage, read every 5 minutes; a limit reset is redeemed only when you click it and confirm).
+- `code` (Open in VS Code), `cargo` (only when you build the Rust core; on a first build, rustup's installer from `https://sh.rustup.rs`), `codex app-server` (Codex usage, read every 5 minutes; a limit reset is redeemed only when you click it and confirm).
 - Image and video previews are cached in `mods/vscode-viewer/.cache/` (kept under 1 GB).
 
 Only `codex app-server` (OpenAI, as Codex itself does) and the inline suggestion provider you choose reach the network. Ollama and LM Studio are local unless you point them at another machine; Codestral and Mercury receive the code around the cursor, and their keys come from the macOS keychain. Suggestions are never requested for files like `.env` or keys, and `editor.inlineSuggest.provider: "off"` turns them off.

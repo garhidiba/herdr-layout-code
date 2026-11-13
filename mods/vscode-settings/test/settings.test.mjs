@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { DEFAULTS, parse, normalize, coreEngine, editorEngine, withSetting, withDefaults, serialize, updateFile, stepDelay, coreStatus, coreCurrent,
-  editorStatus, editorCurrent, modelChoices, chosenModel, modelStatus, modelWarning, keyLine, endpointProblem, withProvider, withOwn, ownValue, ownKey } from "../settings.js";
+  editorStatus, editorCurrent, modelChoices, chosenModel, modelStatus, modelWarning, keyLine, endpointProblem, withProvider, withOwn, ownValue, ownKey, buildStatus } from "../settings.js";
 
 // An in-memory file with writeTextFile's contract: writes only when `expected` still matches.
 function memoryFile(text, { raceOnce = null } = {}) {
@@ -244,4 +244,13 @@ test("the Spaces machine order is a list of names, empty (by name) by default", 
   assert.deepEqual(normalize({ "spaces.machineOrder": "win-amd64" })["spaces.machineOrder"], []);
   assert.throws(() => withSetting({}, "spaces.machineOrder", "win-amd64"), /Invalid value/);
   assert.deepEqual(withSetting({ "my.key": 1 }, "spaces.machineOrder", []), { "my.key": 1, "spaces.machineOrder": [] });
+});
+
+test("the build's progress line says whether it is still running and what to show", () => {
+  assert.deepEqual(buildStatus("running installing Rust with rustup (first time)\n"), { state: "running", text: "installing Rust with rustup (first time)", over: false });
+  assert.deepEqual(buildStatus("failed a C compiler is needed: install it"), { state: "failed", text: "a C compiler is needed: install it", over: true });
+  assert.equal(buildStatus("warn the Rust editor did not build").over, true);
+  assert.equal(buildStatus("done installed").state, "done");
+  assert.equal(buildStatus(null), null); // not written yet
+  assert.equal(buildStatus("garbage"), null);
 });

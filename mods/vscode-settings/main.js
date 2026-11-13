@@ -9,7 +9,7 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { theme, props, run, exec, hc, spaces, appHome, readTextFile, writeTextFile, closeOverlay, keys } from "herdr";
 import { FILE, normalize, parse, loose, withSetting, withDefaults, rewrite, updateFile, stepDelay, coreStatus, coreCurrent, DEFAULTS,
-  PAGE_FILE, requestedPage, editorStatus, editorCurrent, HOSTED_PROVIDERS, modelChoices, chosenModel, defaultModel, modelStatus, installHint, modelWarning, keyLine, LOCAL_PROVIDERS, endpointProblem, withProvider, withOwn, ownValue } from "./settings.js";
+  PAGE_FILE, requestedPage, editorStatus, editorCurrent, BUILD_STATUS, buildStatus, HOSTED_PROVIDERS, modelChoices, chosenModel, defaultModel, modelStatus, installHint, modelWarning, keyLine, LOCAL_PROVIDERS, endpointProblem, withProvider, withOwn, ownValue } from "./settings.js";
 import { FILE as KB_FILE, fromHerdr, label, matchesRow, conflicts, parseFile, serializeFile, withKey, withoutKey, withReset,
   hasUserEntries, herdrRoute, withPassthrough, recordStep } from "./keybindings.js";
 import { createOpenTab } from "./launch.js";
@@ -20,6 +20,7 @@ const kbPath = () => `${appHome()}/${KB_FILE}`;
 const keysPath = () => `${appHome()}/keys.json`;
 const corePath = () => `${appHome()}/vscode-core/vscode-core`;
 const editorPath = () => `${appHome()}/vscode-core/vsedit`; // the Rust editor, built with the core
+const statusPath = () => `${appHome()}/${BUILD_STATUS}`; // the build's progress line (native/install.sh)
 const EDITOR = "mods/vscode-viewer/editor/vsedit.sh"; // same launcher the Explorer opens files with
 const KB_TABLE = "mods/vscode-viewer/editor/keybindings.cjs"; // `--table <file>`: the editor's commands and keys in effect
 // The editor's inline suggestion rules and key store: `--models`, `--key`, `--save-key <file>`, `--remove-key`, `--test`.
@@ -34,6 +35,7 @@ export default class Settings extends View {
   init(_props, cx) {
     this.v = normalize({});
     this.error = null; this.saved = 0; this.core = null; this.built = false; this.editor = null; this.editorBuilt = false;
+    this.toRust = false; this.buildNote = null; // Rust picked without a built core: the build that sets it; its last step
     this.inputs = {};
     this.number("files.autoSaveDelay");
     this.number("editor.tabSize");
@@ -108,12 +110,13 @@ export default class Settings extends View {
     });
   }
 
-  write(change, cx) {
+  write(change, cx, then = null) {
     this.writing = true;
     cx.spawn(async (cx) => {
       try {
         this.show(await updateFile(fileIo(settingsPath()), change));
         this.error = null;
+        then?.();
         if (this.inlineSource() !== this.inl.source) this.loadInline(cx);
         this.flashSaved(cx);
       } catch (e) {
@@ -130,9 +133,19 @@ export default class Settings extends View {
     cx.timer.after(1500, (cx) => { if (this.saved === token) { this.saved = 0; cx.notify(); } });
   }
 
-  // Another inline suggestion provider starts from its own model and address.
+  // Another inline suggestion provider starts from its own model and address. Picking a Rust engine builds what it
+  // needs; the core's setting is written by that build (install.sh --engine rust) only once it works, so a machine
+  // without Rust or a C compiler keeps JavaScript.
   set(key, value, cx) {
-    this.write((raw) => (key === PROVIDER ? withProvider(raw, value) : withSetting(raw, key, value)), cx);
+    const rust = /^(core|editor)\.engine$/.test(key) && value === "rust";
+    if (key === "core.engine") this.toRust = false;
+    if (rust && key === "core.engine" && !this.built) {
+      this.toRust = true;
+      if (!this.building) cx.spawn((cx) => this.buildCore(cx, ["--engine", "rust"]));
+      return cx.notify();
+    }
+    this.write((raw) => (key === PROVIDER ? withProvider(raw, value) : withSetting(raw, key, value)), cx,
+      () => { if (rust && !this.building && this.needsBuild()) cx.spawn((cx) => this.buildCore(cx)); });
   }
   // The current provider's own model or server address.
   setOwn(k, value, cx) {
@@ -276,14 +289,19 @@ export default class Settings extends View {
       this.core = coreStatus(r?.code === 0 ? r.stdout : null);
       this.editorBuilt = e?.code === 0 && editorCurrent(e.stdout);
       this.editor = editorStatus(e?.code === 0 ? e.stdout : null);
-      if (!this.needsBuild()) this.building = false;
+      const status = this.building ? buildStatus(await readTextFile(statusPath()).catch(() => null)) : null;
+      if (status) this.buildNote = status.state === "done" ? null : status;
+      if (!this.needsBuild() || status?.over) this.building = this.toRust = false;
       cx.notify();
     });
   }
 
-  buildCore(cx) {
-    this.building = true;
-    return openTab({ name: "Build Rust core", folder: appHome(), argv: ["sh", `${appHome()}/mods/vscode-settings/build-core.sh`, appHome()] }, cx);
+  // `args` go to install.sh. The old progress line goes first, so the poll only reads this build's.
+  async buildCore(cx, args = []) {
+    this.building = true; this.buildNote = null;
+    cx.notify();
+    await exec("/bin/rm", ["-f", statusPath()]).catch(() => null);
+    return openTab({ name: "Build Rust core", folder: appHome(), argv: ["sh", `${appHome()}/mods/vscode-settings/build-core.sh`, appHome(), ...args] }, cx);
   }
 
   // The dialog closes once the editor tab is shown: closing first could end the wait (see launch.js).
@@ -303,7 +321,7 @@ export default class Settings extends View {
   // ----- controls -----
   segmented(t, key, options) {
     return h_flex().flex_none().p(2).gap(2).rounded(6).bg(t.background).border_1().border_color(t.input).children(options.map(([value, label]) => {
-      const on = this.v[key] === value;
+      const on = (key === "core.engine" && this.toRust ? "rust" : this.v[key]) === value; // Rust while its build runs
       return div().id(`${key}-${value}`).h(24).px(10).flex().items_center().rounded(4).text_size(12).cursor_pointer()
         .role("radio_button").accessibility_label(label)
         .bg(on ? t.accent : t.background).text_color(on ? t.accent_foreground : t.muted)
@@ -354,15 +372,20 @@ export default class Settings extends View {
   }
 
   // A chosen Rust engine whose binary is missing or out of date (one build makes both: build-core.sh).
+  coreRust() { return this.v["core.engine"] === "rust" || this.toRust; }
   needsBuild() {
-    return Boolean((this.v["core.engine"] === "rust" && this.core && !this.built) || (this.v["editor.engine"] === "rust" && this.editor && !this.editorBuilt));
+    return Boolean((this.coreRust() && this.core && !this.built) || (this.v["editor.engine"] === "rust" && this.editor && !this.editorBuilt));
   }
 
   // The binary's status, and the Build button (on the core's row, else the editor's) while a chosen one isn't current.
+  // Under the core's row, the build's last step (a failure or warning stays until the next build).
   statusLine(t, id, status, built, checking, button) {
-    return h_flex().gap(10).items_center()
-      .child(div().flex_1().text_size(11.5).text_color(built ? t.done : t.dim).child(status ?? checking))
-      .when(button && this.needsBuild(), (el) => el.child(this.button(t, id, this.building ? "Building… (see tab)" : "Build Rust core", (_e, cx) => cx.spawn((cx) => this.buildCore(cx)))));
+    const note = this.buildNote;
+    return v_flex().gap(4)
+      .child(h_flex().gap(10).items_center()
+        .child(div().flex_1().text_size(11.5).text_color(built ? t.done : t.dim).child(status ?? checking))
+        .when(button && this.needsBuild(), (el) => el.child(this.button(t, id, this.building ? "Building… (see tab)" : "Build Rust core", (_e, cx) => cx.spawn((cx) => this.buildCore(cx))))))
+      .when(id === "build-core" && Boolean(note), (el) => el.child(div().text_size(11).text_color(note.state === "running" ? t.dim : t.ansi3).child(note.text)));
   }
 
   // ----- keyboard shortcuts page -----
@@ -446,10 +469,10 @@ export default class Settings extends View {
       .child(this.section(t, "Core engine"))
       .child(this.row(t, "Core", "Engine", "File and git scanning for the explorer and source control. JavaScript works everywhere; Rust is faster but must be built first.",
         this.segmented(t, "core.engine", [["js", "JavaScript"], ["rust", "Rust"]]),
-        this.statusLine(t, "build-core", this.core, this.built, "Rust core: checking…", this.v["core.engine"] === "rust")))
+        this.statusLine(t, "build-core", this.core, this.built, "Rust core: checking…", this.coreRust())))
       .child(this.row(t, "Editor", "Engine", "The terminal editor; follows the core's engine until you pick one. Rust opens files faster and never stalls typing on long lines; language features (Go to Definition, rename, hover, the command palette and context menu) are JavaScript-only for now.",
         this.segmented(t, "editor.engine", [["js", "JavaScript"], ["rust", "Rust"]]),
-        this.statusLine(t, "build-editor", this.editor, this.editorBuilt, "Rust editor: checking…", this.v["core.engine"] !== "rust")))
+        this.statusLine(t, "build-editor", this.editor, this.editorBuilt, "Rust editor: checking…", !this.coreRust())))
       .child(this.section(t, "Files"))
       .child(this.row(t, "Files", "Auto Save", "Save dirty editors automatically.",
         this.segmented(t, "files.autoSave", [["off", "Off"], ["afterDelay", "After Delay"], ["onFocusChange", "On Focus Change"]])))

@@ -241,3 +241,11 @@ export function editorStatus(stdout) {
   if (!editorCurrent(stdout)) return `Rust editor: ${v ? `v${v} ` : ""}is out of date (rebuild it)`;
   return `Rust editor: built${v ? ` (v${v})` : ""}`;
 }
+
+// The build's progress file, <herdr home>/vscode-core/build-status (native/install.sh writes one line,
+// "running|failed|warn|done <message>") -> { state, text, over }, or null when there is none (yet) or it can't be read.
+export const BUILD_STATUS = "vscode-core/build-status";
+export function buildStatus(text) {
+  const m = /^(running|failed|warn|done) (.*)/.exec(String(text ?? "").trim());
+  return m ? { state: m[1], text: m[2], over: m[1] !== "running" } : null;
+}
