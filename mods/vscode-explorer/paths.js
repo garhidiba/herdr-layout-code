@@ -147,12 +147,26 @@ export function menuItems({ dir, remote, canPaste, markdown = false, image = fal
     dir ? [["New File…", "newFile"], ["New Folder…", "newFolder"]]
       : [["Open", "open"], ["Open to the Side", "openSide", "⌘↵"], ...(markdown ? [["Open Preview", "preview"]] : []),
         ...(image ? [["Open in Image Panel", "imagePanel"]] : []), ["Open With…", "openWith"]],
-    [...(remote ? [] : [["Reveal in Finder", "reveal", "⌥⌘R"]]), ["Open in Integrated Terminal", "terminal"]],
+    [...(remote ? [] : [["Reveal in Finder", "reveal", "⌥⌘R"]]), ["Open in Integrated Terminal", "terminal"], ...(dir ? [["Add as Space", "space"]] : [])],
     [["Cut", "cut", "⌘X"], ["Copy", "copy", "⌘C"], ...(canPaste ? [["Paste", "paste", "⌘V"]] : [])],
     [["Copy Path", "copyPath", "⌥⌘C"], ["Copy Relative Path", "copyRelative", "⇧⌥⌘C"]],
     [["Rename…", "rename", "↵"], ["Delete", "delete", "⌘⌫"]],
   ];
   return groups.flatMap((g, i) => (i ? ["-", ...g] : g));
+}
+
+// Add as Space for `folder` on machine `on` (null: this computer): the space already there (spaces() rows on that machine
+// made in that folder, or whose first terminal is in it, as vscode-spaces places a space) is selected, else space.new
+// makes one there, named after the folder, in that machine's group.
+export function spaceCommand(folder, on, spaces, panes) {
+  const want = normalPath(folder);
+  const at = (s) => {
+    const tabs = new Set((s.tabs ?? []).map(t => t.id));
+    const cwd = panes.find(p => tabs.has(p.tab) && p.cwd)?.cwd;
+    return [s.folder, cwd].some(f => f && normalPath(f) === want);
+  };
+  const space = spaces.find(s => (s.machine ?? null) === (on ?? null) && at(s));
+  return space ? ["space.select", { id: space.id }] : ["space.new", { name: baseName(want) || want, folder: want, machine: on ?? "" }];
 }
 
 // Open With. A remote file's terminal editor runs on its machine (remote.js; the viewer until it is installed there):

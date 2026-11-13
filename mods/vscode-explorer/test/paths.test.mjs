@@ -1,7 +1,7 @@
 // node --test mods/vscode-explorer/test/paths.test.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
-import { openArgs, wantsEditor, isMarkdown, isImage, relativeTo, within, copyName, freeName, nameProblem, menuItems, menuHeight, parentOf, openWith, vscodeRemoteArgs, editorFileOf, autoRevealOf, revealPath, normalPath, editorTabOf, editorPaneOf, viewerPaneOf, deleteTitle, extraLines, closesForDeleted } from "../paths.js";
+import { openArgs, wantsEditor, isMarkdown, isImage, relativeTo, within, copyName, freeName, nameProblem, menuItems, menuHeight, spaceCommand, parentOf, openWith, vscodeRemoteArgs, editorFileOf, autoRevealOf, revealPath, normalPath, editorTabOf, editorPaneOf, viewerPaneOf, deleteTitle, extraLines, closesForDeleted } from "../paths.js";
 
 test("a dialog grows by the lines a long file name wraps onto, and not for a short one", () => {
   assert.equal(deleteTitle("/p/Invoice-44K7PLUN-0001 copy 2.pdf"), "Are you sure you want to delete 'Invoice-44K7PLUN-0001 copy 2.pdf'?");
@@ -82,16 +82,16 @@ test("new names must be non-empty, slash-free and not taken", () => {
   assert.equal(nameProblem("a.txt", false), null);
 });
 
-test("the menu groups items like VS Code; a remote entry has every item but Reveal in Finder", () => {
+test("the menu groups items like VS Code; a remote entry has every item but Reveal in Finder; only folders offer Add as Space", () => {
   const labels = (rows) => rows.map(r => (r === "-" ? "-" : r[0]));
   assert.deepEqual(labels(menuItems({ dir: true, remote: false, canPaste: true })), [
-    "New File…", "New Folder…", "-", "Reveal in Finder", "Open in Integrated Terminal", "-", "Cut", "Copy", "Paste", "-",
+    "New File…", "New Folder…", "-", "Reveal in Finder", "Open in Integrated Terminal", "Add as Space", "-", "Cut", "Copy", "Paste", "-",
     "Copy Path", "Copy Relative Path", "-", "Rename…", "Delete"]);
   assert.deepEqual(labels(menuItems({ dir: false, remote: false, canPaste: false })), [
     "Open", "Open to the Side", "Open With…", "-", "Reveal in Finder", "Open in Integrated Terminal", "-", "Cut", "Copy", "-",
     "Copy Path", "Copy Relative Path", "-", "Rename…", "Delete"]);
   assert.deepEqual(labels(menuItems({ dir: true, remote: true, canPaste: true })), [
-    "New File…", "New Folder…", "-", "Open in Integrated Terminal", "-", "Cut", "Copy", "Paste", "-",
+    "New File…", "New Folder…", "-", "Open in Integrated Terminal", "Add as Space", "-", "Cut", "Copy", "Paste", "-",
     "Copy Path", "Copy Relative Path", "-", "Rename…", "Delete"]);
   assert.deepEqual(labels(menuItems({ dir: false, remote: false, canPaste: false, markdown: true })).slice(0, 4), ["Open", "Open to the Side", "Open Preview", "Open With…"]);
   assert.deepEqual(labels(menuItems({ dir: false, remote: true, canPaste: false, image: true })).slice(0, 4), ["Open", "Open to the Side", "Open in Image Panel", "Open With…"]);
@@ -99,6 +99,23 @@ test("the menu groups items like VS Code; a remote entry has every item but Reve
     "Open", "Open to the Side", "Open With…", "-", "Open in Integrated Terminal", "-", "Cut", "Copy", "-",
     "Copy Path", "Copy Relative Path", "-", "Rename…", "Delete"]);
   assert.equal(menuHeight(["-", ["a"]]), 10 + 9 + 26);
+});
+
+test("Add as Space makes a space in the folder on its machine, named after the folder", () => {
+  assert.deepEqual(spaceCommand("/w/app/", null, [], []), ["space.new", { name: "app", folder: "/w/app", machine: "" }]);
+  assert.deepEqual(spaceCommand("/srv/app", "a7z", [], []), ["space.new", { name: "app", folder: "/srv/app", machine: "a7z" }]);
+  assert.deepEqual(spaceCommand("/", null, [], []), ["space.new", { name: "/", folder: "/", machine: "" }]);
+});
+
+test("Add as Space selects the space already in that folder on that machine instead of making another", () => {
+  const sp = [
+    { id: "here", machine: null, folder: "/w/app", tabs: [] },
+    { id: "far", machine: "a7z", folder: "/home", tabs: [{ id: "t1" }] },
+  ];
+  const ps = [{ tab: "t1", cwd: "/srv/app" }];
+  assert.deepEqual(spaceCommand("/w/app", null, sp, ps), ["space.select", { id: "here" }]);
+  assert.deepEqual(spaceCommand("/srv/app", "a7z", sp, ps), ["space.select", { id: "far" }]); // its terminal is there now
+  assert.equal(spaceCommand("/w/app", "a7z", sp, ps)[0], "space.new"); // same path, another machine
 });
 
 test("Open With offers system apps only for local files", () => {

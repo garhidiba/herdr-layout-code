@@ -5,7 +5,7 @@ import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { exec, hc, run, spaces, panes, terminals, machines, props, openOverlay, closeOverlay, theme, shared, setShared, appHome, home, readTextFile, writeTextFile, notify, window } from "herdr";
 import { createOpenTab, noteViewer } from "./launch.js";
 import { createWarmPool, TIMING } from "./warm.js";
-import { menuItems, menuHeight, openWith, baseName, parentOf, relativeTo, nameProblem, vscodeRemoteArgs, isMarkdown, isImage, editorPaneOf, viewerPaneOf, wantsEditor,
+import { menuItems, menuHeight, openWith, spaceCommand, baseName, parentOf, relativeTo, nameProblem, vscodeRemoteArgs, isMarkdown, isImage, editorPaneOf, viewerPaneOf, wantsEditor,
   tabMenuItems, moveRows, outRows, moveOf, closeArgs, fileTabs, splitArgs, clipboardCommand, revealCommand, withDetails, deleteTitle, extraLines, closesForDeleted, DETAILS } from "./paths.js";
 import { createOps } from "./ops.js";
 import { createSplitOpen } from "./split.js";
@@ -130,6 +130,7 @@ export function explorerAction(action, t) {
     case "system": return exec("open", [t.path]).catch(fail);
     case "reveal": return t.on ? undefined : osRun(revealCommand(os(), t.path)).catch(fail);
     case "terminal": return run("terminal.open", { folder, place: "tab" });
+    case "space": return run(...spaceCommand(folder, t.on, spaces(), panes()));
     case "cut": case "copy": return setShared(CLIPBOARD, { path: t.path, dir: t.dir, cut: action === "cut", on: t.on ?? null });
     case "paste": return paste(folder, t.on).then(refresh, fail);
     case "copyPath": return copyText(t.path);
