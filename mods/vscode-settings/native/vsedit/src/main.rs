@@ -9,6 +9,7 @@ mod app;
 mod autoclose;
 mod backup;
 mod buffer;
+mod clicks;
 mod commands;
 mod decorations;
 mod editor;
@@ -283,12 +284,13 @@ fn run(term: &mut Term, ed: &mut Editor) {
     let mut raw: Vec<u8> = vec![];
     let mut escape_at: Option<Instant> = None;
     let mut next_poll = Instant::now() + Duration::from_secs(2);
+    let mut signal = clicks::Signal::new(); // Shift+clicks from the pane header
     loop {
         let sig = term::SIGNAL.load(std::sync::atomic::Ordering::Relaxed);
         if sig != 0 {
             quit(ed, term, 128 + sig);
         }
-        let deadline = [ed.deadline(), Some(next_poll), escape_at].into_iter().flatten().min();
+        let deadline = [ed.deadline(), Some(next_poll), escape_at, signal.as_ref().map(|s| s.next)].into_iter().flatten().min();
         let timeout = deadline.map(|d| d.saturating_duration_since(Instant::now()));
         let Some(chunk) = term.read(timeout) else { quit(ed, term, 129) };
         let mut changed = false;
@@ -307,6 +309,11 @@ fn run(term: &mut Term, ed: &mut Editor) {
             escape_at = (!pending.is_empty()).then(|| Instant::now() + Duration::from_millis(50));
             changed |= events.is_empty();
             for ev in events {
+                if let (Some(s), keys::Ev::Mouse(m)) = (signal.as_mut(), &ev) {
+                    if m.press() && !m.shift && !m.alt && !m.ctrl {
+                        s.clicks.pressed(m.x, m.y, clicks::now_ms());
+                    }
+                }
                 match ed.hover(&ev) {
                     Some(out) => {
                         if !out.is_empty() {
@@ -326,6 +333,11 @@ fn run(term: &mut Term, ed: &mut Editor) {
             escape_at = None;
             pending.clear();
             ed.handle(&keys::key("escape"), Some(term));
+            changed = true;
+        }
+        if let Some((x, y, count)) = signal.as_mut().and_then(|s| s.poll(ed.cols.max(0) as usize, ed.rows.max(0) as usize)) {
+            ed.shift_click(x, y, count);
+            ed.after_event();
             changed = true;
         }
         if term::take_resized() {

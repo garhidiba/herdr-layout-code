@@ -1233,6 +1233,16 @@ impl Editor {
         }
         self.move_to(p, extend);
     }
+
+    /// A Shift+press Herdr kept for itself, at cell (x, y) (clicks.rs): a ⌥+click there; a double one extends by words.
+    /// No release follows it, so no drag either.
+    pub fn shift_click(&mut self, x: i32, y: i32, count: u32) {
+        if count > 1 && y >= 2 && y <= self.height() as i32 + 1 {
+            self.last_click = (Instant::now(), self.cell_to_pos(x, y));
+        }
+        self.mouse(&Mouse { button: 0, x, y, alt: true, ..Default::default() }, None);
+        self.dragging = false;
+    }
 }
 
 // ----- CodeLens rows -----
