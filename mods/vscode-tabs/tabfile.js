@@ -13,7 +13,7 @@ export const withDetails = (terminals, details) =>
   terminals.map(t => (Array.isArray(t.argv) || !details?.[t.address] ? t : { ...t, ...details[t.address] }));
 
 // The file tab `id` of `space` shows, as the tab menu's props: { tab, file, on, pane, argv, root }. An editor tab is a
-// terminal running the editor launcher (vsedit.sh, as vscode-explorer's paths.js editorFileOf reads it: a mod can't
+// terminal running the editor launcher (vsedit.sh or vsedit.ps1, as vscode-explorer's paths.js editorFileOf reads it: a mod can't
 // import another mod's files), its file the argument after it and `argv` the launcher's arguments; a viewer tab is the
 // vscode-viewer pane that shared itself as focused (`viewer`, its { pane, file, on }). null for any other tab, which
 // keeps Herdr's menu. `root` (Copy Relative Path, Reopen's folder): the editor's folder, which is the Explorer root it
@@ -27,7 +27,7 @@ export function tabFileOf(id, space, panes, terminals, viewer) {
   const mine = panes.filter(p => p.tab === id).sort((a, b) => Number(Boolean(b.focused)) - Number(Boolean(a.focused)));
   for (const p of mine) {
     const term = p.terminal ? terminals.find(t => t.address === p.terminal) : null, argv = term?.argv;
-    const i = Array.isArray(argv) ? argv.findIndex(a => /(^|[\\/])vsedit\.sh$/.test(a)) : -1, labelled = term?.labels?.[FILE_LABEL];
+    const i = Array.isArray(argv) ? argv.findIndex(a => /(^|[\\/])vsedit\.(sh|ps1)$/.test(a)) : -1, labelled = term?.labels?.[FILE_LABEL];
     if (i >= 0 && typeof labelled === "string" && labelled) return { tab: id, file: labelled, on, pane: p.pane, argv: [argv[i], labelled, "--close-on-exit"], root: p.cwd || spaceRoot };
     const file = i >= 0 ? argv[i + 1] : null;
     if (typeof file === "string" && file && !file.startsWith("-")) return { tab: id, file, on, pane: p.pane, argv: argv.slice(i), root: p.cwd || spaceRoot };

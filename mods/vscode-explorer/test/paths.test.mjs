@@ -1,7 +1,7 @@
 // node --test mods/vscode-explorer/test/paths.test.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
-import { openArgs, wantsEditor, isMarkdown, isImage, relativeTo, within, copyName, freeName, nameProblem, menuItems, menuHeight, spaceCommand, parentOf, openWith, vscodeRemoteArgs, editorFileOf, autoRevealOf, revealPath, normalPath, editorTabOf, editorPaneOf, viewerPaneOf, deleteTitle, extraLines, closesForDeleted } from "../paths.js";
+import { openArgs, wantsEditor, isMarkdown, isImage, relativeTo, within, copyName, freeName, nameProblem, menuItems, menuHeight, spaceCommand, parentOf, openWith, vscodeRemoteArgs, editorFileOf, splitArgs, autoRevealOf, revealPath, normalPath, editorTabOf, editorPaneOf, viewerPaneOf, deleteTitle, extraLines, closesForDeleted } from "../paths.js";
 
 test("a dialog grows by the lines a long file name wraps onto, and not for a short one", () => {
   assert.equal(deleteTitle("/p/Invoice-44K7PLUN-0001 copy 2.pdf"), "Are you sure you want to delete 'Invoice-44K7PLUN-0001 copy 2.pdf'?");
@@ -43,6 +43,11 @@ test("a remote file opens in the editor installed on its machine, with the launc
     { name: "a b.ts", folder: "/srv", argv: ["exec", "sh", remote.launcher, "/srv/a b.ts", "--close-on-exit", "--os", "mac"] });
   for (const f of ["/srv/README.md", "/srv/.env.dev", "/srv/x.toml", "/srv/compose.yaml"]) assert.equal(openArgs(f, { on: "box", appHome: home, remote }).argv[2], remote.launcher);
   assert.equal(openArgs("/srv/a.png", { on: "box", appHome: home, remote }).mod, "vscode-viewer");
+  const win = { launcher: "C:\\Users\\me\\AppData\\Local\\herdr-vscode\\1.0.0-0123456789ab\\vsedit.ps1", args: ["--os", "mac"] };
+  const argv = openArgs("C:\\p/a.ts", { on: "win", appHome: home, remote: win }).argv;
+  assert.deepEqual(argv, ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", win.launcher, "C:\\p/a.ts", "--close-on-exit", "--os", "mac"]);
+  assert.equal(editorFileOf(argv), "C:\\p/a.ts"); // its tab is known as the file's editor
+  assert.deepEqual(splitArgs({ pane: "p1", argv: argv.slice(5) }).argv, argv); // and splits to the right the same way
   assert.equal(openArgs("/srv/a.ts", { on: "box", appHome: home, how: "viewer", remote }).mod, "vscode-viewer");
 });
 

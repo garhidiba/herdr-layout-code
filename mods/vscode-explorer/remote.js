@@ -3,12 +3,12 @@
 // (vscode-settings/native/build-remote.sh → <herdr home>/vscode-core/remote/<platform>/{bundle.tgz, manifest.json}) and
 // uploaded once per version into the machine's bundle root. The upload itself runs here (`hc exec -i --on`, the
 // bundle on its stdin), never as a tab. No Herdr imports, so node tests load it.
-//   platform         found by                          bundle root                       editor
-//   linux-aarch64    uname -sm: Linux aarch64|arm64    ~/.local/share/herdr-vscode       yes
-//   linux-x86_64     uname -sm: Linux x86_64|amd64     ~/.local/share/herdr-vscode       yes
-//   macos            uname -sm: Darwin (universal)     ~/.local/share/herdr-vscode       yes
-//   windows-x86_64   PowerShell: AMD64                 %LOCALAPPDATA%\herdr-vscode       not yet (POSIX terminal layer):
-//   windows-aarch64  PowerShell: ARM64                 %LOCALAPPDATA%\herdr-vscode       the viewer; the core installs
+//   platform         found by                          bundle root                       launcher
+//   linux-aarch64    uname -sm: Linux aarch64|arm64    ~/.local/share/herdr-vscode       vsedit.sh (sh)
+//   linux-x86_64     uname -sm: Linux x86_64|amd64     ~/.local/share/herdr-vscode       vsedit.sh (sh)
+//   macos            uname -sm: Darwin (universal)     ~/.local/share/herdr-vscode       vsedit.sh (sh)
+//   windows-x86_64   PowerShell: AMD64                 %LOCALAPPDATA%\herdr-vscode       vsedit.ps1 (PowerShell)
+//   windows-aarch64  PowerShell: ARM64                 %LOCALAPPDATA%\herdr-vscode       vsedit.ps1 (PowerShell)
 // A machine without `sh` (or with Git Bash's MINGW/MSYS uname) is asked through PowerShell. Values go into Unix
 // scripts as arguments ("$1"), never into their text; PowerShell gets its script as -EncodedCommand (UTF-16LE base64,
 // so no command-line quoting), with values validated first and written as single-quoted literals.
@@ -114,7 +114,8 @@ mv "$tmp/b" "$root/$ver"
 ls -1t "$root" | grep -E '^[0-9]+[.][0-9]+[.][0-9]+-[0-9a-f]{12}$' | tail -n +3 | while IFS= read -r old; do rm -rf "$root/$old"; done
 echo installed`;
 
-// The same on Windows (PowerShell 5.1+, tar.exe of Windows 10+): stdin = the bundle, the core checked with --version.
+// The same on Windows (PowerShell 5.1+, tar.exe of Windows 10+): stdin = the bundle, the core checked with --version
+// and the editor with --api.
 // The values are checked here (a root under a drive, the version and sha256 patterns) before they are quoted in.
 export function windowsInstall(root, version, sha256, manifest) {
   if (!/^[A-Za-z]:\\.*\\herdr-vscode$/.test(root) || !VERSION.test(version) || !/^[0-9a-f]{64}$/.test(sha256)) throw new Error(`refusing to install ${version} into ${root}`);
@@ -138,6 +139,7 @@ try {
     else {
       & (Join-Path $b 'vscode-core.exe') --version | Out-Null
       if ($LASTEXITCODE -ne 0) { [Console]::Error.WriteLine('vscode-core does not run here'); $code = 4 }
+      elseif ("$(& (Join-Path $b 'vsedit.exe') --api)".Trim() -ne '2') { [Console]::Error.WriteLine('the editor does not run here'); $code = 4 }
       else {
         [IO.File]::WriteAllText((Join-Path $b 'manifest.json'), $manifest + [char]10)
         if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force }
@@ -152,21 +154,22 @@ try {
 exit $code`;
 }
 
-// Per OS: the bundle root and a version's folder, the "is it installed" check and the install, as [program, args].
+// Per OS: the bundle root, a version's folder and its launcher, the "is it installed" check and the install, as
+// [program, args].
 export const SYSTEMS = {
   unix: {
     root: (home) => `${home}/${ROOT}`,
     dir: (root, version) => `${root}/${version}`,
+    launcher: (dir) => `${dir}/vsedit.sh`,
     installed: (dir) => ["test", ["-f", `${dir}/manifest.json`]],
     install: (root, m) => ["sh", ["-c", REMOTE_INSTALL, "herdr-vscode", root, m.version, m.sha256, m.text]],
-    editor: true,
   },
   windows: {
     root: (home) => `${home}\\${WIN_ROOT}`,
     dir: (root, version) => `${root}\\${version}`,
+    launcher: (dir) => `${dir}\\vsedit.ps1`,
     installed: (dir) => ["powershell", [...POWERSHELL, "-Command", `if (Test-Path -LiteralPath ${psQuote(`${dir}\\manifest.json`)}) { exit 0 } else { exit 1 }`]],
     install: (root, m) => ["powershell", [...POWERSHELL, "-EncodedCommand", encodeCommand(windowsInstall(root, m.version, m.sha256, m.text))]],
-    editor: false,
   },
 };
 export const systemOf = (os) => SYSTEMS[os === "windows" ? "windows" : "unix"];
@@ -180,7 +183,7 @@ export const UPLOAD = 'PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$
 // exec, readTextFile, notify, appHome, platform (window().platform), shared/setShared and confirm(machine, size)
 // (asks to install; its yes runs INSTALL_COMMAND) come from Herdr. Returns:
 //   prepare(machine) → { launcher, args } to open a file in the editor there; { install: true } for the viewer when it
-//     isn't installed yet (asks on every open); null for the viewer (no editor for its system, no bundle built, or the
+//     isn't installed yet (asks on every open); null for the viewer (an unsupported system, no bundle built, or the
 //     install failed);
 //   install(machine) → the installed target (throws with the reason; toasts its progress), one at a time per machine;
 //   installRequested() → the confirm dialog's yes.
@@ -229,7 +232,7 @@ export function createRemote({ exec, readTextFile, notify, appHome, platform = (
     const args = ["--os", keysOs(platform())];
     if (settings != null) args.push("--settings", settings);
     if (keybindings != null) args.push("--keybindings", keybindings);
-    return { launcher: `${t.dir}/vsedit.sh`, args };
+    return { launcher: t.system.launcher(t.dir), args };
   }
 
   async function install(machine) {
@@ -251,10 +254,6 @@ export function createRemote({ exec, readTextFile, notify, appHome, platform = (
 
   async function prepare(machine) {
     try {
-      if (!systemOf((await machineInfo(machine)).os).editor) {
-        once(`editor:${machine}`, { title: `No terminal editor on ${machine} yet`, body: "The editor's terminal layer is POSIX only, so Windows files open in the viewer.", level: "info" });
-        return null;
-      }
       const t = await target(machine);
       if (!t) return null;
       if (ready.get(machine) === t.dir) return launch(t);

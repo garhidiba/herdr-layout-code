@@ -81,7 +81,7 @@ If Rust is chosen but the binary is missing, out of date or broken, the layout u
 
 **Rust editor.** The terminal editor has a Rust build too (`vsedit`): the same screen and keys, with language requests off the input thread and no Node start-up. It follows the core engine (Settings' **Editor: Engine** or `"editor.engine"` overrides it), and **Build Rust core** also builds it; that needs a C compiler (`xcode-select --install`). If it is not chosen, not built or can't start, the JavaScript editor runs. macOS and Linux only; Windows keeps the JavaScript editor.
 
-**Remote editor.** A code file in a space on another machine can open in the Rust editor on that machine (Linux and macOS), as VS Code Remote does. Build the bundles once on this computer with `sh mods/vscode-settings/native/build-remote.sh` (toolchain requirements are in the script and RECIPE.md). The first file on a machine asks before installing the editor there (3-5 MB, under `~/.local/share/herdr-vscode/`). Until then, and on Windows machines, remote files open in the viewer.
+**Remote editor.** A code file in a space on another machine can open in the Rust editor on that machine (Linux, macOS and Windows), as VS Code Remote does. Build the bundles once on this computer with `sh mods/vscode-settings/native/build-remote.sh` (toolchain requirements are in the script and RECIPE.md). The first file on a machine asks before installing the editor there (3-5 MB, under `~/.local/share/herdr-vscode/`, on Windows `%LOCALAPPDATA%\herdr-vscode\`). Until then remote files open in the viewer.
 
 ## Requirements and what it runs
 

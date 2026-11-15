@@ -43,7 +43,8 @@ test("bundle roots and version folders per OS", () => {
   assert.equal(dirOf(LOCAL, VER, "windows"), `${LOCAL}\\herdr-vscode\\${VER}`);
   assert.deepEqual(SYSTEMS.unix.installed("/r/v"), ["test", ["-f", "/r/v/manifest.json"]]);
   assert.match(SYSTEMS.windows.installed(`${LOCAL}\\herdr-vscode\\${VER}`)[1].at(-1), /^if \(Test-Path -LiteralPath 'C:\\Users\\me\\AppData\\Local\\herdr-vscode\\1\.0\.0-0123456789ab\\manifest\.json'\)/);
-  assert.equal(SYSTEMS.unix.editor && !SYSTEMS.windows.editor, true);
+  assert.equal(SYSTEMS.unix.launcher(`/r/${VER}`), `/r/${VER}/vsedit.sh`);
+  assert.equal(SYSTEMS.windows.launcher(`${LOCAL}\\herdr-vscode\\${VER}`), `${LOCAL}\\herdr-vscode\\${VER}\\vsedit.ps1`);
 });
 
 test("PowerShell gets values as single-quoted literals inside an encoded script", () => {
@@ -55,7 +56,9 @@ test("PowerShell gets values as single-quoted literals inside an encoded script"
   assert.match(script, /\$manifest = '\{"name": "it''s"\}'/);
   const [program, args] = SYSTEMS.windows.install(`${LOCAL}\\herdr-vscode`, { version: VER, sha256: SUM, text: "{}" });
   assert.deepEqual([program, ...args.slice(0, 3)], ["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand"]);
-  assert.match(Buffer.from(args[3], "base64").toString("utf16le"), /Move-Item -LiteralPath \$b -Destination \$dir/);
+  const decoded = Buffer.from(args[3], "base64").toString("utf16le");
+  assert.match(decoded, /Move-Item -LiteralPath \$b -Destination \$dir/);
+  assert.match(decoded, /\(Join-Path \$b 'vsedit\.exe'\) --api\)"\.Trim\(\) -ne '2'/); // the editor must run before it is moved in
   assert.throws(() => windowsInstall("C:\\Windows", VER, SUM, "{}"), /refusing/);
   assert.throws(() => windowsInstall(`${LOCAL}\\herdr-vscode`, "..\\x", SUM, "{}"), /refusing/);
   assert.throws(() => windowsInstall(`${LOCAL}\\herdr-vscode`, VER, "'; evil", "{}"), /refusing/);
@@ -151,6 +154,7 @@ function fake({ machines = { box: "Linux aarch64\n/root\n" }, files = {}, instal
         const m = machines[opts.on];
         if (m instanceof Error) throw m;
         if (cmd === "powershell" && args.at(-1) === WIN_INFO) return m.ps ? { code: 0, stdout: m.ps, stderr: "" } : { code: 1, stdout: "", stderr: "no powershell" };
+        if (cmd === "powershell" && /^if \(Test-Path/.test(args.at(-1))) return { code: installed.some(p => args.at(-1).includes(p)) ? 0 : 1, stdout: "", stderr: "" };
         if (m.ps) throw new Error(`cannot start ${cmd}: program not found`);
         if (args[1] === INFO) return { code: 0, stdout: m, stderr: "" };
         if (cmd === "test") return { code: installed.includes(args[1]) ? 0 : 1, stdout: "", stderr: "" };
@@ -229,19 +233,21 @@ test("a macOS machine takes the universal bundle and its editor", async () => {
   assert.equal((await f.remote.prepare("mac")).launcher, `/Users/me/.local/share/herdr-vscode/${VER}/vsedit.sh`);
 });
 
-test("a Windows machine is found through PowerShell and opens the viewer; its core bundle installs with PowerShell", async () => {
+test("a Windows machine is found through PowerShell, installs with PowerShell and opens vsedit.ps1", async () => {
   const f = fake({ machines: { win: { ps: `AMD64\r\n${LOCAL}\r\n` } } });
-  assert.equal(await f.remote.prepare("win"), null);
-  assert.equal(await f.remote.prepare("win"), null);
-  assert.deepEqual(f.toasts.map(t => t.title), ["No terminal editor on win yet"]);
-  assert.deepEqual(f.runs.map(r => r.cmd), ["sh", "powershell"]); // asked once, no install check, no upload
+  assert.deepEqual(await f.remote.prepare("win"), { install: true });
+  assert.deepEqual(f.asks.map(a => a[0]), ["win"]);
+  assert.deepEqual(f.runs.map(r => r.cmd), ["sh", "powershell", "powershell"]); // no sh, then PowerShell: the CPU, the install check
   await f.remote.install("win");
   const upload = f.runs.at(-1);
   assert.deepEqual(upload.args.slice(3, 9), ["win", "/h/vscode-core/remote/windows-x86_64/bundle.tgz", "powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand"]);
   assert.match(Buffer.from(upload.args[9], "base64").toString("utf16le"), /\$root = 'C:\\Users\\me\\AppData\\Local\\herdr-vscode'/);
+  assert.deepEqual(await f.remote.prepare("win"), { launcher: `${LOCAL}\\herdr-vscode\\${VER}\\vsedit.ps1`, args: ["--os", "mac", "--settings", '{"files.autoSave": "off"}'] });
+  const installed = fake({ machines: { win: { ps: `AMD64\r\n${LOCAL}\r\n` } }, installed: [`${LOCAL}\\herdr-vscode\\${VER}\\manifest.json`] });
+  assert.equal((await installed.remote.prepare("win")).launcher, `${LOCAL}\\herdr-vscode\\${VER}\\vsedit.ps1`);
   const bash = fake({ machines: { gb: Object.assign(new String("MINGW64_NT-10.0 x86_64\n/c/Users/me\n"), { ps: null }) } });
-  assert.equal(await bash.remote.prepare("gb"), null); // Git Bash without PowerShell's answer: still Windows
-  assert.match(bash.toasts[0].title, /No terminal editor on gb/);
+  assert.equal(await bash.remote.prepare("gb"), null); // Git Bash without PowerShell's answer: still Windows, CPU unknown
+  assert.match(bash.toasts[0].title, /No editor for gb/);
 });
 
 test("two opens while installing share one upload", async () => {

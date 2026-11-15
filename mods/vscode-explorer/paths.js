@@ -27,19 +27,25 @@ export function openArgs(file, { on = null, appHome, how = "auto", folder = pare
   const name = baseName(file);
   if (!wantsEditor(file, how) || (on && !remote?.launcher)) return { name, mod: "vscode-viewer", props: { file, on, ...(remote?.install ? { install: true } : {}) } };
   // exec: the editor replaces the tab's shell, so the tab closes when it exits (see vsedit's --close-on-exit)
-  if (on) return { name, folder, argv: ["exec", "sh", remote.launcher, file, "--close-on-exit", ...remote.args] };
+  if (on) return { name, folder, argv: [...launcherArgv(remote.launcher), file, "--close-on-exit", ...remote.args] };
   return { name, folder, argv: ["exec", "sh", `${appHome}/${EDITOR}`, file, "--close-on-exit"] };
 }
+
+// The argv starting an editor launcher: vsedit.sh from sh (`exec`: it replaces Herdr's shell), a Windows machine's
+// vsedit.ps1 (remote.js) from PowerShell, which reads its arguments itself.
+export const launcherArgv = (launcher) => (/\.ps1$/.test(launcher)
+  ? ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", launcher]
+  : ["exec", "sh", launcher]);
 
 // The label a warm editor (warm.js: started with no file, handed one later) gets with the file it shows.
 export const FILE_LABEL = "vscode.file";
 
-// The file an editor tab shows: the argument after the launcher (EDITOR, or remote.js's copy: both end in vsedit.sh) in
+// The file an editor tab shows: the argument after the launcher (EDITOR, or remote.js's copy: vsedit.sh or vsedit.ps1) in
 // its terminal's argv, however Herdr wrapped it, or a warm editor's FILE_LABEL in its `labels`; null for any other
 // program (a warm editor still waiting too: `--warm` follows the launcher).
 export function editorFileOf(argv, labels) {
   if (typeof labels?.[FILE_LABEL] === "string" && labels[FILE_LABEL]) return labels[FILE_LABEL];
-  const i = Array.isArray(argv) ? argv.findIndex(a => /(^|[\\/])vsedit\.sh$/.test(a)) : -1;
+  const i = Array.isArray(argv) ? argv.findIndex(a => /(^|[\\/])vsedit\.(sh|ps1)$/.test(a)) : -1;
   const file = i >= 0 ? argv[i + 1] : null;
   return typeof file === "string" && file && !file.startsWith("-") ? file : null;
 }
@@ -302,7 +308,7 @@ export function closesForDeleted(path, on, { spaces, panes, terminals, viewers =
 // pane.split args showing the tab's file again on the right: the editor launcher with the same arguments (`argv` from
 // the launcher on; in a remote space it runs on that machine), or a viewer pane.
 export const splitArgs = ({ pane, argv, file, on }) => (argv
-  ? { direction: "right", pane, argv: ["exec", "sh", ...argv] }
+  ? { direction: "right", pane, argv: [...launcherArgv(argv[0]), ...argv.slice(1)] }
   : { direction: "right", pane, mod: "vscode-viewer", props: { file, on } });
 
 // [program, args] putting text on this computer's clipboard, or showing a path in its file manager.
