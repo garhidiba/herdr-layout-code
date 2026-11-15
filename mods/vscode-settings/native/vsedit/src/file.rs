@@ -3,7 +3,6 @@
 
 use std::fs;
 use std::io::{self, Read};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 pub const MAX_BYTES: u64 = 50 * 1024 * 1024;
@@ -158,12 +157,16 @@ pub fn changed_on_disk(file: &Path, known: Option<Stamp>) -> Option<Stamp> {
 /// Writes to a temp file next to the target, keeps its mode, then renames over it. Returns the new stamp.
 pub fn save(file: &Path, text: &str) -> io::Result<Stamp> {
     let file: PathBuf = fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf()); // a symlink keeps pointing at it
-    let mode = fs::metadata(&file).map(|m| m.permissions().mode() & 0o7777).unwrap_or(0o644);
     let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let tmp = file.with_file_name(format!(".{name}.vsedit-{}.tmp", std::process::id()));
     let result = (|| {
         fs::write(&tmp, text)?;
-        fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&file).map(|m| m.permissions().mode() & 0o7777).unwrap_or(0o644);
+            fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))?;
+        }
         fs::rename(&tmp, &file)
     })();
     if let Err(e) = result {

@@ -83,7 +83,8 @@ fn utf16_len(s: &str) -> usize {
 pub fn breadcrumbs(file: &Path) -> Vec<String> {
     let home = settings::home_dir();
     let base = term::git_root(file).unwrap_or_else(|| if file.starts_with(&home) && file != home { home } else { PathBuf::from("/") });
-    file.strip_prefix(&base).unwrap_or(file).components().map(|c| c.as_os_str().to_string_lossy().into_owned()).filter(|s| !s.is_empty() && s != "/").collect()
+    let parts = file.strip_prefix(&base).unwrap_or(file).components().filter(|c| !matches!(c, std::path::Component::RootDir));
+    parts.map(|c| c.as_os_str().to_string_lossy().into_owned()).filter(|s| !s.is_empty()).collect()
 }
 
 #[derive(Clone, Debug)]

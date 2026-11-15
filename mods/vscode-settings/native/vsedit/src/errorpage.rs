@@ -13,6 +13,14 @@ const WHITE: &str = "#ffffff";
 
 /// A short reason for an I/O error (its message when there is no better name).
 pub fn reason_of(e: &io::Error) -> String {
+    #[cfg(windows)] // Windows error codes aren't errno values; file.rs's folder error is EISDIR
+    match (e.kind(), e.raw_os_error()) {
+        (io::ErrorKind::NotFound, _) => return "File not found".into(),
+        (io::ErrorKind::PermissionDenied, _) => return "Permission denied".into(),
+        (_, Some(libc::EISDIR)) => return "The path is a folder, not a file".into(),
+        _ => return e.to_string().lines().next().unwrap_or("").to_string(),
+    }
+    #[cfg(unix)]
     match e.raw_os_error() {
         Some(libc::ENOENT) => "File not found".into(),
         Some(libc::EACCES) | Some(libc::EPERM) => "Permission denied".into(),

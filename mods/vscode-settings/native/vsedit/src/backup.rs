@@ -89,10 +89,7 @@ pub fn changed_since(b: &Backup, file: &Path) -> bool {
 
 /// "2026-11-06 14:03" in local time.
 pub fn stamp_text(ms: f64) -> String {
-    let secs = (ms / 1000.0) as libc::time_t;
-    // SAFETY: localtime_r fills a zeroed tm from a valid time_t.
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    unsafe { libc::localtime_r(&secs, &mut tm) };
+    let tm = crate::term::local_time((ms / 1000.0) as libc::time_t);
     format!("{}-{:02}-{:02} {:02}:{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min)
 }
 

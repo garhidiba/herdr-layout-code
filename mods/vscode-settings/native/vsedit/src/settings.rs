@@ -11,7 +11,7 @@ pub fn herdr_home() -> PathBuf {
 }
 
 pub fn home_dir() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
+    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
 }
 
 pub fn settings_file() -> PathBuf {

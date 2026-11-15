@@ -10,3 +10,7 @@ publish = false
 libc = "0.2"
 serde_json = { version = "1", features = ["preserve_order"] }
 vscode-textmate = { path = "../vscode-textmate" }
+
+# the console API of the terminal layer (src/term/windows.rs)
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Console", "Win32_System_Threading"] }

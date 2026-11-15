@@ -17,6 +17,7 @@ mod errorpage;
 mod file;
 mod find;
 mod folding;
+#[cfg(unix)] // serve.rs's screen model
 mod frame;
 mod gitgutter;
 mod hexview;
@@ -29,6 +30,7 @@ mod language;
 mod overlays;
 mod paint;
 mod scrollbar;
+#[cfg(unix)]
 mod serve;
 mod settings;
 mod smartselect;
@@ -57,12 +59,11 @@ fn fallback(why: &str) -> ! {
         eprintln!("vsedit: using the JS editor: {why}");
     }
     if let Some((js, args)) = JS.get() {
-        use std::os::unix::process::CommandExt;
         if let Some(log) = std::env::var_os("VSEDIT_ENGINE_LOG") {
             let _ = std::fs::OpenOptions::new().append(true).create(true).open(log).and_then(|mut f| std::io::Write::write_all(&mut f, b"js (fallback)\n"));
         }
         let node = term::which("node").unwrap_or_else(|| PathBuf::from("node"));
-        let e = std::process::Command::new(node).arg(js).args(args).exec();
+        let e = term::exec(std::process::Command::new(node).arg(js).args(args));
         eprintln!("vsedit: cannot start the JS editor: {e}");
     }
     exit(FALLBACK)
@@ -116,7 +117,13 @@ fn main() {
         }
     }
     if serve {
+        #[cfg(unix)]
         serve::run(vscode_dir(vscode));
+        #[cfg(not(unix))]
+        {
+            eprintln!("vsedit: --serve needs a Unix system");
+            exit(2)
+        }
     }
     if let Some(js) = js {
         let _ = JS.set((js, rest));
@@ -174,8 +181,7 @@ fn main() {
         if app::run(&mut term, &mut page) == errorpage::Choice::Retry {
             term.restore();
             lang::shutdown();
-            use std::os::unix::process::CommandExt;
-            let e = std::process::Command::new(std::env::current_exe().unwrap_or_default()).args(&relaunch).exec();
+            let e = term::exec(std::process::Command::new(std::env::current_exe().unwrap_or_default()).args(&relaunch));
             eprintln!("vsedit: {e}");
         }
         close(&mut term, &file, &reason);

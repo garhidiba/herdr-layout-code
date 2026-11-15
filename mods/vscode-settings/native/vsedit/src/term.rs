@@ -1,8 +1,7 @@
-//! The terminal session (terminal.cjs): raw mode, the alternate screen and input modes, a wake pipe that signals
-//! (SIGWINCH, SIGTERM/SIGHUP/SIGINT, SIGUSR2) and worker threads write to, Herdr right-click routing, the clipboard.
+//! The terminal session (terminal.cjs): raw mode, the alternate screen and input modes, a wake that signals and worker
+//! threads trigger (term/unix.rs, term/windows.rs), Herdr right-click routing, the clipboard.
 
 use std::io::{self, Write};
-use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
@@ -15,37 +14,21 @@ use std::time::{Duration, Instant};
 pub const ENTER: &str = "\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?1007s\x1b[?1007l\x1b[?1004h\x1b[>1u\x1b[>1s\x1b[5 q";
 pub const LEAVE: &str = "\x1b[0m\x1b[>0s\x1b[<u\x1b[?1004l\x1b[?1007r\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?2004l\x1b[0 q\x1b]112\x07\x1b[?25h\x1b[?1049l";
 
-static WAKE_FD: AtomicI32 = AtomicI32::new(-1);
-/// The last terminating signal received (0 for none).
+/// The last terminating signal received (0 for none; on Windows 1 when the console closes).
 pub static SIGNAL: AtomicI32 = AtomicI32::new(0);
 static RESIZED: AtomicI32 = AtomicI32::new(0);
 /// vscode-tabs asked the editor to close (SIGUSR2: the tab's ×, the tab menu).
 static CLOSE: AtomicI32 = AtomicI32::new(0);
 
-/// Writes one byte to the wake pipe (async-signal-safe).
-pub fn wake() {
-    let fd = WAKE_FD.load(Ordering::Relaxed);
-    if fd >= 0 {
-        // SAFETY: a one-byte write to a pipe we own; errors (full pipe) are fine to drop.
-        unsafe { libc::write(fd, b"!".as_ptr().cast(), 1) };
-    }
-}
-
-/// Sends wake() to `fd`, for a loop without a terminal (serve.rs).
-pub fn wake_to(fd: RawFd) {
-    WAKE_FD.store(fd, Ordering::Relaxed);
-}
-
-extern "C" fn on_signal(sig: libc::c_int) {
-    if sig == libc::SIGWINCH {
-        RESIZED.store(1, Ordering::Relaxed);
-    } else if sig == libc::SIGUSR2 {
-        CLOSE.store(1, Ordering::Relaxed);
-    } else {
-        SIGNAL.store(sig, Ordering::Relaxed);
-    }
-    wake();
-}
+#[cfg(unix)]
+#[path = "term/unix.rs"]
+mod sys;
+#[cfg(windows)]
+#[path = "term/windows.rs"]
+mod sys;
+#[cfg(unix)]
+pub use sys::wake_to;
+pub use sys::{exec, local_time, terminate, wake, Term};
 
 pub fn take_resized() -> bool {
     RESIZED.swap(0, Ordering::Relaxed) != 0
@@ -55,98 +38,16 @@ pub fn take_close_request() -> bool {
     CLOSE.swap(0, Ordering::Relaxed) != 0
 }
 
-pub struct Term {
-    saved: Option<libc::termios>,
-    wake_read: RawFd,
-    out: io::Stdout,
-}
-
 pub fn is_tty() -> bool {
-    // SAFETY: isatty on the standard descriptors.
-    unsafe { libc::isatty(0) == 1 && libc::isatty(1) == 1 }
+    use std::io::IsTerminal;
+    io::stdin().is_terminal() && io::stdout().is_terminal()
 }
 
 impl Term {
-    /// Raw mode, the wake pipe and the signal handlers (nothing is written yet).
-    pub fn new() -> io::Result<Term> {
-        let mut fds = [0; 2];
-        // SAFETY: plain libc calls on our own descriptors and a zeroed termios filled by tcgetattr.
-        unsafe {
-            if libc::pipe(fds.as_mut_ptr()) != 0 {
-                return Err(io::Error::last_os_error());
-            }
-            for fd in fds {
-                libc::fcntl(fd, libc::F_SETFL, libc::fcntl(fd, libc::F_GETFL) | libc::O_NONBLOCK);
-                libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
-            }
-            WAKE_FD.store(fds[1], Ordering::Relaxed);
-            for sig in [libc::SIGWINCH, libc::SIGTERM, libc::SIGHUP, libc::SIGINT, libc::SIGUSR2] {
-                libc::signal(sig, on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t);
-            }
-            libc::signal(libc::SIGPIPE, libc::SIG_IGN);
-            let mut t: libc::termios = std::mem::zeroed();
-            let saved = if libc::tcgetattr(0, &mut t) == 0 {
-                let orig = t;
-                libc::cfmakeraw(&mut t);
-                libc::tcsetattr(0, libc::TCSANOW, &t);
-                Some(orig)
-            } else {
-                None
-            };
-            Ok(Term { saved, wake_read: fds[0], out: io::stdout() })
-        }
-    }
-
     pub fn write(&mut self, s: &str) {
         let mut lock = self.out.lock();
         let _ = lock.write_all(s.as_bytes());
         let _ = lock.flush();
-    }
-
-    pub fn size(&self) -> (i32, i32) {
-        // SAFETY: TIOCGWINSZ fills a zeroed winsize.
-        let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
-        let ok = unsafe { libc::ioctl(1, libc::TIOCGWINSZ, &mut ws) } == 0;
-        if ok && ws.ws_row > 0 && ws.ws_col > 0 {
-            (ws.ws_row as i32, ws.ws_col as i32)
-        } else {
-            (24, 80)
-        }
-    }
-
-    /// Waits for input (or a wake) up to `timeout`; returns the bytes read from the terminal, and None when the
-    /// input closed.
-    pub fn read(&mut self, timeout: Option<Duration>) -> Option<Vec<u8>> {
-        let mut fds = [libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 }, libc::pollfd { fd: self.wake_read, events: libc::POLLIN, revents: 0 }];
-        let ms = timeout.map_or(-1, |d| d.as_millis().min(i32::MAX as u128) as i32);
-        // SAFETY: poll on two valid descriptors.
-        let n = unsafe { libc::poll(fds.as_mut_ptr(), 2, ms) };
-        if n <= 0 {
-            return Some(vec![]);
-        }
-        let mut buf = [0u8; 4096];
-        if fds[1].revents != 0 {
-            // SAFETY: draining our non-blocking pipe.
-            while unsafe { libc::read(self.wake_read, buf.as_mut_ptr().cast(), buf.len()) } > 0 {}
-        }
-        if fds[0].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
-            // SAFETY: reading into our buffer.
-            let r = unsafe { libc::read(0, buf.as_mut_ptr().cast(), buf.len()) };
-            if r <= 0 {
-                let e = io::Error::last_os_error().raw_os_error();
-                return if r < 0 && matches!(e, Some(libc::EINTR) | Some(libc::EAGAIN)) { Some(vec![]) } else { None };
-            }
-            return Some(buf[..r as usize].to_vec());
-        }
-        Some(vec![])
-    }
-
-    /// Back to the terminal's own mode (the caller writes LEAVE first).
-    pub fn restore(&mut self) {
-        if let Some(t) = self.saved.take() {
-            // SAFETY: restoring the attributes tcgetattr gave.
-            unsafe { libc::tcsetattr(0, libc::TCSANOW, &t) };
-        }
     }
 }
 
@@ -168,7 +69,7 @@ pub fn log_input(chunk: &[u8]) {
 
 /// The caller's PATH plus the usual tool folders it lacks (lang/proc.cjs env()).
 pub fn search_path() -> Vec<PathBuf> {
-    let own: Vec<PathBuf> = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into()).split(':').map(PathBuf::from).collect();
+    let own: Vec<PathBuf> = std::env::var_os("PATH").map_or_else(|| vec!["/usr/bin".into(), "/bin".into()], |p| std::env::split_paths(&p).collect());
     let home = crate::settings::home_dir();
     let extra = [PathBuf::from("/opt/homebrew/bin"), PathBuf::from("/usr/local/bin"), home.join(".local/bin"), home.join(".cargo/bin")];
     let mut all = own.clone();
@@ -178,8 +79,8 @@ pub fn search_path() -> Vec<PathBuf> {
 
 /// An executable on that PATH.
 pub fn which(name: &str) -> Option<PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
-    search_path().into_iter().map(|d| d.join(name)).find(|f| std::fs::metadata(f).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0))
+    let names = sys::program_names(name);
+    search_path().into_iter().flat_map(|d| names.iter().map(move |n| d.join(n)).collect::<Vec<_>>()).find(|f| std::fs::metadata(f).is_ok_and(|m| sys::executable(&m)))
 }
 
 /// Waits for `child` at most 1.5 s, then kills it.

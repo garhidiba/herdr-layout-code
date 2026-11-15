@@ -931,8 +931,7 @@ pub fn api_key(provider: &str) -> Result<(String, &'static str), bool> {
     let file = secrets_file();
     let mut loose = false;
     if let Ok(meta) = std::fs::metadata(&file) {
-        use std::os::unix::fs::PermissionsExt;
-        loose = meta.permissions().mode() & 0o077 != 0;
+        loose = readable_by_others(&meta);
         let key = (!loose).then(|| std::fs::read_to_string(&file).ok()).flatten().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v[provider].as_str().map(|k| k.trim().to_string()));
         if let Some(key) = key.filter(|k| !k.is_empty()) {
             return Ok((key, "file"));
@@ -941,6 +940,20 @@ pub fn api_key(provider: &str) -> Result<(String, &'static str), bool> {
     match std::env::var(key_env(provider)).ok().map(|k| k.trim().to_string()).filter(|k| !k.is_empty()) {
         Some(key) => Ok((key, "env")),
         None => Err(loose),
+    }
+}
+
+/// Whether the file's mode lets others than its owner read it (Windows has no mode: the folder's access list guards it).
+fn readable_by_others(meta: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o077 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        false
     }
 }
 
@@ -956,8 +969,7 @@ impl Cancel {
         self.cancelled.store(true, Ordering::SeqCst);
         let pid = self.pid.load(Ordering::SeqCst);
         if pid > 0 {
-            // SAFETY: kill(2) on the curl child this request started; a pid already reaped is harmless here.
-            unsafe { libc::kill(pid, libc::SIGTERM) };
+            crate::term::terminate(pid as u32); // the curl child this request started
         }
     }
     pub fn cancelled(&self) -> bool {
@@ -1066,13 +1078,9 @@ pub fn usage_file() -> PathBuf {
 
 /// The local date, YYYY-MM-DD.
 pub fn today() -> String {
-    // SAFETY: time(2) and localtime_r(3) into a zeroed tm owned here.
-    unsafe {
-        let t = libc::time(std::ptr::null_mut());
-        let mut tm: libc::tm = std::mem::zeroed();
-        libc::localtime_r(&t, &mut tm);
-        format!("{:04}-{:02}-{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday)
-    }
+    // SAFETY: time(2) with no out pointer.
+    let tm = crate::term::local_time(unsafe { libc::time(std::ptr::null_mut()) });
+    format!("{:04}-{:02}-{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday)
 }
 
 const KEEP_DAYS: usize = 14;
