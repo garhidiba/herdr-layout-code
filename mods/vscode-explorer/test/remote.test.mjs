@@ -6,7 +6,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, exist
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { platformOf, parseInfo, parseWindowsInfo, parseManifest, keysOs, megabytes, rootOf, dirOf, psQuote, encodeCommand, windowsInstall, SYSTEMS, REMOTE_INSTALL, UPLOAD, INFO, WIN_INFO, createRemote, createOpenFile, APPROVED, INSTALL_REQUEST } from "../remote.js";
+import { platformOf, parseInfo, parseWindowsInfo, parseManifest, keysOs, megabytes, rootOf, dirOf, psQuote, plainStderr, encodeCommand, windowsInstall, SYSTEMS, REMOTE_INSTALL, UPLOAD, INFO, WIN_INFO, createRemote, createOpenFile, APPROVED, INSTALL_REQUEST } from "../remote.js";
 
 const VER = "1.0.0-0123456789ab", SUM = "a".repeat(64);
 const manifestText = (platform, version = VER, sha256 = SUM) => JSON.stringify({ version, platform, sha256, size: 2843587, files: {} });
@@ -322,4 +322,12 @@ test("openFile on a machine without the editor goes to the file's open viewer ta
   assert.equal(opened.length, 0);
   await openFile("/srv/y.toml", { on: "box", folder: "/srv" });
   assert.equal(opened[0].mod, "vscode-viewer");
+});
+
+test("PowerShell's CLIXML stderr (progress records and an error) reads as plain text; other text is unchanged", () => {
+  const clixml = '#< CLIXML\r\n<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><Obj S="progress" RefId="0"><TN RefId="0"><T>System.Management.Automation.PSCustomObject</T></TN><MS><I64 N="SourceId">1</I64><PR N="Record"><AV>Preparing modules for first use.</AV><AI>0</AI><Nil /><PI>-1</PI><PC>-1</PC><T>Completed</T><SR>-1</SR><SD> </SD></PR></MS></Obj><S S="Error">tar: Error opening archive: Failed to open &apos;C:\\x\\a&amp;b.tgz&apos;_x000D__x000A_</S><S S="Error">At line:1 char:5 &lt;stdin&gt;_x000D__x000A_</S></Objs>';
+  assert.equal(plainStderr(clixml), "tar: Error opening archive: Failed to open 'C:\\x\\a&b.tgz'\r\nAt line:1 char:5 <stdin>");
+  assert.equal(plainStderr("the bundle arrived damaged"), "the bundle arrived damaged");
+  assert.equal(plainStderr(undefined), "");
+  assert.match(windowsInstall("C:\\x\\herdr-vscode", VER, SUM, "{}"), /\$ProgressPreference = 'SilentlyContinue'/);
 });

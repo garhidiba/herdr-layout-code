@@ -54,6 +54,17 @@ export function parseWindowsInfo(stdout) {
   return { os: "windows", platform, home, uname: `Windows ${cpu}`.trim() };
 }
 
+// PowerShell writes its stderr as CLIXML when it isn't a console ("#< CLIXML <Objs ...><S S="Error">text_x000D__x000A_</S>
+// ...</Objs>", progress records among it): the error texts, decoded. Any other text passes through.
+export function plainStderr(text) {
+  const s = String(text ?? "");
+  if (!s.startsWith("#< CLIXML")) return s;
+  const unescape = (t) => t.replace(/_x([0-9A-Fa-f]{4})_/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/&(lt|gt|quot|apos|amp|#x[0-9A-Fa-f]+|#\d+);/g, (m, e) => ({ lt: "<", gt: ">", quot: '"', apos: "'", amp: "&" })[e] ?? String.fromCodePoint(e[1] === "x" ? parseInt(e.slice(2), 16) : +e.slice(1)));
+  const errors = [...s.matchAll(/<S S="Error">([^<]*)<\/S>/g)].map((m) => unescape(m[1]));
+  return errors.join("").replace(/\r?\n$/, "") || s;
+}
+
 // A PowerShell single-quoted literal (PowerShell also reads curly single quotes as quotes, so they're doubled too).
 export const psQuote = (s) => `'${String(s).replace(/['‘’‚‛]/g, "$&$&")}'`;
 
@@ -119,7 +130,7 @@ echo installed`;
 // The values are checked here (a root under a drive, the version and sha256 patterns) before they are quoted in.
 export function windowsInstall(root, version, sha256, manifest) {
   if (!/^[A-Za-z]:\\.*\\herdr-vscode$/.test(root) || !VERSION.test(version) || !/^[0-9a-f]{64}$/.test(sha256)) throw new Error(`refusing to install ${version} into ${root}`);
-  return `$ErrorActionPreference = 'Stop'
+  return `$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'
 $root = ${psQuote(root)}; $ver = ${psQuote(version)}; $sum = ${psQuote(sha256)}; $manifest = ${psQuote(manifest)}
 $dir = Join-Path $root $ver
 New-Item -ItemType Directory -Force -Path $root | Out-Null
@@ -197,7 +208,7 @@ export function createRemote({ exec, readTextFile, notify, appHome, platform = (
       let found = null, failure = null;
       try {
         const r = await exec("sh", ["-c", INFO], { on: machine });
-        if (r.code === 0) found = parseInfo(r.stdout); else failure = new Error(r.stderr.trim() || `${machine} did not answer`);
+        if (r.code === 0) found = parseInfo(r.stdout); else failure = new Error(plainStderr(r.stderr).trim() || `${machine} did not answer`);
       } catch (e) { failure = e; }
       if (!found || found.os === "windows") {
         const r = await exec("powershell", [...POWERSHELL, "-Command", WIN_INFO], { on: machine }).catch(() => null);
@@ -243,7 +254,7 @@ export function createRemote({ exec, readTextFile, notify, appHome, platform = (
       notify({ title: `Installing the editor on ${machine}…`, body: `${megabytes(t.manifest.size)} into ${t.dir}`, level: "info" });
       const [program, args] = t.system.install(t.root, t.manifest);
       const r = await exec("sh", ["-c", UPLOAD, "herdr-vscode", machine, t.bundle, program, ...args]);
-      if (r.code !== 0) throw new Error(r.stderr.trim() || `the install exited with ${r.code}`);
+      if (r.code !== 0) throw new Error(plainStderr(r.stderr).trim() || `the install exited with ${r.code}`);
       ready.set(machine, t.dir);
       notify({ title: `Editor installed on ${machine}`, body: `Its files open in the terminal editor there (${t.manifest.version}).`, level: "success" });
       return t;
