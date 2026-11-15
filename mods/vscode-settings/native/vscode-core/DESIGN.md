@@ -404,7 +404,9 @@ contract. One module per JS file: `buffer`, `keys`, `width`, `paint`, `file`, `s
   new file's document), Save All and auto save (other files written as they are; one changed on disk is left), quit
   (asks about each unsaved file, showing it) and hot exit (every unsaved file) work across them.
 - Language features, the context menu and the command palette: phase 3 below.
-- POSIX only (macOS, Linux: `libc` termios, signals, `exec`); Windows keeps the JS editor.
+- The terminal layer is per OS: `term/unix.rs` (macOS, Linux: `libc` termios, signals, `exec`) and `term/windows.rs`
+  (a remote Windows machine, where hc runs it in a ConPTY: console VT input and output, a wake event, the console's
+  close as SIGHUP; `--serve` and the SIGUSR2 close request are Unix only). Locally Windows keeps the JS editor.
 
 ### Launch and engine switch
 

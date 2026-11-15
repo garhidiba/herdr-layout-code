@@ -4,11 +4,12 @@
 #   linux-aarch64    aarch64-unknown-linux-musl (static)              cargo zigbuild       editor + core
 #   linux-x86_64     x86_64-unknown-linux-musl (static)               cargo zigbuild       editor + core
 #   macos            aarch64-apple-darwin + x86_64-apple-darwin, lipo cargo (macOS only)   editor + core
-#   windows-x86_64   x86_64-pc-windows-gnu                            cargo zigbuild       core only
-#   windows-aarch64  aarch64-pc-windows-gnullvm                       cargo zigbuild       core only
+#   windows-x86_64   x86_64-pc-windows-gnu                            cargo zigbuild       editor + core
+#   windows-aarch64  aarch64-pc-windows-gnullvm                       cargo zigbuild       editor + core
 # editor = vsedit, the data it reads (vscode/ grammars + theme + index, editor/keymap.json) and the launcher
-# (remote-vsedit.sh as vsedit.sh); core = vscode-core with `tokenize` (vscode-core.exe on Windows, whose terminal
-# layer the editor doesn't have yet). Oniguruma is C: zig is the cross C compiler and linker (mingw-w64 for Windows).
+# (remote-vsedit.sh as vsedit.sh; on Windows vsedit.exe and remote-vsedit.ps1 as vsedit.ps1); core = vscode-core with
+# `tokenize` (vscode-core.exe on Windows). Oniguruma is C: zig is the cross C compiler and linker (mingw-w64 for
+# Windows).
 # Output, per platform (never under mods/, which Herdr watches; never in git):
 #   <out>/<platform>/bundle.tgz      the bundle (ustar + gzip; Windows 10+ unpacks it with its tar.exe)
 #   <out>/<platform>/manifest.json   {version, platform, sha256, size, files: {<name>: sha256}}; version = <vsedit
@@ -31,7 +32,7 @@ fail() { printf 'build-remote: %s\n' "$1" >&2; exit 1; }
 while [ $# -gt 0 ]; do
   case $1 in
     --out) [ $# -ge 2 ] || fail "--out needs a folder"; out=$2; shift 2 ;;
-    -h|--help) sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) fail "unknown option $1 (see --help)" ;;
   esac
 done
@@ -72,7 +73,7 @@ build="--release --locked --manifest-path $here/Cargo.toml --target-dir $out/tar
 # shellcheck disable=SC2046,SC2086
 cargo zigbuild $build $(targets aarch64-unknown-linux-musl x86_64-unknown-linux-musl) -p vsedit -p vscode-core || fail "the Linux build failed (see above)"
 # shellcheck disable=SC2046,SC2086
-cargo zigbuild $build $(targets x86_64-pc-windows-gnu aarch64-pc-windows-gnullvm) -p vscode-core || fail "the Windows build failed (see above)"
+cargo zigbuild $build $(targets x86_64-pc-windows-gnu aarch64-pc-windows-gnullvm) -p vsedit -p vscode-core || fail "the Windows build failed (see above)"
 if [ -n "$MAC_TARGETS" ]; then
   # shellcheck disable=SC2046,SC2086
   cargo build $build $(targets $MAC_TARGETS) -p vsedit -p vscode-core || fail "the macOS build failed (see above)"
@@ -86,17 +87,19 @@ for p in $PLATFORMS; do
   case $p in
     linux-*) t=${p#linux-}-unknown-linux-musl; for bin in vsedit vscode-core; do cp "$(rel "$t" "$bin")" "$stage/b/$bin"; done ;;
     macos) for bin in vsedit vscode-core; do lipo -create -output "$stage/b/$bin" "$(rel aarch64-apple-darwin "$bin")" "$(rel x86_64-apple-darwin "$bin")"; done ;;
-    windows-x86_64) cp "$(rel x86_64-pc-windows-gnu vscode-core.exe)" "$stage/b/" ;;
-    windows-aarch64) cp "$(rel aarch64-pc-windows-gnullvm vscode-core.exe)" "$stage/b/" ;;
+    windows-x86_64) for bin in vsedit vscode-core; do cp "$(rel x86_64-pc-windows-gnu "$bin.exe")" "$stage/b/"; done ;;
+    windows-aarch64) for bin in vsedit vscode-core; do cp "$(rel aarch64-pc-windows-gnullvm "$bin.exe")" "$stage/b/"; done ;;
   esac
+  mkdir -p "$stage/b/vscode" "$stage/b/editor"
+  cp -R "$mods/vscode-viewer/vscode/grammars" "$mods/vscode-viewer/vscode/index.json" "$mods/vscode-viewer/vscode/theme.json" \
+    "$mods/vscode-viewer/vscode/LICENSE-vscode-textmate.md" "$stage/b/vscode/"
+  cp "$mods/vscode-viewer/editor/keymap.json" "$stage/b/editor/"
   case $p in
-    windows-*) files="vscode-core.exe" ;;
+    windows-*)
+      cp "$here/remote-vsedit.ps1" "$stage/b/vsedit.ps1"
+      files="vsedit.exe vscode-core.exe vsedit.ps1" ;;
     *)
       chmod 755 "$stage/b/vsedit" "$stage/b/vscode-core"
-      mkdir -p "$stage/b/vscode" "$stage/b/editor"
-      cp -R "$mods/vscode-viewer/vscode/grammars" "$mods/vscode-viewer/vscode/index.json" "$mods/vscode-viewer/vscode/theme.json" \
-        "$mods/vscode-viewer/vscode/LICENSE-vscode-textmate.md" "$stage/b/vscode/"
-      cp "$mods/vscode-viewer/editor/keymap.json" "$stage/b/editor/"
       cp "$here/remote-vsedit.sh" "$stage/b/vsedit.sh"
       files="vsedit vscode-core vsedit.sh" ;;
   esac
