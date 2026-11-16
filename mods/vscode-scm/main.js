@@ -390,14 +390,15 @@ export default class SourceControl extends View {
     return items;
   }
 
-  // As the shipped `changes` mod: stages everything in the repo, then commits.
+  // VS Code's smart commit: what is staged when something is, else everything in the repo (as the shipped `changes` mod).
   commit(cx) {
     if (!this.message.trim() || !this.selected || this.busy || this.loading || this.context !== key()) return;
     const root = this.selected, on = this.on, context = this.context, message = this.message.trim();
     this.busy = "Committing…"; this.note = null;
     cx.spawn(async (cx) => {
       try {
-        for (const args of [["add", "-A"], ["commit", "-m", message]]) {
+        const staged = (await exec("git", ["diff", "--cached", "--quiet"], { cwd: root, on })).code === 1;
+        for (const args of [...(staged ? [] : [["add", "-A"]]), ["commit", "-m", message]]) {
           const r = await exec("git", args, { cwd: root, on });
           if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
         }
