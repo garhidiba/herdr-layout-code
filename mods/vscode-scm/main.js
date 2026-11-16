@@ -3,12 +3,13 @@
 // Commits expand to their changed files; a file opens a diff tab (vscode-diff mod).
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list } from "gpui-base";
-import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, run, appHome, notify, shared, setShared, openOverlay, layout, window } from "herdr";
+import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, appHome, notify, shared, setShared, openOverlay, layout, window, props, nextCommand } from "herdr";
 import { freshRoot, encode, decode } from "./cache.js";
 import { createCore, relevant, stampOf, stale } from "./core.js";
 import { layoutSections, flexSection, sashPair, dragSash } from "./sections.js";
 import { syncAction, syncSteps, syncError, BUSY } from "./sync.js";
 import { friendlyError } from "./offline.js";
+import { ScmMenu, openScmMenu, openDiff, baseName, GIT_REQUEST } from "./menu.js";
 
 // The sash to the Image Viewer column right of this panel (vscode-tabs side.js): this card's right 4 px while the column
 // shows, half of the 8 px between the cards (the column draws the other half); no line, a col-resize pointer. A press
@@ -143,15 +144,6 @@ function fileIcon(name, m) {
   return m.file;
 }
 
-const short = (hash) => hash ? hash.slice(0, 7) : "∅";
-const baseName = (path) => path.split("/").pop();
-// A diff tab named as VS Code names it: "<old name> (<left>) ↔ <name> (<right>)". commit null: HEAD ↔ the working tree.
-function openDiff(repo, on, file, commit, parent) {
-  const left = commit ? short(parent) : "HEAD", right = commit ? short(commit) : "Working Tree";
-  run("tab.new", { name: `${baseName(file.oldPath ?? file.path)} (${left}) ↔ ${baseName(file.path)} (${right})`, mod: "vscode-diff",
-    props: { repo, commit, parent: commit ? parent : "HEAD", path: file.path, ...(file.oldPath ? { oldPath: file.oldPath } : {}), on } });
-}
-
 // A repo's changes and graph. `repo` is its row from the repo list (branch, upstream), if known.
 async function readRepo(repo, root, on) {
   const git = (args) => exec("git", [...READ, ...args], { cwd: root, on });
@@ -184,6 +176,8 @@ async function commitFiles(root, hash, on) {
 
 export default class SourceControl extends View {
   init(_props, cx) {
+    // A right-click menu (menu.js) is a popup of this same mod.
+    if (props()?.menu) { this.overlay = new ScmMenu(cx); return; }
     // Every project's repos, changes and graph from before the restart, shown at once and refreshed behind.
     let cache = null;
     try { cache = localStorage.getItem(CACHE); } catch {}
@@ -211,6 +205,7 @@ export default class SourceControl extends View {
     this.input.on("focus", (_e, cx) => { this.typing = true; cx.notify(); });
     this.input.on("blur", (_e, cx) => { this.typing = false; cx.notify(); });
     this.refresh(cx);
+    cx.spawn(async (cx) => { for (;;) if (await nextCommand() === "git") this.runRequest(cx); });
     cx.timer.every(10000, (cx) => {
       this.tick(cx);
       if (this.known && spaces().some((s) => !this.known.has(s.id))) this.preloadAll(cx);
@@ -390,6 +385,23 @@ export default class SourceControl extends View {
     return items;
   }
 
+  // A menu's git steps (menu.js GIT_REQUEST, sent with `vscode-scm.git`), once each, as Commit runs its own.
+  runRequest(cx) {
+    const req = shared(GIT_REQUEST);
+    if (!req?.steps?.length || req.at === this.ranAt || this.busy) return;
+    this.ranAt = req.at; this.busy = `${req.label}…`; this.note = null;
+    cx.spawn(async (cx) => {
+      try {
+        for (const [cmd, args] of req.steps) {
+          const r = await exec(cmd, args, { cwd: req.root, on: req.on });
+          if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
+        }
+      } catch (e) { this.note = `${req.label} failed: ${e?.message ?? e}`; }
+      finally { this.busy = false; this.refresh(cx); cx.notify(); }
+    });
+    cx.notify();
+  }
+
   // VS Code's smart commit: what is staged when something is, else everything in the repo (as the shipped `changes` mod).
   commit(cx) {
     if (!this.message.trim() || !this.selected || this.busy || this.loading || this.context !== key()) return;
@@ -452,11 +464,12 @@ export default class SourceControl extends View {
     cx.notify();
   }
 
-  // A section header; `sash` ({pair, heights, mins} or null) puts a resize handle on its top edge.
-  section(id, title, t, extra, sash) {
+  // A section header; `sash` ({pair, heights, mins} or null) puts a resize handle on its top edge, `menu` a right-click.
+  section(id, title, t, extra, sash, menu) {
     const open = !this.collapsed[id], dragging = this.drag?.id === id;
     const header = h_flex().id(`scm-section-${id}`).h(ROW).flex_none().px(4).gap(2).items_center().cursor_pointer().border_t(1).border_color(t.border).hover((s) => s.bg(t.hover))
       .on_click((_e, cx) => this.toggle(id, cx))
+      .when(Boolean(menu), (e) => e.on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); menu(); }))
       .child(svg(`mods/vscode-scm/chevron-${open ? "down" : "right"}.svg`).size(14).flex_none().text_color(t.muted))
       .child(div().text_size(11).font_bold().child(title.toUpperCase()))
       .child(h_flex().flex_1().min_w(0).gap(6).justify_end().items_center().children(extra ?? []));
@@ -539,7 +552,14 @@ export default class SourceControl extends View {
       .child(div().flex_none().max_w(80).truncate().text_size(11).text_color(t.dim).child(row.author));
   }
 
+  // The right-click menu of a changed file (`path`) or, without one, of the Changes header (menu.js).
+  menu(path) {
+    if (!this.selected || this.context !== key()) return;
+    openScmMenu({ kind: path ? "file" : "group", root: this.selected, on: this.on, path, hasHead: this.hasHead }).catch(() => {});
+  }
+
   render(cx) {
+    if (this.overlay) return this.overlay.render(cx);
     if (key() !== this.context) this.refresh(cx);
     const t = theme(), repo = this.repos.find((r) => r.path === this.selected), shown = (id) => !this.collapsed[id], items = this.graphItems(), files = this.files;
     // Nothing to commit (neither the loaded files nor the repo list says dirty) but commits to push or pull:
@@ -576,7 +596,7 @@ export default class SourceControl extends View {
       .when(list[0].open, (el) => el.child(fit("repos", v_flex().id("scm-repos")).overflow_y_scrollbar()
         .children(this.repos.map((r) => this.repoRow(r, t)))
         .when(!this.repos.length, (e) => e.child(empty(this.error || (this.loading ? "Looking for repositories…" : "No folder"))))))
-      .child(this.section("changes", "Changes", t, repo ? [div().max_w(140).truncate().text_size(11).text_color(t.dim).child(repo.name), this.badge(String(files.length), t)] : [], sash(1)))
+      .child(this.section("changes", "Changes", t, repo ? [div().max_w(140).truncate().text_size(11).text_color(t.dim).child(repo.name), this.badge(String(files.length), t)] : [], sash(1), repo && (() => this.menu(null))))
       .when(list[1].open, (el) => el.child(fit("changes", v_flex())
         .child(v_flex().flex_none().px(10).pt(4).pb(6).gap(6)
           .child(div().id("scm-message").w_full().h(28).px(8).flex().items_center().rounded(4).bg(t.surface).border_1().border_color(this.typing ? t.accent : t.border).cursor_text()
@@ -588,7 +608,8 @@ export default class SourceControl extends View {
         .child(files.length ? div().flex_1().min_h(0).relative()
           .child(v_virtual_list("scm-files", files.length, ROW, (i) => files[i].path,
             (range) => files.slice(range.start, range.end).map((f) => this.fileRow(f, t))).size_full()
-            .on_item_click((path, cx) => { const f = this.files.find((f) => f.path === path); if (f) openDiff(this.selected, this.on, f, null, null); }))
+            .on_item_click((path, cx) => { const f = this.files.find((f) => f.path === path); if (f) openDiff(this.selected, this.on, f, null, null); })
+            .on_item_secondary_click((path, _e, cx) => { cx.stop_propagation(); this.menu(path); }))
           .child(Scrollbar.vertical("scm-files").viewport_from_layout().absolute().inset_0())
           : empty(this.loading ? "Loading changes…" : "No uncommitted changes"))
         .when(this.limited, (e) => e.child(empty("Showing the first 1,000 changed files")))))
