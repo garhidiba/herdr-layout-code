@@ -44,6 +44,7 @@ export default class Settings extends View {
     this.number("files.autoSaveDelay");
     this.number("editor.tabSize");
     this.number("editor.wordWrapColumn");
+    this.number("statusBar.usageRefreshMinutes");
     this.page = "settings";
     this.kb = null; this.kbOs = "mac"; this.kbEntries = []; this.kbText = undefined; this.kbError = null; this.query = ""; this.rec = null;
     this.search = InputState.new({ placeholder: "Type to search in keybindings" });
@@ -573,6 +574,36 @@ export default class Settings extends View {
         .when(hosted && Boolean(this.inl.note), (el) => el.child(this.note(t, this.inl.note))));
   }
 
+  usagePage(t) {
+    return v_flex().id("usage-body").flex_1().min_h(0).px(18).pb(10).overflow_y_scrollbar()
+      .child(this.section(t, "General"))
+      .child(this.row(t, "Usage", "Refresh Interval", "Minutes between usage refreshes for Claude, Codex and Antigravity (1–60).",
+        this.stepper(t, "statusBar.usageRefreshMinutes", (v, dir) => v + dir)))
+      .child(this.section(t, "Claude"))
+      .child(this.row(t, "Claude", "5-Hour Session", "Show the 5-hour session usage window.",
+        this.toggle(t, "statusBar.usage.claude.session", "Claude 5-Hour Session")))
+      .child(this.row(t, "Claude", "Weekly", "Show the weekly usage window.",
+        this.toggle(t, "statusBar.usage.claude.weekly", "Claude Weekly")))
+      .child(this.row(t, "Claude", "Model Limits", "Show per-model or scoped usage windows when present.",
+        this.toggle(t, "statusBar.usage.claude.models", "Claude Model Limits")))
+      .child(this.section(t, "Codex"))
+      .child(this.row(t, "Codex", "5-Hour Session", "Show the 5-hour session usage window.",
+        this.toggle(t, "statusBar.usage.codex.session", "Codex 5-Hour Session")))
+      .child(this.row(t, "Codex", "Weekly", "Show the weekly usage window.",
+        this.toggle(t, "statusBar.usage.codex.weekly", "Codex Weekly")))
+      .child(this.row(t, "Codex", "Credits", "Show the Codex credit balance.",
+        this.toggle(t, "statusBar.usage.codex.credits", "Codex Credits")))
+      .child(this.section(t, "Antigravity"))
+      .child(this.row(t, "Antigravity", "Gemini 5-Hour Session", "Show the Gemini 5-hour session usage window.",
+        this.toggle(t, "statusBar.usage.agy.geminiSession", "Antigravity Gemini 5-Hour Session")))
+      .child(this.row(t, "Antigravity", "Gemini Weekly", "Show the Gemini weekly usage window.",
+        this.toggle(t, "statusBar.usage.agy.geminiWeekly", "Antigravity Gemini Weekly")))
+      .child(this.row(t, "Antigravity", "Claude/GPT 5-Hour Session", "Show the Claude/GPT 5-hour session usage window.",
+        this.toggle(t, "statusBar.usage.agy.claudeGptSession", "Antigravity Claude/GPT 5-Hour Session")))
+      .child(this.row(t, "Antigravity", "Claude/GPT Weekly", "Show the Claude/GPT weekly usage window.",
+        this.toggle(t, "statusBar.usage.agy.claudeGptWeekly", "Antigravity Claude/GPT Weekly")));
+  }
+
   pageTab(t, page, text) {
     const on = this.page === page;
     return div().id(`page-${page}`).h(44).px(2).flex().items_center().cursor_pointer().role("tab").accessibility_label(text)
@@ -583,17 +614,18 @@ export default class Settings extends View {
   }
 
   render(cx) {
-    const t = theme(), keysOn = this.page === "keybindings", error = keysOn ? this.kbError : this.error;
+    const t = theme(), keysOn = this.page === "keybindings", usageOn = this.page === "usage", error = keysOn ? this.kbError : this.error;
     return v_flex().id("vscode-settings").size_full().min_h(0).bg(t.popover).text_color(t.foreground)
       .child(h_flex().h(44).px(18).gap(18).items_center().border_b(1).border_color(t.border)
         .child(this.pageTab(t, "settings", "Settings"))
+        .child(this.pageTab(t, "usage", "Usage"))
         .child(this.pageTab(t, "keybindings", "Keyboard Shortcuts"))
         .child(div().text_size(11).text_color(t.dim).child(keysOn ? KB_FILE : FILE))
         .child(div().flex_1())
         .when(this.saved > 0, (el) => el.child(div().text_size(11.5).text_color(t.done).child("✓ Saved")))
         .child(div().text_size(11).text_color(t.dim).child("Esc")))
       .when(Boolean(error), (el) => el.child(div().px(18).py(6).text_size(11.5).bg(t.background).text_color(t.ansi1).child(error)))
-      .child(keysOn ? this.keysPage(t) : this.settingsPage(t))
+      .child(keysOn ? this.keysPage(t) : usageOn ? this.usagePage(t) : this.settingsPage(t))
       .child(h_flex().h(52).px(18).gap(8).items_center().border_t(1).border_color(t.border)
         .when(!keysOn, (el) => el
           .child(this.button(t, "open-json", "Open settings.json", (_e, cx) => cx.spawn((cx) => this.openJson(FILE, settingsPath(), cx))))

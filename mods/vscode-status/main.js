@@ -1,4 +1,6 @@
 import { claudeWindows, barWindows, surfaceShares } from "./claude-windows.js";
+import { agyWindows } from "./agy-windows.js";
+import { usageConfigOf, filterProviderWindows } from "./refresh.js";
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, v_flex, HoverCard } from "gpui-base";
 import { spaces, agents, theme, run, window, keys, exec, readTextFile, appHome, nextCommand, openOverlay, notify } from "herdr";
@@ -17,8 +19,8 @@ function windowLabel(w) {
   if (!w) return null;
   const ms = w.resets_at * 1000 - Date.now();
   const base = w.window_minutes >= 10080 ? "Weekly" : `${Math.round(w.window_minutes / 60)}-hour session`;
-  const title = w.model ? `${w.model} ${base.toLowerCase()}` : base, model = w.model ?? null;
-  const extra = { model, severity: w.severity, share: w.share };
+  const title = w.title ?? (w.model ? `${w.model} ${base.toLowerCase()}` : base), model = w.model ?? null;
+  const extra = { key: w.key ?? null, weekly: w.window_minutes >= 10080, model, severity: w.severity, share: w.share };
   if (!(ms > 0)) return { used: 0, name: "", title, ...extra, reset: "window has reset" };
   const mins = Math.ceil(ms / 60000);
   const hours = Math.floor(mins / 60);
@@ -37,6 +39,7 @@ const RESET_PAGES = { Claude: "https://claude.ai/settings/usage", Codex: "https:
 
 // Codex limits and limit resets through `codex app-server` (see codex-limits.mjs).
 const limitsHelper = () => `${appHome()}/mods/vscode-status/codex-limits.mjs`;
+const agyLimitsHelper = () => `${appHome()}/mods/vscode-status/agy-limits.mjs`;
 const uuid = () => globalThis.crypto?.randomUUID?.() ?? "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (ch) => {
   const r = Math.floor(Math.random() * 16); return (ch === "x" ? r : (r & 3) | 8).toString(16);
 });
@@ -52,14 +55,40 @@ const OUTCOMES = {
 
 export default class WorkspaceStatus extends View {
   init(_props, cx) {
-    this.codex = null; this.claude = null;
-    this.poll(cx); this.pollClaude(cx); this.pollLimits(cx); this.pollClaudeApi(cx);
-    cx.timer.every(60000, cx => this.poll(cx));
-    cx.timer.every(10000, cx => this.pollClaude(cx));
-    cx.timer.every(300000, cx => this.pollClaudeApi(cx));
-    cx.timer.every(300000, cx => this.pollLimits(cx));
+    this.codex = null; this.claude = null; this.agy = null;
+    this.usageCfg = usageConfigOf(null);
+    this.refreshMs = this.usageCfg.refreshMs;
+    this.lastRefreshAt = 0;
+    this.pollClaude(cx);
+    this.loadConfig(cx);
+    this.refreshProviders(cx);
+    cx.timer.every(2000, cx => this.loadConfig(cx));
+    cx.timer.every(10000, cx => {
+      this.pollClaude(cx);
+      if (Date.now() - this.lastRefreshAt >= this.refreshMs) this.refreshProviders(cx);
+    });
     // The confirm dialog runs vscode-status.consume-reset.
     cx.spawn(async cx => { for (;;) { if (await nextCommand() === "consume-reset") this.consumeReset(cx); } });
+  }
+
+  loadConfig(cx) {
+    cx.spawn(async cx => {
+      const text = await readTextFile(`${appHome()}/vscode-settings.json`).catch(() => null);
+      const next = usageConfigOf(text);
+      const changed = JSON.stringify(next) !== JSON.stringify(this.usageCfg);
+      this.usageCfg = next;
+      this.refreshMs = next.refreshMs;
+      if (Date.now() - this.lastRefreshAt >= this.refreshMs) this.refreshProviders(cx);
+      if (changed) cx.notify();
+    });
+  }
+
+  refreshProviders(cx) {
+    this.lastRefreshAt = Date.now();
+    this.poll(cx);
+    this.pollClaudeApi(cx);
+    this.pollLimits(cx);
+    this.pollAgy(cx);
   }
 
   // claude-usage.json is written by claude-usage-tap.sh (Claude Code's statusLine); until then "–".
@@ -74,12 +103,12 @@ export default class WorkspaceStatus extends View {
       } catch {}
       this.claude = wins?.length ? wins : [{ name: "", used: null }];
       // The usage API is what claude.ai shows; the statusLine file lags behind it, so a fresh API read wins.
-      if (this.api && Date.now() - this.api.at < 600000) { this.claude = this.api.wins; this.claudeAt = this.api.at; }
+      if (this.api && Date.now() - this.api.at < this.refreshMs * 2) { this.claude = this.api.wins; this.claudeAt = this.api.at; }
       cx.notify();
     });
   }
 
-  // Claude's usage API (token read from the Keychain inside sh, never kept). Every 5 min; 15 min pause when refused.
+  // Claude's usage API (token read from the Keychain inside sh, never kept). Follows refreshMs; pauses 3x when refused.
   pollClaudeApi(cx) {
     if (Date.now() < (this.apiPause ?? 0)) return;
     cx.spawn(async cx => {
@@ -87,11 +116,11 @@ export default class WorkspaceStatus extends View {
         const r = await exec("sh", ["-c", CLAUDE_API]);
         const u = r.code === 0 && r.stdout.trim() ? JSON.parse(r.stdout) : null;
         const wins = u && !u.error ? claudeWindows(u).map(w => windowLabel(w)) : [];
-        if (!wins.length) { this.apiPause = Date.now() + 900000; return; }
+        if (!wins.length) { this.apiPause = Date.now() + this.refreshMs * 3; return; }
         this.surfaces = surfaceShares(u);
         this.api = { at: Date.now(), wins }; this.claude = wins; this.claudeAt = this.api.at;
         cx.notify();
-      } catch { this.apiPause = Date.now() + 900000; }
+      } catch { this.apiPause = Date.now() + this.refreshMs * 3; }
     });
   }
 
@@ -125,6 +154,22 @@ export default class WorkspaceStatus extends View {
       this.appLimits = out?.rate_limits ?? null; this.resets = out?.resets ?? null; this.codexMissing = missing;
       this.showCodex();
       cx.notify();
+    });
+  }
+
+  // Antigravity (agy) quota via Keychain token (see agy-limits.mjs). Follows refreshMs; pauses 3x on error.
+  pollAgy(cx) {
+    if (Date.now() < (this.agyPause ?? 0)) return;
+    cx.spawn(async cx => {
+      try {
+        const r = await userExec("node", [agyLimitsHelper()]);
+        if (r.code === 3) { this.agy = null; cx.notify(); return; }
+        const out = r.code === 0 && r.stdout.trim() ? JSON.parse(r.stdout.trim()) : null;
+        const wins = out ? agyWindows(out).map(w => windowLabel(w)).filter(Boolean) : [];
+        if (!wins.length) { this.agyPause = Date.now() + this.refreshMs * 3; return; }
+        this.agy = wins; this.agyAt = out.at ? out.at * 1000 : Date.now();
+        cx.notify();
+      } catch { this.agyPause = Date.now() + this.refreshMs * 3; }
     });
   }
 
@@ -230,10 +275,14 @@ export default class WorkspaceStatus extends View {
       .child(h_flex().gap(6).items_center().child(div().size(6).rounded(3).bg(t.dim)).child(`${list.length} agents`)
         .when(needs > 0, el => el.child(div().text_color(t.blocked).child(`· ${needs} needs you`))))
       .child(div().flex_1())
-      .children([["claude", "Claude", this.claude, this.claudeCredits, this.claudeAt ? `Updated ${clock(this.claudeAt)}` : null, this.resetLink(t, "Claude"), this.surfaces], ["codex", "Codex", this.codex, this.codexCredits, null, this.codexResets(t), null]].filter(([, , w]) => w?.length).map(([name, title, wins, extra, note, footer, surfaces]) =>
+      .children([
+        ["claude", "Claude", filterProviderWindows("claude", this.claude, this.usageCfg.show), this.claudeCredits, this.claudeAt ? `Updated ${clock(this.claudeAt)}` : null, this.resetLink(t, "Claude"), this.surfaces],
+        ["codex", "Codex", filterProviderWindows("codex", this.codex, this.usageCfg.show), this.usageCfg.show.codex.credits ? this.codexCredits : null, null, this.codexResets(t), null],
+        ["agy", "Antigravity", filterProviderWindows("agy", this.agy, this.usageCfg.show), null, this.agyAt ? `Updated ${clock(this.agyAt)}` : null, null, null],
+      ].filter(([, , w, extra]) => w?.length || extra).map(([name, title, wins, extra, note, footer, surfaces]) =>
         HoverCard.new(`usage-${name}`).anchor("bottom_center").open_delay(200).trigger(
         h_flex().gap(6).items_center().child(image(`mods/vscode-status/${name}.svg`).w(13).h(13).flex_none())
-          .children(barWindows(wins).map(w => {
+          .children((wins.some(w => !w.model) ? barWindows(wins) : wins).map(w => {
             if (w.used === null) return div().text_color(t.dim).child("–");
             const color = tint(t, w);
             return h_flex().gap(5).items_center()

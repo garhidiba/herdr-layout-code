@@ -254,3 +254,27 @@ test("the build's progress line says whether it is still running and what to sho
   assert.equal(buildStatus(null), null); // not written yet
   assert.equal(buildStatus("garbage"), null);
 });
+
+test("statusBar.usageRefreshMinutes defaults to 5 and clamps integers to 1-60", () => {
+  assert.equal(normalize(parse(null))["statusBar.usageRefreshMinutes"], 5);
+  assert.equal(normalize({ "statusBar.usageRefreshMinutes": 2 })["statusBar.usageRefreshMinutes"], 2);
+  assert.equal(normalize({ "statusBar.usageRefreshMinutes": 0 })["statusBar.usageRefreshMinutes"], 1);
+  assert.equal(normalize({ "statusBar.usageRefreshMinutes": 120 })["statusBar.usageRefreshMinutes"], 60);
+  assert.equal(normalize({ "statusBar.usageRefreshMinutes": 2.5 })["statusBar.usageRefreshMinutes"], 5);
+  assert.equal(JSON.parse(serialize(withSetting({}, "statusBar.usageRefreshMinutes", "3")))["statusBar.usageRefreshMinutes"], 3);
+  assert.throws(() => withSetting({}, "statusBar.usageRefreshMinutes", "abc"), /Invalid value/);
+});
+
+test("statusBar.usage.* toggles default to true and accept booleans only", () => {
+  const keys = [
+    "statusBar.usage.claude.session", "statusBar.usage.claude.weekly", "statusBar.usage.claude.models",
+    "statusBar.usage.codex.session", "statusBar.usage.codex.weekly", "statusBar.usage.codex.credits",
+    "statusBar.usage.agy.geminiSession", "statusBar.usage.agy.geminiWeekly",
+    "statusBar.usage.agy.claudeGptSession", "statusBar.usage.agy.claudeGptWeekly",
+  ];
+  const d = normalize(parse(null));
+  for (const k of keys) assert.equal(d[k], true);
+  assert.equal(normalize({ "statusBar.usage.agy.claudeGptSession": false })["statusBar.usage.agy.claudeGptSession"], false);
+  assert.equal(normalize({ "statusBar.usage.agy.claudeGptSession": "no" })["statusBar.usage.agy.claudeGptSession"], true);
+  assert.throws(() => withSetting({}, "statusBar.usage.claude.session", "no"), /Invalid value/);
+});

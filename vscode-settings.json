@@ -84,5 +84,7 @@
   "editor.wordWrap": "off",
   "editor.wordWrapColumn": 80,
   // Wrapped rows' indentation: "none" | "same" (the line's) | "indent" (one level more) | "deepIndent" (two).
-  "editor.wrappingIndent": "same"
+  "editor.wrappingIndent": "same",
+  // Minutes between Claude / Codex / Antigravity usage refreshes in the status bar (1-60).
+  "statusBar.usageRefreshMinutes": 5
 }

@@ -23,6 +23,17 @@ export const DEFAULTS = {
   "workbench.editor.preloadEditor": true, // each local space keeps an editor started off screen, so a file opens at once (vscode-explorer warm.js)
   "imageViewer.scope": "space",       // "space": each space keeps its own image and view | "global": one for all (vscode-viewer image.js)
   "spaces.machineOrder": [],          // machine names whose headers come first in the Spaces list, in this order (vscode-spaces order.js)
+  "statusBar.usageRefreshMinutes": 5, // 1-60, minutes between Claude / Codex / Antigravity usage refreshes (vscode-status)
+  "statusBar.usage.claude.session": true,
+  "statusBar.usage.claude.weekly": true,
+  "statusBar.usage.claude.models": true,
+  "statusBar.usage.codex.session": true,
+  "statusBar.usage.codex.weekly": true,
+  "statusBar.usage.codex.credits": true,
+  "statusBar.usage.agy.geminiSession": true,
+  "statusBar.usage.agy.geminiWeekly": true,
+  "statusBar.usage.agy.claudeGptSession": true,
+  "statusBar.usage.agy.claudeGptWeekly": true,
 };
 export const CHOICES = { "core.engine": ["js", "rust"], "editor.engine": ["js", "rust"], "files.autoSave": ["off", "afterDelay", "onFocusChange"],
   "editor.inlineSuggest.provider": ["ollama", "lmstudio", "codestral", "mercury", "off"],
@@ -43,7 +54,7 @@ function optional(key) {
   const m = /^editor\.inlineSuggest\.(?:(\w+)\.)?(model|endpoint)$/.exec(key);
   return m && (!m[1] || (m[1] !== "off" && CHOICES[PROVIDER].includes(m[1]))) && !(key in DEFAULTS) ? m[2] : null;
 }
-const NUMBERS = { "files.autoSaveDelay": [0.1, 3600, false], "editor.tabSize": [1, 16, true], "editor.wordWrapColumn": [1, 500, true] }; // [min, max, integer]
+const NUMBERS = { "files.autoSaveDelay": [0.1, 3600, false], "editor.tabSize": [1, 16, true], "editor.wordWrapColumn": [1, 500, true], "statusBar.usageRefreshMinutes": [1, 60, true] }; // [min, max, integer]
 
 // VS Code settings files allow comments and trailing commas (same rule as the editor's highlight.cjs `loose`).
 export const loose = (s) => JSON.parse(s.replace(/^﻿/, "").replace(/("(?:[^"\\]|\\.)*")|\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, (m, str) => str ?? "").replace(/,(\s*[}\]])/g, "$1"));
