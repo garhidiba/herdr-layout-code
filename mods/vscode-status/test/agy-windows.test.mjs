@@ -1,9 +1,10 @@
 // node --test mods/vscode-status/test/agy-windows.test.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
+import http from "node:http";
 import { agyWindows } from "../agy-windows.js";
 import { barWindows } from "../claude-windows.js";
-import { parseKeychainPayload } from "../agy-limits.mjs";
+import { parseKeychainPayload, fetchQuota, queryQuota } from "../agy-limits.mjs";
 import { refreshMinutesOf, refreshMsOf, usageConfigOf, filterProviderWindows } from "../refresh.js";
 
 const iso5h = "2026-11-19T12:05:12Z", sec5h = Date.parse(iso5h) / 1000;
@@ -78,7 +79,101 @@ test("parseKeychainPayload handles go-keyring-base64 and plain oauth_creds JSON"
   const b64 = Buffer.from(JSON.stringify({ token: { access_token: "tok-1", expiry: iso5h } })).toString("base64");
   assert.deepEqual(parseKeychainPayload(`go-keyring-base64:${b64}`), { accessToken: "tok-1", expiryMs: sec5h * 1000 });
   assert.deepEqual(parseKeychainPayload(JSON.stringify({ access_token: "tok-2", expiry_date: secWk * 1000 })), { accessToken: "tok-2", expiryMs: secWk * 1000 });
+  assert.deepEqual(parseKeychainPayload(JSON.stringify({ access_token: "tok-3", expiry_date: null })), { accessToken: "tok-3", expiryMs: null });
   assert.equal(parseKeychainPayload(""), null);
+});
+
+async function withMockQuotaServer(handler, fn) {
+  const server = http.createServer((req, res) => {
+    const out = handler(req.url, req.headers.authorization);
+    res.writeHead(out.status, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(out.body));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address();
+  try {
+    return await fn(`http://127.0.0.1:${port}/v1internal`);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+}
+
+test("fetchQuota refreshes an expired token before hitting the quota endpoints", async () => {
+  const nowMs = Date.parse("2026-11-21T17:00:00Z");
+  let token = { accessToken: "expired-tok", expiryMs: nowMs - 3600_000 };
+  let refreshes = 0;
+  const seenAuth = [];
+
+  await withMockQuotaServer((url, auth) => {
+    seenAuth.push(auth);
+    if (auth !== "Bearer fresh-tok") return { status: 401, body: { error: { code: 401 } } };
+    if (url.endsWith(":retrieveUserQuotaSummary")) {
+      return { status: 200, body: { groups: [{ displayName: "Gemini Models", buckets: [{ bucketId: "gemini-5h", window: "5h", resetTime: iso5h, remainingFraction: 0.9 }] }] } };
+    }
+    return { status: 200, body: { models: {} } };
+  }, async (base) => {
+    const out = await fetchQuota({
+      readToken: () => token,
+      refreshToken: () => { refreshes++; token = { accessToken: "fresh-tok", expiryMs: nowMs + 3600_000 }; },
+      queryQuota: (tok) => queryQuota(tok, base),
+      now: () => nowMs,
+    });
+    assert.equal(refreshes, 1);
+    assert.ok(seenAuth.every((h) => h === "Bearer fresh-tok"));
+    assert.equal(agyWindows(out)[0].key, "gemini-5h");
+  });
+});
+
+test("fetchQuota refreshes and retries once when an unexpired token returns HTTP 401", async () => {
+  const nowMs = Date.parse("2026-11-21T17:00:00Z");
+  let token = { accessToken: "revoked-tok", expiryMs: nowMs + 1800_000 };
+  let refreshes = 0;
+
+  await withMockQuotaServer((url, auth) => {
+    if (auth !== "Bearer fresh-tok") return { status: 401, body: { error: { code: 401 } } };
+    if (url.endsWith(":retrieveUserQuotaSummary")) {
+      return { status: 200, body: { groups: [{ displayName: "Gemini Models", buckets: [{ bucketId: "gemini-5h", window: "5h", resetTime: iso5h, remainingFraction: 0.8 }] }] } };
+    }
+    return { status: 200, body: { models: {} } };
+  }, async (base) => {
+    const out = await fetchQuota({
+      readToken: () => token,
+      refreshToken: () => { refreshes++; token = { accessToken: "fresh-tok", expiryMs: nowMs + 3600_000 }; },
+      queryQuota: (tok) => queryQuota(tok, base),
+      now: () => nowMs,
+    });
+    assert.equal(refreshes, 1);
+    assert.equal(Math.round(agyWindows(out)[0].used_percent), 20);
+  });
+});
+
+test("fetchQuota skips refresh for a valid token and stops after one failed refresh on 401", async () => {
+  const nowMs = Date.parse("2026-11-21T17:00:00Z");
+  let refreshes = 0;
+
+  await withMockQuotaServer((url, auth) => {
+    if (auth === "Bearer valid-tok" && url.endsWith(":retrieveUserQuotaSummary")) {
+      return { status: 200, body: { groups: [{ displayName: "Gemini Models", buckets: [{ bucketId: "gemini-5h", window: "5h", resetTime: iso5h, remainingFraction: 0.7 }] }] } };
+    }
+    return { status: 401, body: { error: { code: 401 } } };
+  }, async (base) => {
+    const ok = await fetchQuota({
+      readToken: () => ({ accessToken: "valid-tok", expiryMs: nowMs + 1800_000 }),
+      refreshToken: () => { refreshes++; },
+      queryQuota: (tok) => queryQuota(tok, base),
+      now: () => nowMs,
+    });
+    assert.equal(refreshes, 0);
+    assert.equal(Math.round(agyWindows(ok)[0].used_percent), 30);
+
+    await assert.rejects(() => fetchQuota({
+      readToken: () => ({ accessToken: "bad-tok", expiryMs: null }),
+      refreshToken: () => { refreshes++; },
+      queryQuota: (tok) => queryQuota(tok, base),
+      now: () => nowMs,
+    }), (err) => err.code === 2 && /401/.test(err.message));
+    assert.equal(refreshes, 1);
+  });
 });
 
 test("refreshMinutesOf reads statusBar.usageRefreshMinutes with comments, clamping, and fallback", () => {

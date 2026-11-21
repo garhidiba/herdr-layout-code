@@ -55,7 +55,7 @@ const OUTCOMES = {
 
 export default class WorkspaceStatus extends View {
   init(_props, cx) {
-    this.codex = null; this.claude = null; this.agy = null;
+    this.codex = null; this.claude = null; this.agy = null; this.agyRaw = null; this.agyError = null; this.agyBusy = false;
     this.usageCfg = usageConfigOf(null);
     this.refreshMs = this.usageCfg.refreshMs;
     this.lastRefreshAt = 0;
@@ -65,6 +65,7 @@ export default class WorkspaceStatus extends View {
     cx.timer.every(2000, cx => this.loadConfig(cx));
     cx.timer.every(10000, cx => {
       this.pollClaude(cx);
+      if (this.agyRaw) this.showAgy();
       if (Date.now() - this.lastRefreshAt >= this.refreshMs) this.refreshProviders(cx);
     });
     // The confirm dialog runs vscode-status.consume-reset.
@@ -76,8 +77,10 @@ export default class WorkspaceStatus extends View {
       const text = await readTextFile(`${appHome()}/vscode-settings.json`).catch(() => null);
       const next = usageConfigOf(text);
       const changed = JSON.stringify(next) !== JSON.stringify(this.usageCfg);
+      const prevRefreshMs = this.refreshMs;
       this.usageCfg = next;
       this.refreshMs = next.refreshMs;
+      if (next.refreshMs < prevRefreshMs) { this.agyPause = 0; this.apiPause = 0; }
       if (Date.now() - this.lastRefreshAt >= this.refreshMs) this.refreshProviders(cx);
       if (changed) cx.notify();
     });
@@ -157,19 +160,51 @@ export default class WorkspaceStatus extends View {
     });
   }
 
-  // Antigravity (agy) quota via Keychain token (see agy-limits.mjs). Follows refreshMs; pauses 3x on error.
+  showAgy() {
+    this.agy = this.agyRaw ? this.agyRaw.map(w => windowLabel(w)).filter(Boolean) : null;
+  }
+
+  agyNote() {
+    const updated = this.agyAt ? `Updated ${clock(this.agyAt)}` : null;
+    const failed = this.agyError ? `Refresh failed (${this.agyError})` : null;
+    return [updated, failed].filter(Boolean).join(" · ") || null;
+  }
+
+  // Antigravity (agy) quota via Keychain token (see agy-limits.mjs). Follows refreshMs; pauses up to 5 min on error.
   pollAgy(cx) {
-    if (Date.now() < (this.agyPause ?? 0)) return;
+    if (this.agyBusy || Date.now() < (this.agyPause ?? 0)) return;
+    this.agyBusy = true;
+    const pauseMs = () => Math.min(this.refreshMs * 3, 300000);
     cx.spawn(async cx => {
       try {
-        const r = await userExec("node", [agyLimitsHelper()]);
-        if (r.code === 3) { this.agy = null; cx.notify(); return; }
+        const r = await userExec("node", [agyLimitsHelper()], { timeout: 35000 });
+        if (r.code === 3) {
+          this.agyRaw = null; this.agy = null; this.agyAt = null; this.agyError = null;
+          cx.notify(); return;
+        }
         const out = r.code === 0 && r.stdout.trim() ? JSON.parse(r.stdout.trim()) : null;
-        const wins = out ? agyWindows(out).map(w => windowLabel(w)).filter(Boolean) : [];
-        if (!wins.length) { this.agyPause = Date.now() + this.refreshMs * 3; return; }
-        this.agy = wins; this.agyAt = out.at ? out.at * 1000 : Date.now();
+        const raw = out ? agyWindows(out) : [];
+        if (!raw.length) {
+          this.agyError = r.code !== 0
+            ? (r.stderr.trim().replace(/^agy-limits:\s*/, "") || `exit ${r.code}`)
+            : "no quota windows";
+          this.agyPause = Date.now() + pauseMs();
+          cx.notify();
+          return;
+        }
+        this.agyRaw = raw;
+        this.agyAt = out.at ? out.at * 1000 : Date.now();
+        this.agyError = null;
+        this.agyPause = 0;
+        this.showAgy();
         cx.notify();
-      } catch { this.agyPause = Date.now() + this.refreshMs * 3; }
+      } catch (e) {
+        this.agyError = e?.message || "helper failed";
+        this.agyPause = Date.now() + pauseMs();
+        cx.notify();
+      } finally {
+        this.agyBusy = false;
+      }
     });
   }
 
@@ -278,7 +313,7 @@ export default class WorkspaceStatus extends View {
       .children([
         ["claude", "Claude", filterProviderWindows("claude", this.claude, this.usageCfg.show), this.claudeCredits, this.claudeAt ? `Updated ${clock(this.claudeAt)}` : null, this.resetLink(t, "Claude"), this.surfaces],
         ["codex", "Codex", filterProviderWindows("codex", this.codex, this.usageCfg.show), this.usageCfg.show.codex.credits ? this.codexCredits : null, null, this.codexResets(t), null],
-        ["agy", "Antigravity", filterProviderWindows("agy", this.agy, this.usageCfg.show), null, this.agyAt ? `Updated ${clock(this.agyAt)}` : null, null, null],
+        ["agy", "Antigravity", filterProviderWindows("agy", this.agy, this.usageCfg.show), null, this.agyNote(), null, null],
       ].filter(([, , w, extra]) => w?.length || extra).map(([name, title, wins, extra, note, footer, surfaces]) =>
         HoverCard.new(`usage-${name}`).anchor("bottom_center").open_delay(200).trigger(
         h_flex().gap(6).items_center().child(image(`mods/vscode-status/${name}.svg`).w(13).h(13).flex_none())
