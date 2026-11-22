@@ -89,6 +89,19 @@ export function visibleColumns(widths, x, width) {
 // A scroll kept within the grid (either axis): 0 when it fits.
 export const clampX = (x, total, width) => Math.max(0, Math.min(x, total - width));
 
+// A scroll bar's thumb along a track `track` px long, for a viewport `seen` px of `whole`, scrolled `pos`: its length
+// (at least 24) and offset, and `ratio`, the scroll one px of thumb drag moves.
+export function thumbOf(track, seen, whole, pos) {
+  const len = Math.min(track, Math.max(24, track * seen / Math.max(whole, 1))), room = track - len, over = Math.max(0, whole - seen);
+  return { len, at: room > 0 && over > 0 ? room * Math.min(pos, over) / over : 0, ratio: room > 0 ? over / room : 0 };
+}
+
+// The scroll a click `at` px along the track jumps to: the one that puts the thumb's middle there.
+export function scrollAtTrack(at, track, seen, whole) {
+  const { len, ratio } = thumbOf(track, seen, whole, 0);
+  return clampX((at - len / 2) * ratio, whole, seen);
+}
+
 // The scroll that brings [start, start + size) into a viewport `view` long scrolled to `at`, moving as little as it can.
 export const scrollToShow = (start, size, at, view) => (start < at ? start : start + size > at + view ? Math.min(start, start + size - view) : at);
 

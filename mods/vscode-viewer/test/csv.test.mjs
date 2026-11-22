@@ -3,7 +3,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { parseCsv, csvRows, delimiterOf, columnLabel, isNumber, cellText, columnWidths, sheetOf, visibleColumns, clampX,
-  rowSpans, fieldText, editCells, rowChunks, toTsv, scrollToShow, columnStarts, columnAt } from "../csv.js";
+  rowSpans, fieldText, editCells, rowChunks, toTsv, scrollToShow, columnStarts, columnAt, thumbOf, scrollAtTrack } from "../csv.js";
 
 test("plain rows split on commas; a trailing newline adds no empty row", () => {
   assert.deepEqual(parseCsv("a,b,c\n1,2,3\n"), [["a", "b", "c"], ["1", "2", "3"]]);
@@ -156,6 +156,20 @@ test("scrolling to show a range moves as little as it can", () => {
   assert.equal(scrollToShow(300, 20, 0, 200), 120, "below: its far edge at the bottom");
   assert.equal(scrollToShow(40, 20, 100, 200), 40, "above: its near edge at the top");
   assert.equal(scrollToShow(0, 500, 100, 200), 0, "longer than the view: its start");
+});
+
+test("a scroll bar's thumb is as long as the share in view (at least 24px) and travels the rest of the track", () => {
+  assert.deepEqual(thumbOf(200, 100, 400, 0), { len: 50, at: 0, ratio: 2 });
+  assert.deepEqual(thumbOf(200, 100, 400, 300), { len: 50, at: 150, ratio: 2 });
+  assert.equal(thumbOf(200, 10, 100000, 0).len, 24);
+  assert.deepEqual(thumbOf(200, 400, 300, 0), { len: 200, at: 0, ratio: 0 }, "everything in view: a full thumb that never moves");
+});
+
+test("a click on the track jumps so the thumb's middle sits under it, held to the ends", () => {
+  assert.equal(scrollAtTrack(100, 200, 100, 400), 150, "middle of the track: thumb 75..125, scroll 150");
+  assert.equal(scrollAtTrack(10, 200, 100, 400), 0, "near the start: held at 0");
+  assert.equal(scrollAtTrack(199, 200, 100, 400), 300, "near the end: held at the last scroll");
+  assert.equal(scrollAtTrack(50, 200, 400, 300), 0, "nothing to scroll");
 });
 
 test("column starts and the column under a position", () => {

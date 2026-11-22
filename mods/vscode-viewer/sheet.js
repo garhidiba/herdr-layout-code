@@ -12,7 +12,7 @@
 //   pastes TSV from the active cell, ⌘Z/⌘⇧Z undo and redo. The viewer owns the text (`actions`, main.js).
 import { div } from "gpui-kit";
 import { h_flex, v_flex, InputState, Input } from "gpui-base";
-import { columnLabel, isNumber, cellText, visibleColumns, clampX, scrollToShow, columnStarts, columnAt, toTsv, parseCsv } from "./csv.js";
+import { columnLabel, isNumber, cellText, visibleColumns, clampX, scrollToShow, columnStarts, columnAt, toTsv, parseCsv, thumbOf, scrollAtTrack } from "./csv.js";
 import { selectCell, extendTo, selectRows, selectCols, selectAll, rectOf, rectCells, moveBy, clampSel } from "./selection.js";
 
 const ROW_H = 22, LETTERS_H = 20, HEAD_H = LETTERS_H + ROW_H, BAR = 12;
@@ -194,7 +194,10 @@ export class SheetGrid {
     this.sheet = sheet; this.readonly = readonly;
     const rows = sheet.rows.length, widths = sheet.widths, starts = columnStarts(widths), total = starts[widths.length];
     const numW = Math.max(40, String(rows).length * 8 + 16);
-    const view = Math.max(0, (this.width || 1600) - numW), tall = (rows - 1) * ROW_H, bodyH = Math.max(0, (this.height || 900) - HEAD_H);
+    // Each bar takes a BAR-wide gutter of its own when there is something to scroll, so its track never covers cells.
+    const tall = (rows - 1) * ROW_H, hasY = tall > (this.height || 900) - HEAD_H;
+    const view = Math.max(0, (this.width || 1600) - numW - (hasY ? BAR : 0)), hasX = total > view;
+    const bodyH = Math.max(0, (this.height || 900) - HEAD_H - (hasX ? BAR : 0));
     this.x = clampX(this.x, total, view); this.y = clampX(this.y, tall, bodyH);
     this.g = { numW, view, total, tall, bodyH, starts, widths, rows, cols: sheet.cols };
     this.sel = clampSel(this.sel, rows, sheet.cols);
@@ -233,9 +236,27 @@ export class SheetGrid {
       ...box(a.r, a.r, a.c, a.c).map(b => div().absolute().left(b.left).top(b.top).w(b.w).h(b.bottom - b.top).border_2().border_color(c.accent)),
     ];
     const at = this.edit && box(this.edit.r, this.edit.r, this.edit.c, this.edit.c)[0];
-    const thumb = (track, seen, whole, pos) => { const len = Math.max(24, track * seen / whole); return { len, at: (track - len) * pos / (whole - seen) }; };
-    const grab = (axis, ratio) => (e, cx) => { cx.stop_propagation(); this.thumb = { axis, at: axis === "x" ? e.position.x : e.position.y, from: axis === "x" ? this.x : this.y, ratio }; };
-    const tx = total > view ? thumb(view, view, total, this.x) : null, ty = tall > bodyH ? thumb(bodyH, bodyH, tall, this.y) : null;
+    // A bar: a track in its gutter with the thumb inside (csv.js thumbOf). A press on the thumb drags it; on the track it
+    // first jumps so the thumb's middle is under the pointer (scrollAtTrack), then drags on from there.
+    const tx = hasX ? thumbOf(view, view, total, this.x) : null, ty = hasY ? thumbOf(bodyH, bodyH, tall, this.y) : null;
+    const press = (axis, t, track, seen, whole, onTrack) => (e, cx) => {
+      cx.stop_propagation();
+      const p = axis === "x" ? e.position.x : e.position.y;
+      if (onTrack && e.local_position) {
+        const to = scrollAtTrack(axis === "x" ? e.local_position.x : e.local_position.y, track, seen, whole);
+        axis === "x" ? this.scroll(to, this.y, cx) : this.scroll(this.x, to, cx);
+      }
+      this.thumb = { axis, at: p, from: axis === "x" ? this.x : this.y, ratio: t.ratio };
+    };
+    const bar = (axis) => {
+      const x = axis === "x", t = x ? tx : ty, track = x ? view : bodyH, seen = track, whole = x ? total : tall;
+      const knob = div().id(`csv-thumb-${axis}`).absolute().rounded(3).bg(c.dim).opacity(0.5)
+        .on_mouse_down("left", press(axis, t, track, seen, whole, false));
+      return div().id(`csv-track-${axis}`).absolute().bg(c.bg)
+        .when(x, el => el.left(numW).bottom(0).w(view).h(BAR).child(knob.left(t.at).top(2).w(t.len).h(BAR - 4)))
+        .when(!x, el => el.top(HEAD_H).right(0).w(BAR).h(bodyH).child(knob.top(t.at).left(2).h(t.len).w(BAR - 4)))
+        .on_mouse_down("left", press(axis, t, track, seen, whole, true));
+    };
     return div().id("csv-sheet").track_focus(this.handle).relative().flex_1().min_h(0).overflow_hidden().flex().flex_col()
       .bg(c.bg).text_color(c.fg).text_size(12.5)
       .on_size_change((size, cx) => { if (size.width !== this.width || size.height !== this.height) { this.width = size.width; this.height = size.height; cx.notify(); } })
@@ -258,9 +279,7 @@ export class SheetGrid {
         .px(5).bg(c.bg).border_2().border_color(c.accent).text_size(12.5).text_color(c.fg)))
       .when(Boolean(this.note), el => el.child(div().absolute().left(numW + 8).bottom(BAR + 2).px(8).py(2).rounded(4).bg(c.head)
         .text_size(11.5).text_color(c.dim).child(this.note ?? "")))
-      .when(Boolean(tx) && this.width > 0, el => el.child(div().id("csv-thumb-x").absolute().bottom(2).h(BAR - 4).w(tx.len).rounded(3)
-        .left(numW + tx.at).bg(c.dim).opacity(0.5).on_mouse_down("left", grab("x", (total - view) / Math.max(1, view - tx.len)))))
-      .when(Boolean(ty) && this.height > 0, el => el.child(div().id("csv-thumb-y").absolute().right(2).w(BAR - 4).h(ty.len).rounded(3)
-        .top(HEAD_H + ty.at).bg(c.dim).opacity(0.5).on_mouse_down("left", grab("y", (tall - bodyH) / Math.max(1, bodyH - ty.len)))));
+      .when(Boolean(tx) && this.width > 0, el => el.child(bar("x")))
+      .when(Boolean(ty) && this.height > 0, el => el.child(bar("y")));
   }
 }
