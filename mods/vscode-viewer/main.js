@@ -127,7 +127,7 @@ export default class Viewer extends View {
     this.code = null; this.dirty = false; this.conflict = false; this.wrap = false;
     this.error = null; this.table = null; this.language = "Plain Text"; this.facts = null;
     this.kind = p.preview === "html" ? "html" : p.preview ? "markdown" : kindOf(this.file ?? ""); this.preview = PREVIEWS.includes(this.kind); this.img = null;
-    this.sheet = null; this.sheetPos = { x: 0, width: 0, thumb: null };  // the CSV preview (parseSheet) and its sideways scroll (sheet.js)
+    this.sheet = null; this.sheetPos = { x: 0, y: 0, width: 0, height: 0, thumb: null };  // the CSV preview (parseSheet) and its sideways scroll (sheet.js)
     this.autoSave = { mode: "off", delay: 1 }; this.autoToken = 0; this.hadFocus = false; this.restore = null; this.pane = null; this.missing = 0;
     this.load(cx);
     // Every 3 s; a local markdown preview every second, so it follows the terminal editor's saves.
