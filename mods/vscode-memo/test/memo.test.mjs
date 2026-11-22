@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MEMO, MIN, MEMO_SETTINGS, GRIP, CORNER, FOOT, DEFAULT_POS, buttonRect, buttonPos, panelLayout, closesOnPress, memoTarget, clampRect, dragRect, panelRect, gitignoreAddition, dragStarted, memoSettings,
+import { MEMO, MIN, MEMO_SETTINGS, GRIP, CORNER, FOOT, DEFAULT_POS, buttonRect, buttonPos, panelLayout, closesOnPress, memoTarget, memoRoot, memoLabel, clampRect, dragRect, panelRect, gitignoreAddition, dragStarted, memoSettings,
   joinPath, REMOTE_PREPARE, NOT_INSTALLED, WINDOWS, MEMO_SETTINGS_FILE, preparedDir, windowsPrepare, psQuote, encodeCommand, remoteEditorArgv, keysOs, appendCommand } from "../memo.js";
 
 const panes = [
@@ -13,15 +13,55 @@ const panes = [
   { pane: "p2", tab: "t1", terminal: "a", cwd: "/w/app" },
 ];
 
-test("a space's memo is under its folder, else its first terminal's", () => {
-  assert.deepEqual(memoTarget({ id: "s1", folder: "/w/docs/", machine: null, tabs: [{ id: "t1" }] }, panes),
-    { folder: "/w/docs", on: null, path: `/w/docs/${MEMO}` });
-  assert.deepEqual(memoTarget({ id: "s2", folder: "", machine: null, tabs: [{ id: "t1" }] }, panes),
-    { folder: "/w/app", on: null, path: "/w/app/.herdr/memo.md" });
-  assert.deepEqual(memoTarget({ id: "box/s3", folder: "/srv", machine: "box", tabs: [] }, panes),
-    { folder: "/srv", on: "box", path: "/srv/.herdr/memo.md" });
-  assert.equal(memoTarget({ id: "s4", folder: "", machine: null, tabs: [] }, panes), null);
-  assert.equal(memoTarget(undefined, panes), null);
+test("a memo is under its project's folder", () => {
+  assert.deepEqual(memoTarget({ cwd: "/w/docs/", on: null }), { folder: "/w/docs", on: null, path: `/w/docs/${MEMO}` });
+  assert.deepEqual(memoTarget({ cwd: "/srv", on: "box" }), { folder: "/srv", on: "box", path: "/srv/.herdr/memo.md" });
+  assert.equal(memoTarget({ cwd: "/", on: null }), null);
+  assert.equal(memoTarget(null), null);
+});
+
+// The space win-amd64 reported: its `folder` is stale (vardi), its terminal runs in refine-mods.
+const winSpace = { id: "win-amd64/s1", folder: "C:\\project\\vardi", machine: "win-amd64", tabs: [{ id: "win-amd64/t1" }, { id: "win-amd64/t2" }] };
+const winPanes = [
+  { pane: "win-amd64/p1", tab: "win-amd64/t1", terminal: "win-amd64/a1", cwd: "C:\\project\\refine-mods" },
+  { pane: "win-amd64/p2", tab: "win-amd64/t2", terminal: "win-amd64/e1", cwd: null }, // an editor tab
+  { pane: "win-amd64/p3", tab: "win-amd64/t2", terminal: "win-amd64/a2", cwd: "C:\\project\\other" },
+];
+const paneFocus = (pane) => ({ space: winSpace.id, tab: "x", pane, terminal: winPanes.find(p => p.pane === pane).terminal, cwd: null });
+
+test("a space not focused into yet: its first terminal's folder, before a stale space folder", () => {
+  assert.deepEqual(memoRoot(winSpace, winPanes, null, {}), { cwd: "C:\\project\\refine-mods", on: "win-amd64" });
+  assert.equal(memoTarget(memoRoot(winSpace, winPanes, null, {})).path, "C:\\project\\refine-mods\\.herdr\\memo.md");
+  // No terminal with a folder: the space's folder; neither: none.
+  assert.deepEqual(memoRoot({ id: "s2", folder: "/w/docs", machine: null, tabs: [{ id: "t1" }] }, [panes[0]], null, {}), { cwd: "/w/docs", on: null });
+  assert.equal(memoRoot({ id: "s3", folder: "", machine: null, tabs: [] }, panes, null, {}), null);
+  assert.equal(memoRoot(undefined, panes, null, {}), null);
+});
+
+test("the memo follows the focused terminal's folder, as the Explorer's tree does", () => {
+  const last = {};
+  assert.deepEqual(memoRoot(winSpace, winPanes, paneFocus("win-amd64/p3"), last), { cwd: "C:\\project\\other", on: "win-amd64" });
+  assert.deepEqual(last[winSpace.id], { cwd: "C:\\project\\other", on: "win-amd64" });
+  assert.deepEqual(memoRoot(winSpace, winPanes, paneFocus("win-amd64/p1"), last), { cwd: "C:\\project\\refine-mods", on: "win-amd64" });
+  // A terminal block (no pane): its own folder, and its machine from its address.
+  assert.deepEqual(memoRoot({ id: "s1", folder: "", machine: null, tabs: [] }, [], { pane: null, terminal: "box/t9", cwd: "/srv/x" }, {}), { cwd: "/srv/x", on: "box" });
+  assert.deepEqual(memoRoot({ id: "s1", folder: "", machine: null, tabs: [] }, [], { pane: null, terminal: "t9", cwd: "/w" }, {}), { cwd: "/w", on: null });
+});
+
+test("a focused tab without a folder, or the memo's own editor, keeps the space's last project", () => {
+  const last = {};
+  memoRoot(winSpace, winPanes, paneFocus("win-amd64/p3"), last);
+  assert.deepEqual(memoRoot(winSpace, winPanes, paneFocus("win-amd64/p2"), last), { cwd: "C:\\project\\other", on: "win-amd64" });
+  const memoEditor = { pane: null, terminal: "win-amd64/m1", cwd: "C:\\project\\other" };
+  assert.deepEqual(memoRoot(winSpace, winPanes, { ...memoEditor, cwd: "C:\\elsewhere" }, last, new Set(["win-amd64/m1"])), { cwd: "C:\\project\\other", on: "win-amd64" });
+  // Nothing focused into yet and a folderless tab focused: the fresh root.
+  assert.deepEqual(memoRoot(winSpace, winPanes, paneFocus("win-amd64/p2"), {}), { cwd: "C:\\project\\refine-mods", on: "win-amd64" });
+});
+
+test("the panel's title names the memo's folder, and its machine for a remote one", () => {
+  assert.equal(memoLabel(memoTarget({ cwd: "C:\\project\\refine-mods", on: "win-amd64" })), "win-amd64: refine-mods");
+  assert.equal(memoLabel(memoTarget({ cwd: "/w/app/", on: null })), "app");
+  assert.equal(memoLabel(null), "");
 });
 
 test("rects stay inside the window", () => {
@@ -128,13 +168,13 @@ test("the memo editor keeps the user's settings, cut down to a document editor",
 });
 
 test("a Windows space's memo uses backslashes; a Unix space's slashes", () => {
-  assert.deepEqual(memoTarget({ id: "win/s1", folder: "C:\\project\\refine-mods\\", machine: "win-amd64", tabs: [] }, panes),
+  assert.deepEqual(memoTarget({ cwd: "C:\\project\\refine-mods\\", on: "win-amd64" }),
     { folder: "C:\\project\\refine-mods", on: "win-amd64", path: "C:\\project\\refine-mods\\.herdr\\memo.md" });
-  assert.equal(memoTarget({ id: "w/s2", folder: "C:/w", machine: "w", tabs: [] }, panes).path, "C:/w\\.herdr\\memo.md");
+  assert.equal(memoTarget({ cwd: "C:/w", on: "w" }).path, "C:/w\\.herdr\\memo.md");
   assert.equal(joinPath("\\\\nas\\share", ".gitignore"), "\\\\nas\\share\\.gitignore");
   assert.equal(joinPath("/srv/app", ".gitignore"), "/srv/app/.gitignore");
   // A Unix folder keeps a backslash that is part of its name.
-  assert.equal(memoTarget({ id: "s5", folder: "/w/a\\", machine: null, tabs: [] }, panes).path, "/w/a\\/.herdr/memo.md");
+  assert.equal(memoTarget({ cwd: "/w/a\\", on: null }).path, "/w/a\\/.herdr/memo.md");
 });
 
 // REMOTE_PREPARE run here as on a Linux machine, with $HOME a temp folder.

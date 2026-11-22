@@ -20,7 +20,7 @@ import { h_flex } from "gpui-base";
 import { props, openOverlay, closeOverlay, shared, setShared, spaces, panes, terminals, theme, hc, exec, appHome,
   readTextFile, writeTextFile, nextCommand, run, focused, window } from "herdr";
 import { BUTTON, MIN, CORNER, GRIP, MEMO, memoTarget, clampRect, dragRect, buttonRect, buttonPos, closesOnPress, panelRect,
-  panelLayout, gitignoreAddition, memoSettings, dragStarted, joinPath, MEMO_SETTINGS_FILE, REMOTE_PREPARE, NOT_INSTALLED,
+  panelLayout, gitignoreAddition, memoSettings, dragStarted, joinPath, memoRoot, memoLabel, MEMO_SETTINGS_FILE, REMOTE_PREPARE, NOT_INSTALLED,
   WINDOWS, windowsPrepare, preparedDir, appendCommand, remoteEditorArgv, keysOs } from "./memo.js";
 
 const POS = "vscode-memo.button";     // { right, bottom }: the button's spot, from the window's bottom-right corner
@@ -85,20 +85,28 @@ class Host {
     setShared(OPEN, {});
     fullWindow({ role: "probe" });
     this.busy = false; this.toggleAt = shared(TOGGLE);
+    this.last = {}; // { [space id]: { cwd, on } }: each space's last project (memo.js memoRoot)
     cx.spawn(async (cx) => { for (;;) { if ((await nextCommand()) === "toggle") { this.toggle(cx); cx.notify(); } } });
+  }
+
+  // The memo of the project you work in, as the Explorer picks it (memo.js memoRoot): it follows the focused terminal,
+  // and focusing the memo's own editor keeps it.
+  target() {
+    const skip = new Set(Object.values(shared(EDITORS) ?? {}));
+    return memoTarget(memoRoot(spaces().find(s => s.active), panes(), focused(), this.last, skip));
   }
 
   toggle(cx) {
     if (open().panel) closePanel(); else this.show(cx);
   }
 
-  // Opens the panel for the shown space's memo (closing one that shows another), its editor started if needed.
+  // Opens the panel for the current project's memo (closing one that shows another), its editor started if needed.
   show(cx) {
     if (this.busy) return;
     this.busy = true;
     cx.spawn(async (cx) => {
       try {
-        const t = memoTarget(spaces().find(s => s.active), panes());
+        const t = this.target();
         let note = !t ? "This space has no folder for a memo." : null;
         const address = note ? null : await this.editor(t, cx).catch((e) => { note = e?.message ?? null; return null; });
         const rect = panelRect(shared(PANEL), open().button?.rect, shared(WIN));
@@ -106,7 +114,7 @@ class Host {
         // Where the keyboard was before the panel first opened, for closing it.
         const f = focused(), back = open().panel?.back
           ?? (f && !Object.values(shared(EDITORS) ?? {}).includes(f.terminal) ? { pane: f.pane, terminal: f.terminal } : null);
-        this.place({ key: memoKey(t), address, back, note: note ?? (address ? null : "The editor didn't start.") }, rect, cx);
+        this.place({ key: memoKey(t), label: memoLabel(t), folder: t?.folder ?? null, address, back, note: note ?? (address ? null : "The editor didn't start.") }, rect, cx);
       } finally { this.busy = false; cx.notify(); }
     });
   }
@@ -144,8 +152,8 @@ class Host {
     try { address = r.code === 0 ? JSON.parse(r.stdout).address : null; } catch {}
     for (let waited = 0; address && !live(address) && waited < 3000; waited += 25) await cx.sleep(25);
     if (!live(address)) return null;
-    // Editors of memos no space shows any more end; the rest stay for the next open.
-    const memos = new Set(spaces().map(s => memoKey(memoTarget(s, panes()))));
+    // Editors of memos no space is on any more (each space's last project) end; the rest stay for the next open.
+    const memos = new Set(spaces().map(s => memoKey(memoTarget(memoRoot(s, panes(), null, this.last)))));
     const kept = {};
     for (const [k, a] of Object.entries({ ...(shared(EDITORS) ?? {}), [key]: address })) {
       if (memos.has(k) && live(a)) kept[k] = a; else if (live(a)) hc(["kill", a]).catch(() => {});
@@ -196,10 +204,10 @@ class Host {
     if (ask !== this.toggleAt) { this.toggleAt = ask; this.toggle(cx); }
     const p = open().panel;
     if (p && !this.busy) {
-      const t = memoTarget(spaces().find(s => s.active), panes());
+      const t = this.target();
       const r = clampRect(shared(PANEL) ?? p.rect, shared(WIN));
       if (p.address && !live(p.address)) closePanel(); // the editor was quit
-      else if (memoKey(t) !== p.key) this.show(cx); // another space's memo
+      else if (memoKey(t) !== p.key) this.show(cx); // another project's memo (another space, or a terminal elsewhere)
       else if (!same(r, p.rect)) this.place(p, r, cx); // moved or resized
     }
     return div();
@@ -258,7 +266,7 @@ const gripArea = (edge, el) => el[`cursor_${CURSORS[edge]}_resize`]().on_mouse_d
 // panelLayout), above its own handlers. Unpinned (the default), a press outside the panel closes it, and the keyboard
 // stays where that press put it.
 function title() {
-  const t = theme(), space = spaces().find(s => s.active), pinned = shared(PINNED) === true, inner = CORNER - GRIP;
+  const t = theme(), space = spaces().find(s => s.active), panel = open().panel, pinned = shared(PINNED) === true, inner = CORNER - GRIP;
   const tool = (id, tip, on, child, action) => div().id(id).size(26).flex_none().flex().items_center().justify_center().rounded(5)
     .cursor_pointer().tooltip(tip).text_color(on ? t.accent : t.muted).when(on, el => el.bg(t.selected))
     .hover(s => s.bg(t.hover).text_color(on ? t.accent : t.foreground))
@@ -272,7 +280,8 @@ function title() {
     })
     .child(svg(ICON).size(14).flex_none().text_color(t.muted))
     .child(div().flex_none().font_semibold().child("Memo"))
-    .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(space?.name ?? ""))
+    .child(div().id("memo-folder").flex_1().min_w(0).truncate().text_color(t.muted).child(panel?.label || space?.name || "")
+      .when(Boolean(panel?.folder), el => el.tooltip(panel.folder)))
     .child(tool("memo-pin", pinned ? "Unpin memo" : "Pin memo", pinned, svg(PIN).size(16), () => setShared(PINNED, !pinned)))
     .child(tool("memo-close", "Close", false, svg("mods/pane/close.svg").size(16), () => closePanel()))
     .child(gripArea("nw", div().id("memo-corner-nw").absolute().top(0).left(0).size(inner)))

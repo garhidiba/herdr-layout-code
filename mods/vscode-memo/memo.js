@@ -19,16 +19,38 @@ const isWindowsPath = (p) => /^[A-Za-z]:([\\/]|$)/.test(p) || p.startsWith("\\\\
 // `rel` ("a/b") under `folder`, in the folder's own separators.
 export const joinPath = (folder, rel) => (isWindowsPath(folder) ? `${folder}\\${rel.replaceAll("/", "\\")}` : `${folder}/${rel}`);
 
-// A space's memo: { folder, on, path }. The folder is where the space's terminals start (`folder`), else its first
-// terminal's (vscode-explorer's cache.js freshRoot, the other way round, so a `cd` doesn't move the memo); null
-// without either.
-export function memoTarget(space, panes) {
+// The project the memo belongs to, { cwd, on }, picked as the Explorer picks its tree (vscode-explorer's main.js
+// location() and cache.js freshRoot) so both show the same project: the focused terminal's folder (`f`: Herdr's
+// focused(); a terminal block's machine from its address, a pane's from the space). A focused tab without a folder
+// (an editor, a diff, or one of the memo's own editors: `skip`, their addresses) keeps the space's last project
+// (`last`: the caller's { [space id]: root }, which this updates); a space not focused into yet takes its first
+// terminal's folder, else the space's folder. null without any of them.
+export function memoRoot(space, panes, f, last, skip = new Set()) {
   if (!space) return null;
+  const pane = f?.pane ? panes.find(p => p.pane === f.pane) : null;
+  const terminal = f?.pane === null ? f?.terminal : pane?.terminal;
+  const cwd = terminal && skip.has(terminal) ? null : f?.pane === null ? f?.cwd : terminal ? pane.cwd : null;
+  const on = f?.pane === null ? (terminal?.includes("/") ? terminal.split("/")[0] : null) : space.machine ?? null;
+  if (cwd) return (last[space.id] = { cwd, on });
+  if (last[space.id]) return last[space.id];
   const tabs = new Set((space.tabs ?? []).map(t => t.id));
-  const cwd = panes.find(p => tabs.has(p.tab) && p.terminal && p.cwd)?.cwd;
-  const raw = space.folder || cwd || "";
+  const first = panes.find(p => tabs.has(p.tab) && p.terminal && p.cwd);
+  const fresh = first?.cwd || space.folder;
+  return fresh ? { cwd: fresh, on: space.machine ?? null } : null;
+}
+
+// The memo of project `root` ({ cwd, on }): { folder, on, path }, under that folder; null without one.
+export function memoTarget(root) {
+  const raw = root?.cwd ?? "";
   const folder = raw.replace(isWindowsPath(raw) ? /[\\/]+$/ : /\/+$/, "");
-  return folder ? { folder, on: space.machine ?? null, path: joinPath(folder, MEMO) } : null;
+  return folder ? { folder, on: root.on ?? null, path: joinPath(folder, MEMO) } : null;
+}
+
+// What the panel's title says the memo is: its folder's name, after its machine for a remote one.
+export function memoLabel(t) {
+  if (!t) return "";
+  const name = t.folder.slice(Math.max(t.folder.lastIndexOf("/"), t.folder.lastIndexOf("\\")) + 1) || t.folder;
+  return t.on ? `${t.on}: ${name}` : name;
 }
 
 // A remote space's memo editor runs on its machine (as vscode-explorer's remote.js opens remote files): the editor

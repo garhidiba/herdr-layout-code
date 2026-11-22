@@ -46,7 +46,7 @@ A VS Code-style layout for [Herdr](https://herdr.dev): a file explorer, a termin
 - The Commit button turns into Push, Pull, Sync or Publish Branch when nothing is left to commit.
 
 ### Quick memo
-- A round button floating over the window (drag it anywhere) opens a resizable panel with the space's `.herdr/memo.md` in the editor. It saves 0.5 s after each edit and is added to the folder's `.gitignore`.
+- A round button floating over the window (drag it anywhere) opens a resizable panel with `.herdr/memo.md` of the project you work in (the focused terminal's folder, the same project the Explorer shows) in the editor. It saves 0.5 s after each edit and is added to the folder's `.gitignore`.
 - Remote spaces too: the memo opens in the editor on that machine (Linux, macOS or Windows) once the Explorer has installed it there; until then the panel says how.
 
 ### Settings and status bar
