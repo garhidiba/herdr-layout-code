@@ -417,7 +417,11 @@ export default class Viewer extends View {
       .when(Boolean(this.icon), el => el.child(image(`mods/vscode-explorer/icons/${this.icon}.svg`).w(15).h(15).flex_none()))
       .child(div().flex_none().text_color(t.foreground).child(name));
     return v_flex().id("viewer").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
-      .on_size_change(() => this.learnPane(null)).on_mouse_move((e) => this.learnPane(e.bounds))
+      .on_size_change(() => this.learnPane(null))
+      // The CSV sheet's drags follow the pointer across the whole viewer (sheet.js pointerMove).
+      .on_mouse_move((e, cx) => { this.learnPane(e.bounds); this.grid?.pointerMove(e, cx); })
+      .on_mouse_up("left", () => this.grid?.pointerUp())
+      .on_hover((on) => { if (!on) this.grid?.pointerUp(); })
       .on_mouse_down("left", (e) => this.learnPane(e.bounds ?? null))
       .child(h_flex().h(30).flex_none().pl(16).pr(10).gap(6).items_center()
         .child(crumbs)

@@ -56,6 +56,8 @@ export class SheetGrid {
   }
 
   mouseDown(e, cx) {
+    // Where the sheet sits in the window: a drag's moves arrive at the viewer (pointerMove), in window coordinates.
+    if (e.local_position) this.origin = { x: e.position.x - e.local_position.x, y: e.position.y - e.local_position.y };
     const h = this.hit(e.local_position), g = this.g;
     if (this.edit && h?.r === this.edit.r && h?.c === this.edit.c) return;  // a click in the input moves its caret
     this.handle.focus();
@@ -71,15 +73,19 @@ export class SheetGrid {
     cx.notify();
   }
 
-  mouseMove(e, cx) {
+  // A bar or selection drag goes on wherever the pointer is in the viewer, not only over the sheet: moves reach an
+  // element only while it is hovered, and the bars sit on the sheet's edges, so a pointer drifting a few px past one
+  // used to end the drag (the viewer passes its moves here, and its release or the pointer leaving it to pointerUp).
+  pointerMove(e, cx) {
     const t = this.thumb, d = this.drag;
     if (t) return t.axis === "x" ? this.scroll(t.from + (e.position.x - t.at) * t.ratio, this.y, cx) : this.scroll(this.x, t.from + (e.position.y - t.at) * t.ratio, cx);
-    const h = d && this.hit(e.local_position), g = this.g;
+    const h = d && this.origin && this.hit({ x: e.position.x - this.origin.x, y: e.position.y - this.origin.y }), g = this.g;
     if (!h) return;
     const r = Math.max(0, h.r), c = Math.max(0, h.c);
     const next = d.cols != null ? selectCols(d.cols, c, g.rows) : d.rows != null ? selectRows(d.rows, r, g.cols) : extendTo(this.sel, r, c);
     if (JSON.stringify(next) !== JSON.stringify(this.sel)) { this.sel = next; cx.notify(); }
   }
+  pointerUp() { this.thumb = null; this.drag = null; }
 
   move(dr, dc, extend, cx) {
     this.sel = moveBy(this.sel, dr, dc, extend, this.g.rows, this.g.cols);
@@ -266,9 +272,6 @@ export class SheetGrid {
         else this.scroll(this.x - d.x, this.y - d.y, cx);
       })
       .on_mouse_down("left", (e, cx) => this.mouseDown(e, cx))
-      .on_mouse_move((e, cx) => this.mouseMove(e, cx))
-      .on_mouse_up("left", () => { this.thumb = null; this.drag = null; })
-      .on_hover((on) => { if (!on) { this.thumb = null; this.drag = null; } })
       .on_key_down((e, cx) => this.keyDown(e, cx))
       .child(row(LETTERS_H, "", col => cell(columnLabel(col), widths[col]).bg(c.head).text_color(c.dim).text_center()))
       .child(row(ROW_H, "1", col => values(0)(col).bg(c.head).font_bold()))
