@@ -5,7 +5,8 @@
 // saves with Cmd+S ("vscode-viewer.save" in keys.json), flags changes on disk, and shows a VS Code-style status bar.
 // Images open as a preview, videos as a still with Open in Player (from another machine both are fetched first:
 // preview.js); markdown opens rendered, with Edit to switch to the editor; HTML too (as Markdown: html.js), with Open in Browser.
-// CSV and TSV open as a spreadsheet grid of the buffer's text (csv.js, sheet.js), with Edit too.
+// CSV and TSV open as a spreadsheet grid of the buffer's text (csv.js, sheet.js), with Edit too; cells select, copy and
+// edit in place there, writing into the same buffer.
 // Auto save follows files.autoSave in <herdr home>/vscode-settings.json (shared with the terminal editor). A mod can't stop
 // its tab from closing, so unsaved text is kept as a hot-exit backup in close() and offered back on the next open.
 import { View, div, image, PathBuilder, Background } from "gpui-kit";
@@ -15,8 +16,8 @@ import { CACHE, IMAGES, pathHash, statOf as statOn, cachePreview } from "./previ
 import { ImagePanel } from "./image.js";
 import { ownPane, closeOwnArgs } from "./pane.js";
 import { htmlToMarkdown } from "./html.js";
-import { csvRows, sheetOf, delimiterOf } from "./csv.js";
-import { sheetView } from "./sheet.js";
+import { csvRows, sheetOf, delimiterOf, editCells, rowChunks } from "./csv.js";
+import { SheetGrid } from "./sheet.js";
 // Herdr starts with PATH=/usr/bin:/bin, so Homebrew/user tools (node, code, codex, trash) are looked up here too.
 const userExec = (cmd, args, opts) => exec("sh", ["-c", 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; exec "$0" "$@"', cmd, ...args], opts);
 
@@ -64,6 +65,8 @@ function kindOf(name) {
 }
 // Kinds that open rendered, with Edit to switch to the editor.
 const PREVIEWS = ["markdown", "html", "csv"];
+// Rows one sheet change writes per tick (about 0.1 ms each in the app's engine, and a call is cut off near 50 ms).
+const SHEET_CHUNK_ROWS = 80;
 const sizeText = (b) => b < 1024 ? `${b} B` : b < 1048576 ? `${(b / 1024).toFixed(1)} KB` : `${(b / 1048576).toFixed(1)} MB`;
 // `sips -g pixelWidth -g pixelHeight` output -> "W × H" (null when it has none).
 function sipsSize(out) {
@@ -127,7 +130,10 @@ export default class Viewer extends View {
     this.code = null; this.dirty = false; this.conflict = false; this.wrap = false;
     this.error = null; this.table = null; this.language = "Plain Text"; this.facts = null;
     this.kind = p.preview === "html" ? "html" : p.preview ? "markdown" : kindOf(this.file ?? ""); this.preview = PREVIEWS.includes(this.kind); this.img = null;
-    this.sheet = null; this.sheetPos = { x: 0, y: 0, width: 0, height: 0, thumb: null };  // the CSV preview (parseSheet) and its sideways scroll (sheet.js)
+    // The CSV preview: its parsed sheet (parseSheet), its grid (sheet.js) and the sheet's undo/redo (editSheet).
+    this.sheet = null; this.sheetUndo = []; this.sheetRedo = [];
+    if (this.kind === "csv") this.grid = new SheetGrid(cx, { commit: (edits, cx) => this.editSheet(edits, cx),
+      undo: (cx) => this.undoSheet(false, cx), redo: (cx) => this.undoSheet(true, cx) });
     this.autoSave = { mode: "off", delay: 1 }; this.autoToken = 0; this.hadFocus = false; this.restore = null; this.pane = null; this.missing = 0;
     this.load(cx);
     // Every 3 s; a local markdown preview every second, so it follows the terminal editor's saves.
@@ -321,19 +327,67 @@ export default class Viewer extends View {
   // The CSV/TSV preview's sheet (csv.js) of the buffer, parsed again only when it changed, a few ms per tick outside
   // render (a long call there is cut off; a 1 MiB file takes about a second): this.sheet is null until done, while
   // this.sheetRows counts rows read. A newer buffer drops an unfinished parse.
-  parseSheet(cx) {
+  // The sheet's undo stack goes with it, its offsets no longer holding, unless the undo itself asked (`keepUndo`).
+  parseSheet(cx, keepUndo = false) {
     if (this.kind !== "csv" || !this.preview || !this.code || this.sheetSource === this.code.value()) return;
-    const value = this.sheetSource = this.code.value(), rows = [], it = csvRows(value, delimiterOf(this.file));
+    if (!keepUndo) { this.sheetUndo = []; this.sheetRedo = []; }
+    const value = this.sheetSource = this.code.value(), rows = [], starts = [], it = csvRows(value, delimiterOf(this.file), starts);
     this.sheet = null; this.sheetRows = 0;
     cx.spawn(async cx => {
       for (let r = { done: false }; ;) {
         for (const until = Date.now() + 8; Date.now() < until && !(r = it.next()).done;) rows.push(r.value);
         if (this.sheetSource !== value) return;
-        if (r.done) { this.sheet = sheetOf(rows); return cx.notify(); }
+        if (r.done) { this.sheet = sheetOf(rows, starts); return cx.notify(); }
         this.sheetRows = rows.length; cx.notify();
         await cx.sleep(1);
       }
     });
+  }
+
+  // Cell edits from the sheet (sheet.js), written into the buffer as one change (csv.js editCells: only the edited
+  // fields' text) the way typing in the editor would, so dirty, ⌘S, auto save, Edit and the editor's own undo follow.
+  // The sheet updates in place rather than parsing again. Its own ⌘Z/⌘⇧Z stack keeps each change's before and after.
+  // Many rows (a cleared column, a big paste) go a chunk of rows per tick, each its own change, since a long call is cut
+  // off; the sheet's undo takes them back together. Another commit waits for a chunked one to finish (returns false).
+  editSheet(edits, cx) {
+    if (this.on || !this.sheet || !this.code || this.sheetBusy || this.code.value() !== this.sheetSource) return false;
+    const group = [], chunks = rowChunks(edits, SHEET_CHUNK_ROWS), sep = delimiterOf(this.file);
+    const step = (chunk) => {
+      const text = this.code.value();
+      if (text !== this.sheetSource) return false;  // changed elsewhere meanwhile: a parse is on its way
+      const ch = editCells(text, this.sheet, sep, chunk);
+      if (ch) {
+        this.applySheetChange(ch.start, ch.end, ch.insert);
+        group.push({ start: ch.start, before: text.slice(ch.start, ch.end), after: ch.insert });
+        this.sheetSource = this.code.value();
+      }
+      return true;
+    };
+    const done = () => { if (group.length) { this.sheetUndo.push(group); this.sheetRedo = []; } this.sheetBusy = false; };
+    step(chunks.shift());
+    if (!chunks.length) { done(); cx.notify(); return true; }
+    this.sheetBusy = true;
+    cx.spawn(async cx => {
+      try { while (chunks.length) { cx.notify(); await cx.sleep(1); if (!step(chunks.shift())) break; } }
+      finally { done(); cx.notify(); }
+    });
+    return true;
+  }
+  applySheetChange(start, end, insert) { this.code.set_selected_range({ start, end }); this.code.replace(insert); }
+  // Undo (or redo) the sheet's last commit, its changes in reverse (or in order); the sheet is parsed again after it.
+  // A buffer changed since another way (the editor, the disk) drops the stacks.
+  undoSheet(redo, cx) {
+    if (!this.code || this.on || this.sheetBusy) return;
+    if (this.code.value() !== this.sheetSource) { this.sheetUndo = []; this.sheetRedo = []; return; }
+    const group = (redo ? this.sheetRedo : this.sheetUndo).pop();
+    if (!group) return;
+    for (const op of redo ? group : [...group].reverse()) {
+      const [now, then] = redo ? [op.before, op.after] : [op.after, op.before];
+      this.applySheetChange(op.start, op.start + now.length, then);
+    }
+    (redo ? this.sheetUndo : this.sheetRedo).push(group);
+    this.parseSheet(cx, true);
+    cx.notify();
   }
 
   body(t) {
@@ -344,7 +398,7 @@ export default class Viewer extends View {
       : div().p(12).text_color(t.dim).child(this.error || this.fetching || `Loading ${this.kind}…`);
     if (!this.code) return div().p(12).text_color(t.dim).child(this.error || "Loading file…");
     if (this.preview && this.kind === "csv") return this.sheet?.cols
-      ? sheetView(this.sheet, { bg: EDITOR_BG, fg: EDITOR_FG, grid: t.border, head: t.chrome, dim: t.dim }, this.sheetPos)
+      ? this.grid.render(this.sheet, { bg: EDITOR_BG, fg: EDITOR_FG, grid: t.border, head: t.chrome, dim: t.dim, accent: t.accent ?? "#61afef" }, Boolean(this.on))
       : div().flex_1().p(12).bg(EDITOR_BG).text_color(t.dim).child(this.sheet ? "Empty file" : `Reading rows… ${(this.sheetRows ?? 0).toLocaleString()}`);
     if (this.preview) return TextView.markdown("preview", this.kind === "html" ? this.htmlText(this.code.value()) : this.code.value()).scrollable(true).selectable(true)
       .flex_1().min_h(0).px(28).py(16).bg(EDITOR_BG).text_color(EDITOR_FG).text_size(14);
