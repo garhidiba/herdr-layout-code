@@ -18,13 +18,14 @@ export function sheetView(s, c, pos) {
   const { first, end, shift } = visibleColumns(s.widths, pos.x, view), cols = [];
   for (let col = first; col < end; col++) cols.push(col);
   const cell = (text, w) => div().w(w).flex_none().px(6).border_r(1).border_color(c.grid).truncate().child(text);
-  // One grid line: its number, then the columns on screen, cut at the viewport's edges.
-  const row = (h, label, cellAt) => h_flex().h(h).flex_none().line_height(h - 1).border_b(1).border_color(c.grid)
+  // One grid line: its number, then the columns on screen, cut at the viewport's edges. The line height is a px string:
+  // a bare number is a multiplier of the font size, which made every line many rows tall.
+  const row = (h, label, cellAt) => h_flex().h(h).flex_none().overflow_hidden().line_height(`${h - 1}px`).border_b(1).border_color(c.grid)
     .child(cell(label, numW).bg(c.head).text_color(c.dim).text_right())
     .child(div().flex_1().min_w(0).h_full().overflow_hidden().child(h_flex().h_full().relative().left(-shift).children(cols.map(cellAt))));
   const move = (x, cx) => { x = clampX(x, total, view); if (x !== pos.x) { pos.x = x; cx.notify(); } };
   const thumbW = Math.max(24, view * view / Math.max(total, 1)), over = total - view;
-  return div().id("csv-sheet").relative().flex_1().min_h(0).flex().flex_col().bg(c.bg).text_color(c.fg).text_size(12.5)
+  return div().id("csv-sheet").relative().flex_1().min_h(0).overflow_hidden().flex().flex_col().bg(c.bg).text_color(c.fg).text_size(12.5)
     .on_size_change((size, cx) => { if (size.width !== pos.width) { pos.width = size.width; cx.notify(); } })
     .on_scroll_wheel((e, cx) => {
       const d = e.delta_lines ? { x: e.delta_lines.x * 40, y: e.delta_lines.y * 40 } : e.delta;
