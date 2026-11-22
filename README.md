@@ -47,7 +47,7 @@ A VS Code-style layout for [Herdr](https://herdr.dev): a file explorer, a termin
 
 ### Quick memo
 - A round button floating over the window (drag it anywhere) opens a resizable panel with the space's `.herdr/memo.md` in the editor. It saves 0.5 s after each edit and is added to the folder's `.gitignore`.
-- Local spaces only: a remote space shows "Memo is local-only for now."
+- Remote spaces too: the memo opens in the editor on that machine (Linux, macOS or Windows) once the Explorer has installed it there; until then the panel says how.
 
 ### Settings and status bar
 - A VS Code-style Settings dialog (gear or `cmd-,`): auto save, format on save, tab size, inline suggestions, word wrap and the core and editor engines.

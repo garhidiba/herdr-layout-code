@@ -1,6 +1,7 @@
 // The memo's pure rules: where a space's memo lives, the panel's rect (window coordinates, logical px) as it opens and
-// while it is moved or resized, its window's layout, and the .gitignore line that keeps the memo out of git. No Herdr
-// imports, so node tests load it.
+// while it is moved or resized, its window's layout, the .gitignore line that keeps the memo out of git, and the
+// commands that make a remote space's memo and start its editor on that machine. No Herdr imports, so node tests
+// load it.
 
 // Each space's memo, under its folder.
 export const MEMO = ".herdr/memo.md";
@@ -13,6 +14,11 @@ export const MIN = { width: 260, height: 160 };
 // A press becomes a drag past this many px (vscode-tabs' drag.js THRESHOLD).
 export const dragStarted = (from, to) => Math.hypot(to.x - from.x, to.y - from.y) > 4;
 
+// A Windows path (a remote Windows machine's space: `C:\project\app`, or a UNC share).
+const isWindowsPath = (p) => /^[A-Za-z]:([\\/]|$)/.test(p) || p.startsWith("\\\\");
+// `rel` ("a/b") under `folder`, in the folder's own separators.
+export const joinPath = (folder, rel) => (isWindowsPath(folder) ? `${folder}\\${rel.replaceAll("/", "\\")}` : `${folder}/${rel}`);
+
 // A space's memo: { folder, on, path }. The folder is where the space's terminals start (`folder`), else its first
 // terminal's (vscode-explorer's cache.js freshRoot, the other way round, so a `cd` doesn't move the memo); null
 // without either.
@@ -20,9 +26,98 @@ export function memoTarget(space, panes) {
   if (!space) return null;
   const tabs = new Set((space.tabs ?? []).map(t => t.id));
   const cwd = panes.find(p => tabs.has(p.tab) && p.terminal && p.cwd)?.cwd;
-  const folder = (space.folder || cwd || "").replace(/\/+$/, "");
-  return folder ? { folder, on: space.machine ?? null, path: `${folder}/${MEMO}` } : null;
+  const raw = space.folder || cwd || "";
+  const folder = raw.replace(isWindowsPath(raw) ? /[\\/]+$/ : /\/+$/, "");
+  return folder ? { folder, on: space.machine ?? null, path: joinPath(folder, MEMO) } : null;
 }
+
+// A remote space's memo editor runs on its machine (as vscode-explorer's remote.js opens remote files): the editor
+// bundle the Explorer installed there (<root>/<version>/, newest first), started straight with its own environment
+// rather than through the bundle's launcher, which would write the memo's settings over <root>/vscode-settings.json
+// that the machine's other editors read. One round trip (`sh`, else PowerShell for Windows and Git Bash's uname)
+// makes .herdr/ and the memo, writes the memo's settings to <root>/vscode-memo-settings.json and prints the version
+// folder; exit 3 when the editor isn't installed, 9 when the machine is Windows. Values go in as arguments ("$1")
+// or validated single-quoted PowerShell literals, never into script text.
+export const MEMO_SETTINGS_FILE = "vscode-memo-settings.json";
+export const REMOTE_PREPARE = `set -eu
+case $(uname -s) in MINGW*|MSYS*|CYGWIN*|Windows_NT*) exit 9 ;; esac
+mkdir -p "$(dirname "$1")"
+[ -e "$1" ] || : > "$1"
+root=$HOME/.local/share/herdr-vscode
+ver=$(ls -1t "$root" 2>/dev/null | grep -E '^[0-9]+[.][0-9]+[.][0-9]+-[0-9a-f]{12}$' | while IFS= read -r v; do if [ -f "$root/$v/manifest.json" ]; then echo "$v"; break; fi; done || true)
+[ -n "$ver" ] || { echo "no editor in $root" >&2; exit 3; }
+printf '%s' "$2" > "$root/${MEMO_SETTINGS_FILE}.tmp.$$" && mv -f "$root/${MEMO_SETTINGS_FILE}.tmp.$$" "$root/${MEMO_SETTINGS_FILE}"
+printf '%s\\n' "$root/$ver"`;
+export const NOT_INSTALLED = 3, WINDOWS = 9;
+
+// A PowerShell single-quoted literal, and -EncodedCommand's text (UTF-16LE, base64): vscode-explorer's remote.js
+// psQuote and encodeCommand (mods don't import each other).
+export const psQuote = (s) => `'${String(s).replace(/['‘’‚‛]/g, "$&$&")}'`;
+export function encodeCommand(script) {
+  const bytes = [];
+  for (let i = 0; i < script.length; i++) { const c = script.charCodeAt(i); bytes.push(c & 0xff, c >> 8); }
+  const abc = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  let out = "";
+  for (let i = 0; i < bytes.length; i += 3) {
+    const [a, b = 0, c = 0] = bytes.slice(i, i + 3), n = (a << 16) | (b << 8) | c;
+    out += abc[n >> 18] + abc[(n >> 12) & 63] + (i + 1 < bytes.length ? abc[(n >> 6) & 63] : "=") + (i + 2 < bytes.length ? abc[n & 63] : "=");
+  }
+  return out;
+}
+const POWERSHELL = ["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand"];
+const windowsValue = (p) => {
+  if (!/^([A-Za-z]:\\|\\\\)[^\x00-\x1f]*$/.test(p)) throw new Error(`not a Windows path: ${p}`);
+  return psQuote(p);
+};
+
+// REMOTE_PREPARE on Windows (%LOCALAPPDATA%\herdr-vscode), as [program, args]. A settings text too long for a
+// command line (32767 characters) is left for the memo's own settings alone.
+export function windowsPrepare(path, settings) {
+  const script = (text) => `$ErrorActionPreference = 'Stop'
+$memo = ${windowsValue(path)}; $settings = ${psQuote(text)}
+[IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($memo)) | Out-Null
+if (-not [IO.File]::Exists($memo)) { [IO.File]::WriteAllText($memo, '') }
+$root = Join-Path $env:LOCALAPPDATA 'herdr-vscode'
+$dir = Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
+  Where-Object { $_.Name -match '^[0-9]+[.][0-9]+[.][0-9]+-[0-9a-f]{12}$' -and (Test-Path -LiteralPath (Join-Path $_.FullName 'manifest.json')) } |
+  Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if (-not $dir) { [Console]::Error.WriteLine("no editor in $root"); exit ${NOT_INSTALLED} }
+[IO.File]::WriteAllText((Join-Path $root '${MEMO_SETTINGS_FILE}'), $settings, (New-Object Text.UTF8Encoding $false))
+$dir.FullName`;
+  let encoded = encodeCommand(script(settings));
+  if (encoded.length > 30000) encoded = encodeCommand(script(memoSettings(null)));
+  return [POWERSHELL[0], [...POWERSHELL.slice(1), encoded]];
+}
+
+// The version folder REMOTE_PREPARE (either) printed, else null.
+export const preparedDir = (stdout) => String(stdout ?? "").split(/\r?\n/).map(l => l.trim()).filter(Boolean).pop() ?? null;
+
+// Appending `text` to the remote file `file` (a .gitignore), as [program, args].
+export const appendCommand = (os, file, text) => (os === "windows"
+  ? [POWERSHELL[0], [...POWERSHELL.slice(1), encodeCommand(`[IO.File]::AppendAllText(${windowsValue(file)}, ${psQuote(text)})`)]]
+  : ["sh", ["-c", 'printf %s "$2" >> "$1"', "sh", file, text]]);
+
+// The argv starting the memo editor of `path` from the bundle's version folder `dir` on a machine of `os`, with the
+// keys `keys` (VSEDIT_OS: the computer the keyboard is on). The environment is the bundle launcher's
+// (vscode-settings/native/remote-vsedit.sh / .ps1), but with the memo's settings file.
+export function remoteEditorArgv(os, dir, path, keys) {
+  if (os === "windows") {
+    const script = `$dir = ${windowsValue(dir)}; $root = Split-Path -Parent $dir
+$env:HERDR_APP_HOME = $root; $env:VSEDIT_SETTINGS = Join-Path $root '${MEMO_SETTINGS_FILE}'
+$env:VSEDIT_KEYBINDINGS = Join-Path $root 'vscode-keybindings.json'; $env:VSEDIT_BACKUPS = Join-Path $root 'backups'
+$env:VSEDIT_OS = ${psQuote(keys)}
+& (Join-Path $dir 'vsedit.exe') --vscode (Join-Path $dir 'vscode') ${windowsValue(path)}
+exit $LASTEXITCODE`;
+    return ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodeCommand(script)];
+  }
+  const root = dir.slice(0, dir.lastIndexOf("/"));
+  return ["/usr/bin/env", `HERDR_APP_HOME=${root}`, `VSEDIT_SETTINGS=${root}/${MEMO_SETTINGS_FILE}`,
+    `VSEDIT_KEYBINDINGS=${root}/vscode-keybindings.json`, `VSEDIT_BACKUPS=${root}/backups`, `VSEDIT_OS=${keys}`,
+    `${dir}/vsedit`, "--vscode", `${dir}/vscode`, path];
+}
+
+// The keys of the computer the keyboard is on (Herdr's window().platform), for VSEDIT_OS (vscode-explorer's keysOs).
+export const keysOs = (platform) => (platform === "macos" ? "mac" : platform === "windows" ? "win" : "linux");
 
 // `r` kept inside the window `win` ({ width, height }), no larger than it; with the window's size unknown, only off
 // its top and left edges.

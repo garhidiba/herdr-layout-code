@@ -1,7 +1,12 @@
 // node --test mods/vscode-memo/test/memo.test.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MEMO, MIN, MEMO_SETTINGS, GRIP, CORNER, FOOT, DEFAULT_POS, buttonRect, buttonPos, panelLayout, closesOnPress, memoTarget, clampRect, dragRect, panelRect, gitignoreAddition, dragStarted, memoSettings } from "../memo.js";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { MEMO, MIN, MEMO_SETTINGS, GRIP, CORNER, FOOT, DEFAULT_POS, buttonRect, buttonPos, panelLayout, closesOnPress, memoTarget, clampRect, dragRect, panelRect, gitignoreAddition, dragStarted, memoSettings,
+  joinPath, REMOTE_PREPARE, NOT_INSTALLED, WINDOWS, MEMO_SETTINGS_FILE, preparedDir, windowsPrepare, psQuote, encodeCommand, remoteEditorArgv, keysOs, appendCommand } from "../memo.js";
 
 const panes = [
   { pane: "p1", tab: "t1", terminal: null, mod: "vscode-viewer", cwd: null },
@@ -120,4 +125,111 @@ test("the memo editor keeps the user's settings, cut down to a document editor",
   assert.equal(s["workbench.statusBar.visible"], false);
   assert.deepEqual(JSON.parse(memoSettings(null)), MEMO_SETTINGS);
   assert.deepEqual(JSON.parse(memoSettings("not json")), MEMO_SETTINGS);
+});
+
+test("a Windows space's memo uses backslashes; a Unix space's slashes", () => {
+  assert.deepEqual(memoTarget({ id: "win/s1", folder: "C:\\project\\refine-mods\\", machine: "win-amd64", tabs: [] }, panes),
+    { folder: "C:\\project\\refine-mods", on: "win-amd64", path: "C:\\project\\refine-mods\\.herdr\\memo.md" });
+  assert.equal(memoTarget({ id: "w/s2", folder: "C:/w", machine: "w", tabs: [] }, panes).path, "C:/w\\.herdr\\memo.md");
+  assert.equal(joinPath("\\\\nas\\share", ".gitignore"), "\\\\nas\\share\\.gitignore");
+  assert.equal(joinPath("/srv/app", ".gitignore"), "/srv/app/.gitignore");
+  // A Unix folder keeps a backslash that is part of its name.
+  assert.equal(memoTarget({ id: "s5", folder: "/w/a\\", machine: null, tabs: [] }, panes).path, "/w/a\\/.herdr/memo.md");
+});
+
+// REMOTE_PREPARE run here as on a Linux machine, with $HOME a temp folder.
+const prepare = (home, path, settings = "{}") => spawnSync("sh", ["-c", REMOTE_PREPARE, "sh", path, settings],
+  { env: { ...process.env, HOME: home }, encoding: "utf8" });
+
+test("on a Unix machine without the editor, the memo is made and the install is asked for", () => {
+  const home = mkdtempSync(join(tmpdir(), "memo-")), path = join(home, "app", ".herdr", "memo.md");
+  try {
+    const r = prepare(home, path);
+    assert.equal(r.status, NOT_INSTALLED);
+    assert.equal(readFileSync(path, "utf8"), "");
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test("on a Unix machine with the editor, the newest complete version is used and the memo's settings written beside it", () => {
+  const home = mkdtempSync(join(tmpdir(), "memo-")), root = join(home, ".local/share/herdr-vscode");
+  const path = join(home, "app", ".herdr", "memo.md");
+  try {
+    mkdirSync(join(root, "1.0.0-aaaaaaaaaaaa"), { recursive: true });
+    writeFileSync(join(root, "1.0.0-aaaaaaaaaaaa", "manifest.json"), "{}");
+    mkdirSync(join(root, "1.0.1-bbbbbbbbbbbb")); // still installing: no manifest
+    mkdirSync(join(root, ".install.x"));
+    writeFileSync(join(root, "vscode-settings.json"), "user");
+    mkdirSync(join(home, "app", ".herdr"), { recursive: true });
+    writeFileSync(path, "kept");
+    const r = prepare(home, path, '{"editor.wordWrap": "on"}');
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(preparedDir(r.stdout), join(root, "1.0.0-aaaaaaaaaaaa"));
+    assert.equal(readFileSync(path, "utf8"), "kept");
+    assert.equal(readFileSync(join(root, MEMO_SETTINGS_FILE), "utf8"), '{"editor.wordWrap": "on"}');
+    assert.equal(readFileSync(join(root, "vscode-settings.json"), "utf8"), "user"); // the other editors' settings
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test("a Windows machine's sh (Git Bash) hands over to PowerShell before writing anything", () => {
+  const home = mkdtempSync(join(tmpdir(), "memo-")), path = join(home, "app", ".herdr", "memo.md");
+  try {
+    mkdirSync(join(home, "bin"));
+    writeFileSync(join(home, "bin", "uname"), "#!/bin/sh\necho MINGW64_NT-10.0-26300\n", { mode: 0o755 });
+    const r = spawnSync("sh", ["-c", REMOTE_PREPARE, "sh", path, "{}"],
+      { env: { ...process.env, HOME: home, PATH: `${join(home, "bin")}:${process.env.PATH}` }, encoding: "utf8" });
+    assert.equal(r.status, WINDOWS);
+    assert.equal(existsSync(join(home, "app")), false);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test("the version folder is the last line printed, CRLF or not", () => {
+  assert.equal(preparedDir("C:\\L\\herdr-vscode\\1.0.0-8b1da81ce8af\r\n"), "C:\\L\\herdr-vscode\\1.0.0-8b1da81ce8af");
+  assert.equal(preparedDir(""), null);
+});
+
+const decode = (b64) => Buffer.from(b64, "base64").toString("utf16le");
+
+test("on Windows the memo is prepared through PowerShell with its values quoted, never spliced", () => {
+  const [program, args] = windowsPrepare("C:\\p\\it's\\.herdr\\memo.md", '{"a": "b\'c"}');
+  assert.equal(program, "powershell");
+  assert.deepEqual(args.slice(0, 3), ["-NoProfile", "-NonInteractive", "-EncodedCommand"]);
+  const script = decode(args[3]);
+  assert.ok(script.includes("$memo = 'C:\\p\\it''s\\.herdr\\memo.md'"));
+  assert.ok(script.includes(`$settings = '{"a": "b''c"}'`));
+  assert.ok(script.includes(MEMO_SETTINGS_FILE));
+  assert.ok(script.includes(`exit ${NOT_INSTALLED}`));
+  // Too long for a command line: the memo's own settings only.
+  assert.ok(decode(windowsPrepare("C:\\p\\memo.md", "x".repeat(20000))[1][3]).includes(psQuote(memoSettings(null))));
+  assert.throws(() => windowsPrepare("/not/windows", "{}"));
+  assert.throws(() => windowsPrepare("C:\\a\nb", "{}"));
+});
+
+test("PowerShell's -EncodedCommand is UTF-16LE base64", () => {
+  for (const s of ["", "a", "ab", "abc", "한글 'x'"]) assert.equal(encodeCommand(s), Buffer.from(s, "utf16le").toString("base64"));
+});
+
+test("the remote memo editor starts from the installed bundle with the memo's settings, not the launcher's", () => {
+  const root = "/root/.local/share/herdr-vscode", dir = `${root}/1.0.0-aaaaaaaaaaaa`;
+  assert.deepEqual(remoteEditorArgv("unix", dir, "/srv/.herdr/memo.md", "mac"), [
+    "/usr/bin/env", `HERDR_APP_HOME=${root}`, `VSEDIT_SETTINGS=${root}/${MEMO_SETTINGS_FILE}`,
+    `VSEDIT_KEYBINDINGS=${root}/vscode-keybindings.json`, `VSEDIT_BACKUPS=${root}/backups`, "VSEDIT_OS=mac",
+    `${dir}/vsedit`, "--vscode", `${dir}/vscode`, "/srv/.herdr/memo.md"]);
+  const argv = remoteEditorArgv("windows", "C:\\L\\herdr-vscode\\1.0.0-8b1da81ce8af", "C:\\project\\.herdr\\memo.md", "mac");
+  assert.deepEqual(argv.slice(0, 5), ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand"]);
+  const script = decode(argv[5]);
+  assert.ok(script.includes("$dir = 'C:\\L\\herdr-vscode\\1.0.0-8b1da81ce8af'"));
+  assert.ok(script.includes("$env:VSEDIT_SETTINGS = Join-Path $root 'vscode-memo-settings.json'"));
+  assert.ok(script.includes("$env:VSEDIT_OS = 'mac'"));
+  assert.ok(script.includes("& (Join-Path $dir 'vsedit.exe') --vscode (Join-Path $dir 'vscode') 'C:\\project\\.herdr\\memo.md'"));
+  assert.equal(keysOs("macos"), "mac");
+  assert.equal(keysOs("windows"), "win");
+  assert.equal(keysOs("linux"), "linux");
+});
+
+test("a remote .gitignore is appended to with the machine's own shell", () => {
+  assert.deepEqual(appendCommand("unix", "/srv/.gitignore", "x\n"), ["sh", ["-c", 'printf %s "$2" >> "$1"', "sh", "/srv/.gitignore", "x\n"]]);
+  assert.equal(appendCommand(null, "/srv/.gitignore", "x\n")[0], "sh");
+  const [program, args] = appendCommand("windows", "C:\\p\\.gitignore", ".herdr/memo.md\n");
+  assert.equal(program, "powershell");
+  assert.equal(decode(args.at(-1)), "[IO.File]::AppendAllText('C:\\p\\.gitignore', '.herdr/memo.md\n')");
 });

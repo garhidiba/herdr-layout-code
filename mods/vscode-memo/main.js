@@ -13,13 +13,15 @@
 //
 // The editor's terminal is started off screen with `hc run --bg` (no Herdr labels: no tab shows it, as
 // vscode-explorer's warm editors) and kept running per memo file, so closing the panel or switching spaces never ends
-// it; it saves itself 0.5 s after each edit.
+// it; it saves itself 0.5 s after each edit. A remote space's runs on its machine (`hc run --on`), from the editor
+// bundle the Explorer installs there (memo.js REMOTE_PREPARE); until it is installed the panel says so.
 import { View, div, svg } from "gpui-kit";
 import { h_flex } from "gpui-base";
 import { props, openOverlay, closeOverlay, shared, setShared, spaces, panes, terminals, theme, hc, exec, appHome,
-  readTextFile, writeTextFile, nextCommand, run, focused } from "herdr";
-import { BUTTON, MIN, CORNER, GRIP, memoTarget, clampRect, dragRect, buttonRect, buttonPos, closesOnPress, panelRect,
-  panelLayout, gitignoreAddition, memoSettings, dragStarted } from "./memo.js";
+  readTextFile, writeTextFile, nextCommand, run, focused, window } from "herdr";
+import { BUTTON, MIN, CORNER, GRIP, MEMO, memoTarget, clampRect, dragRect, buttonRect, buttonPos, closesOnPress, panelRect,
+  panelLayout, gitignoreAddition, memoSettings, dragStarted, joinPath, MEMO_SETTINGS_FILE, REMOTE_PREPARE, NOT_INSTALLED,
+  WINDOWS, windowsPrepare, preparedDir, appendCommand, remoteEditorArgv, keysOs } from "./memo.js";
 
 const POS = "vscode-memo.button";     // { right, bottom }: the button's spot, from the window's bottom-right corner
 const PANEL = "vscode-memo.panel";    // { x, y, width, height }: the panel's
@@ -97,8 +99,8 @@ class Host {
     cx.spawn(async (cx) => {
       try {
         const t = memoTarget(spaces().find(s => s.active), panes());
-        const note = !t ? "This space has no folder for a memo." : t.on ? "Memo is local-only for now." : null;
-        const address = note ? null : await this.editor(t, cx).catch(() => null);
+        let note = !t ? "This space has no folder for a memo." : null;
+        const address = note ? null : await this.editor(t, cx).catch((e) => { note = e?.message ?? null; return null; });
         const rect = panelRect(shared(PANEL), open().button?.rect, shared(WIN));
         setShared(PANEL, rect);
         // Where the keyboard was before the panel first opened, for closing it.
@@ -120,39 +122,65 @@ class Host {
   }
 
   // The running editor of memo `t`, else a new one: .herdr/ and the file made, the memo ignored by git, the editor's
-  // settings written, then vsedit started off screen; its address once Herdr lists it.
+  // settings written, then vsedit started off screen (on the space's machine for a remote one); its address once
+  // Herdr lists it. Throws with what to show instead when a remote machine can't run it.
   async editor(t, cx) {
-    const known = (shared(EDITORS) ?? {})[t.path];
+    const key = memoKey(t), known = (shared(EDITORS) ?? {})[key];
     if (live(known)) return known;
-    await exec("sh", ["-c", 'mkdir -p "$(dirname "$1")" && touch "$1"', "sh", t.path]);
-    await this.ignore(t).catch(() => {});
-    const file = `${appHome()}/vscode-memo-settings.json`;
     const user = await readTextFile(`${appHome()}/vscode-settings.json`).catch(() => null);
-    await writeTextFile(file, memoSettings(user), await readTextFile(file).catch(() => null));
-    const r = await hc(["run", "--bg", "--json", "--no-parent", "--rm", "--cwd", t.folder, "--label", "vscode-memo=1", "--",
-      "/usr/bin/env", `VSEDIT_SETTINGS=${file}`, "/bin/sh", `${appHome()}/mods/vscode-viewer/editor/vsedit.sh`, t.path]);
-    const address = r.code === 0 ? JSON.parse(r.stdout).address : null;
+    let argv, os = null;
+    if (t.on) {
+      ({ argv, os } = await this.remote(t, memoSettings(user)));
+    } else {
+      await exec("sh", ["-c", 'mkdir -p "$(dirname "$1")" && touch "$1"', "sh", t.path]);
+      const file = `${appHome()}/${MEMO_SETTINGS_FILE}`;
+      await writeTextFile(file, memoSettings(user), await readTextFile(file).catch(() => null));
+      argv = ["/usr/bin/env", `VSEDIT_SETTINGS=${file}`, "/bin/sh", `${appHome()}/mods/vscode-viewer/editor/vsedit.sh`, t.path];
+    }
+    await this.ignore(t, os).catch(() => {});
+    const r = await hc(["run", "--bg", "--json", "--no-parent", "--rm", ...(t.on ? ["--on", t.on] : []), "--cwd", t.folder,
+      "--label", "vscode-memo=1", "--", ...argv]);
+    let address = null;
+    try { address = r.code === 0 ? JSON.parse(r.stdout).address : null; } catch {}
     for (let waited = 0; address && !live(address) && waited < 3000; waited += 25) await cx.sleep(25);
     if (!live(address)) return null;
     // Editors of memos no space shows any more end; the rest stay for the next open.
-    const memos = new Set(spaces().map(s => memoTarget(s, panes())?.path));
+    const memos = new Set(spaces().map(s => memoKey(memoTarget(s, panes()))));
     const kept = {};
-    for (const [path, a] of Object.entries({ ...(shared(EDITORS) ?? {}), [t.path]: address })) {
-      if (memos.has(path) && live(a)) kept[path] = a; else if (live(a)) hc(["kill", a]).catch(() => {});
+    for (const [k, a] of Object.entries({ ...(shared(EDITORS) ?? {}), [key]: address })) {
+      if (memos.has(k) && live(a)) kept[k] = a; else if (live(a)) hc(["kill", a]).catch(() => {});
     }
     setShared(EDITORS, kept);
     return address;
   }
 
+  // On the remote space's machine: the memo made and its settings written (memo.js REMOTE_PREPARE, through
+  // PowerShell on Windows), and the argv starting the editor the Explorer installed there.
+  async remote(t, settings) {
+    const on = { on: t.on }, fail = (r) => {
+      if (r.code === NOT_INSTALLED) return new Error(`The editor isn't installed on ${t.on} yet. Open a file of this space from the Explorer to install it, then open the memo again.`);
+      return new Error(`Memo on ${t.on}: ${r.stderr.trim() || `exited with ${r.code}`}`);
+    };
+    let os = "unix", r = await exec("sh", ["-c", REMOTE_PREPARE, "sh", t.path, settings], on).catch(() => null);
+    if (!r || r.code === WINDOWS || r.code === 127) {
+      os = "windows";
+      const [program, args] = windowsPrepare(t.path, settings);
+      r = await exec(program, args, on);
+    }
+    const dir = r.code === 0 ? preparedDir(r.stdout) : null;
+    if (!dir) throw fail(r);
+    return { os, argv: remoteEditorArgv(os, dir, t.path, keysOs(window().platform)) };
+  }
+
   // A folder with a .gitignore gets `.herdr/memo.md` appended once, unless git (else a line of it) ignores the memo.
-  // Appended only: the rest of the file is never written.
-  async ignore(t) {
-    const gitignore = `${t.folder}/.gitignore`;
-    const text = await readTextFile(gitignore);
+  // Appended only: the rest of the file is never written. `os`: a remote space's machine's ("unix", "windows").
+  async ignore(t, os) {
+    const on = { on: t.on }, gitignore = joinPath(t.folder, ".gitignore");
+    const text = await readTextFile(gitignore, on);
     if (text === null) return;
-    const r = await exec("git", ["-C", t.folder, "check-ignore", "-q", ".herdr/memo.md"]).catch(() => null);
+    const r = await exec("git", ["-C", t.folder, "check-ignore", "-q", MEMO], on).catch(() => null);
     const add = gitignoreAddition(text, r?.code === 0 ? true : r?.code === 1 ? false : null);
-    if (add) await exec("sh", ["-c", 'printf %s "$2" >> "$1"', "sh", gitignore, add]);
+    if (add) { const [program, args] = appendCommand(os, gitignore, add); await exec(program, args, on); }
   }
 
   render(cx) {
