@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { register } from "node:module";
 import { texts, handler, fakeCx } from "./gpui-stub.mjs";
 import { sheetOf } from "../csv.js";
-import { selectCell } from "../selection.js";
+import { selectCell, rectOf } from "../selection.js";
 
 register("./gpui-loader.mjs", import.meta.url);
 const { SheetGrid } = await import("../sheet.js");
@@ -14,19 +14,19 @@ const COLORS = { bg: "#000", fg: "#fff", grid: "#333", head: "#111", dim: "#888"
 
 // A 600 x 400 grid of `rows` with every column 100 px wide (row numbers 40 px); commits are recorded.
 function gridOf(rows, readonly = false) {
-  const commits = [], cx = fakeCx();
-  const grid = new SheetGrid(cx, { commit: (edits) => { commits.push(edits); return true; }, undo() {}, redo() {} });
+  const commits = [], reshapes = [], cx = fakeCx();
+  const grid = new SheetGrid(cx, { commit: (edits) => { commits.push(edits); return true; }, reshape: (op) => { reshapes.push(op); return true; }, undo() {}, redo() {} });
   const sheet = sheetOf(rows);
   sheet.widths = sheet.widths.map(() => 100);
   grid.width = 600; grid.height = 400;
   const draw = () => cx.rendering(() => grid.render(sheet, COLORS, readonly, cx));
   draw();
-  return { grid, sheet, commits, cx, draw };
+  return { grid, sheet, commits, reshapes, cx, draw };
 }
 const table = (n, cols = 10) => [Array.from({ length: cols }, (_, c) => `h${c}`), ...Array.from({ length: n }, (_, r) => Array.from({ length: cols }, (_, c) => `r${r + 1}c${c}`))];
 
 test("the toolbar says how to edit, or that the file is read-only", () => {
-  assert.ok(texts(gridOf(table(3)).draw()).includes("Double-click, Enter or type to edit a cell"));
+  assert.ok(texts(gridOf(table(3)).draw()).includes("Double-click, Enter or type to edit a cell; right-click for rows and columns"));
   assert.ok(texts(gridOf(table(3), true).draw()).includes("Read-only (remote)"));
 });
 
@@ -299,4 +299,80 @@ test("⌃D fills down from the selection's first row, ⌘R right from its first 
   grid.sel = selectCell(2, 2);
   grid.keyDown(cmdKey("r"), cx);
   assert.deepEqual(commits.pop(), [{ r: 2, c: 2, value: "r2c1" }], "one cell takes the one left of it");
+});
+
+const altCmd = (k) => cmdKey(k, { alt: true });
+
+test("⌥⌘= inserts as many blank rows above the selection as it spans, ⌥⌘- deletes its rows", () => {
+  const { grid, reshapes, cx } = gridOf(table(5, 2));
+  grid.sel = range(2, 0, 3, 1);
+  grid.keyDown(altCmd("="), cx);
+  assert.deepEqual(reshapes.pop(), { insertRows: 2, values: [["", ""], ["", ""]] });
+  grid.keyDown(altCmd("-"), cx);
+  assert.deepEqual(reshapes.pop(), { deleteRows: [2, 3] });
+});
+
+test("with whole columns selected, ⌥⌘= and ⌥⌘- insert and delete columns, and widths and filters move with them", () => {
+  const { grid, reshapes, cx, draw } = gridOf(table(5, 4));
+  drag(grid, cx, 440, 480);  // column D 140 px wide
+  grid.filters.set(3, "x");
+  grid.sel = range(0, 1, 5, 2);  // columns B..C from the letters
+  draw();
+  grid.keyDown(altCmd("="), cx);
+  assert.deepEqual(reshapes.pop(), { insertCols: 1, count: 2 });
+  assert.deepEqual([...grid.widthOf], [[5, 140]]);
+  assert.deepEqual([...grid.filters], [[5, "x"]]);
+  grid.keyDown(altCmd("-"), cx);
+  assert.deepEqual(reshapes.pop(), { deleteCols: 1, count: 2 });
+  assert.deepEqual([...grid.filters], [[3, "x"]]);
+});
+
+test("a right-click on a row number selects that row and opens the menu; Duplicate copies it below and selects the copy", () => {
+  const { grid, reshapes, cx, draw } = gridOf(table(5, 3));
+  grid.contextMenu(press(20, 20 + 22 * 3 + 5), cx);  // row 4 (view row 3)
+  assert.deepEqual(rectOf(grid.sel), { r0: 3, r1: 3, c0: 0, c1: 2 });
+  const shown = texts(draw());
+  assert.ok(shown.includes("Insert 1 row above") && shown.includes("Delete 1 row"), shown.join("|"));
+  assert.ok(!shown.includes("Delete 3 columns"), "whole rows: no column commands");
+  handler(draw(), "csv-menu-copyRows", "on_mouse_down")(null, cx);
+  assert.deepEqual(reshapes.pop(), { insertRows: 4, copy: [3] });
+  assert.equal(grid.menu, null);
+  assert.deepEqual(rectOf(grid.sel), { r0: 4, r1: 4, c0: 0, c1: 2 });
+});
+
+test("a right-click inside the selection keeps it; Insert copied rows puts the clipboard's rows above it", () => {
+  const { grid, reshapes, cx, draw } = gridOf(table(5, 3));
+  grid.sel = range(2, 0, 4, 1);
+  grid.contextMenu(press(150, 20 + 22 * 3 + 5), cx);  // row 3, column B: inside
+  assert.deepEqual(rectOf(grid.sel), { r0: 2, r1: 4, c0: 0, c1: 1 });
+  assert.ok(texts(draw()).includes("Delete 2 columns"), "a cell range offers columns too");
+  cx.clip = "a\tb\nc\td\n";
+  handler(draw(), "csv-menu-pasteRows", "on_mouse_down")(null, cx);
+  assert.deepEqual(reshapes.pop(), { insertRows: 2, values: [["a", "b"], ["c", "d"]] });
+});
+
+test("rows are never inserted above the header; in a sorted view row commands reach the file rows on screen", () => {
+  const { grid, reshapes, cx, draw } = gridOf(people());
+  grid.sel = selectCell(0, 0);
+  grid.keyDown(altCmd("="), cx);
+  assert.deepEqual(reshapes.pop(), { insertRows: 1, values: [["", ""]] });
+  grid.mouseDown(press(...SORT_B), cx);  // age ascending: 가방 (2), 다람쥐 (1), 라면 (4), 나무 (3)
+  draw();
+  grid.sel = range(1, 0, 2, 0);
+  grid.keyDown(altCmd("-"), cx);
+  assert.deepEqual(reshapes.pop(), { deleteRows: [2, 1] });
+  grid.contextMenu(press(20, 20 + 22 * 3 + 5), cx);  // view row 3: 라면, file row 4
+  handler(draw(), "csv-menu-rowsBelow", "on_mouse_down")(null, cx);
+  assert.deepEqual(reshapes.pop(), { insertRows: 5, values: [["", ""]] });
+});
+
+test("Esc closes the menu, and row commands wait on a read-only file", () => {
+  const { grid, reshapes, cx } = gridOf(table(3, 2), true);
+  grid.contextMenu(press(60, 20 + 22 * 2 + 5), cx);
+  assert.ok(grid.menu);
+  grid.keyDown(key("escape"), cx);
+  assert.equal(grid.menu, null);
+  grid.keyDown(altCmd("-"), cx);
+  assert.deepEqual(reshapes, []);
+  assert.equal(grid.note, "Read-only (remote)");
 });

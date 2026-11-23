@@ -12,6 +12,10 @@
 //   pastes TSV from the active cell (over the whole selection when it is a larger multiple of what was copied: one
 //   value fills it, a block repeats), ⌃D fills down and ⌘R / ⌃R right (⌘D is Herdr's split), ⌘Z/⌘⇧Z undo and redo. The viewer owns the text (`actions`, main.js). A toolbar
 //   row above the grid says how to edit (or that the file is read-only).
+//   Rows and columns: a right-click opens a menu (copy, paste, fill; insert rows above / below, insert copied rows,
+//   duplicate, delete; the same for columns), ⌥⌘= inserts and ⌥⌘- deletes the selected rows (whole columns: columns).
+//   The viewer rewrites the text (`reshape`, csv.js) and parses it again; one undo step. Rows go by the file rows the
+//   selection shows, in a sorted or filtered view too (worked out again after); new rows never go above the header.
 //   Freeze panes (toolbar, Freeze at <cell> / Unfreeze): the rows above and the columns left of the active cell stay
 //   put while the rest scrolls (sheetview.js maps cells to the frozen and scrolled panes); the header row always does.
 //   Sort: the mark at a header cell's right edge cycles ascending, descending and the file's order; the toolbar's
@@ -33,6 +37,7 @@ const EDGE = 4, MIN_W = 30, MAX_W = 2000;
 // The most cells one clear or paste writes (the viewer writes them a chunk of rows per tick), and one copy takes (read a
 // few ms per tick): the app cuts off a long call.
 const MAX_EDIT = 50000, MAX_COPY = 500000;
+const MENU_W = 240, MENU_ROW = 22;
 const ARROWS = { up: [-1, 0], down: [1, 0], left: [0, -1], right: [0, 1] };
 
 export class SheetGrid {
@@ -43,7 +48,7 @@ export class SheetGrid {
     this.x = 0; this.y = 0; this.width = 0; this.height = 0;  // the scroll, and the grid's size
     this.thumb = null; this.drag = null;                       // a bar or a selection being dragged
     this.widthOf = new Map(); this.resize = null;              // widths set by hand (column -> px), and one being dragged
-    this.sel = selectCell(1, 0); this.edit = null; this.note = null;
+    this.sel = selectCell(1, 0); this.edit = null; this.note = null; this.menu = null;  // menu: where the right-click menu is
     this.freeze = { rows: 1, cols: 0 };                        // rows and columns held in place (freezeAt)
     // The view's rows (sheetview.js): the sort and the filters (column -> text), and the order they give for the sheet
     // `viewOf` (null: every row in the file's own order).
@@ -167,7 +172,7 @@ export class SheetGrid {
     const h = this.hit(e.local_position), g = this.g;
     if (this.edit && h?.r === this.edit.r && h?.c === this.edit.c) return;  // a click in the input moves its caret
     this.handle.focus();
-    this.note = null;
+    this.note = null; this.menu = null;
     if (this.edit) this.finishEdit(true, cx);
     if (!h) return;
     const edge = this.edgeAt(e.local_position);
@@ -218,8 +223,11 @@ export class SheetGrid {
       else return;
       return cx.stop_propagation();
     }
-    const a = this.sel.active;
-    if (cmd && k === "c") this.copy(cx);
+    const a = this.sel.active, cols = this.wholeCols();
+    if (this.menu) { this.menu = null; if (k === "escape") { cx.stop_propagation(); return cx.notify(); } }
+    if (cmd && m.alt && (k === "=" || k === "+")) this.restructure(cols ? "colsLeft" : "rowsAbove", cx);
+    else if (cmd && m.alt && k === "-") this.restructure(cols ? "deleteCols" : "deleteRows", cx);
+    else if (cmd && k === "c") this.copy(cx);
     else if (cmd && k === "v") this.paste(cx);
     else if (cmd && k === "a") this.sel = selectAll(this.g.rows, this.g.cols);
     else if (cmd && (k === "d" || k === "r")) this.fill(k === "d", cx);
@@ -319,6 +327,85 @@ export class SheetGrid {
   fill(down, cx) {
     const plan = fillPlan(rectOf(this.sel), down);
     if (plan) this.writeRange(plan.q, (r, c) => (down ? this.value(plan.from, c) : this.value(r, plan.from)), cx);
+  }
+
+  // Whether the selection is whole columns (from the letters, not everything): row and column commands then act on its
+  // columns; otherwise on its rows (a cell range: both, from the menu).
+  wholeCols() { const q = rectOf(this.sel), g = this.g; return q.r0 === 0 && q.r1 === g.rows - 1 && !(q.c0 === 0 && q.c1 === g.cols - 1); }
+  wholeRows() { const q = rectOf(this.sel); return q.c0 === 0 && q.c1 === this.g.cols - 1; }
+  // The file rows a view range shows, past the header row.
+  fileRows(q) { const out = []; for (let r = Math.max(1, q.r0); r <= q.r1; r++) out.push(this.src(r)); return out; }
+
+  // A right-click: the cell, row or column under it is selected unless the selection holds it already (as in a
+  // spreadsheet), and the menu opens there.
+  contextMenu(e, cx) {
+    const h = this.hit(e.local_position), g = this.g;
+    if (!h) return;
+    this.handle.focus();
+    if (this.edit) this.finishEdit(true, cx);
+    const q = rectOf(this.sel), r = Math.max(0, h.r), c = Math.max(0, h.c), inRows = r >= q.r0 && r <= q.r1, inCols = c >= q.c0 && c <= q.c1;
+    const inside = h.r < 0 ? this.wholeCols() && inCols : h.c < 0 ? this.wholeRows() && inRows : inRows && inCols;
+    if (!inside) this.sel = h.r < 0 && h.c < 0 ? selectAll(g.rows, g.cols) : h.r < 0 ? selectCols(c, c, g.rows) : h.c < 0 ? selectRows(r, r, g.cols) : selectCell(r, c);
+    this.menu = { x: e.local_position.x, y: e.local_position.y };
+    cx.notify();
+  }
+  // The menu's commands for the selection, [command, label, keys] (null: a line between groups): rows unless whole
+  // columns are selected, columns unless whole rows are.
+  menuItems() {
+    const q = rectOf(this.sel), n = this.fileRows(q).length, k = q.c1 - q.c0 + 1, colKeys = this.wholeCols();
+    const rows = (x) => `${Math.max(1, x)} row${x > 1 ? "s" : ""}`, cols = `${k} column${k > 1 ? "s" : ""}`;
+    const items = [["copy", "Copy", "⌘C"], ["paste", "Paste", "⌘V"], ["fillDown", "Fill down", "⌃D"], ["fillRight", "Fill right", "⌘R"]];
+    if (!colKeys) items.push(null, ["rowsAbove", `Insert ${rows(n)} above`, "⌥⌘="], ["rowsBelow", `Insert ${rows(n)} below`, ""],
+      ["pasteRows", "Insert copied rows above", ""], ...(n ? [["copyRows", `Duplicate ${rows(n)}`, ""], ["deleteRows", `Delete ${rows(n)}`, "⌥⌘-"]] : []));
+    if (!this.wholeRows()) items.push(null, ["colsLeft", `Insert ${cols} left`, colKeys ? "⌥⌘=" : ""], ["colsRight", `Insert ${cols} right`, ""],
+      ["copyCols", `Duplicate ${cols}`, ""], ["deleteCols", `Delete ${cols}`, colKeys ? "⌥⌘-" : ""]);
+    return items;
+  }
+  runMenu(what, cx) {
+    this.menu = null;
+    if (what === "copy") this.copy(cx);
+    else if (what === "paste") this.paste(cx);
+    else if (what === "fillDown" || what === "fillRight") this.fill(what === "fillDown", cx);
+    else this.restructure(what, cx);
+    cx.notify();
+  }
+
+  // A row or column command (`what`, a menu command) on the selection, through the viewer's csv.js reshape: rows by
+  // the file rows the selection shows (in a sorted or filtered view too, whose rows are worked out again after), new
+  // rows never above the header; columns in every row, the header too.
+  restructure(what, cx) {
+    if (!this.writable()) return cx.notify();
+    const q = rectOf(this.sel), rows = this.fileRows(q), k = q.c1 - q.c0 + 1, cols = this.g.cols;
+    const below = rows.reduce((m, r) => Math.max(m, r + 1), 1), top = rows.reduce((m, r) => Math.min(m, r), below), n = Math.max(1, rows.length);
+    const blank = () => Array.from({ length: n }, () => new Array(cols).fill(""));
+    const at = what === "rowsAbove" || what === "pasteRows" ? top : below;
+    let op;
+    if (what === "rowsAbove" || what === "rowsBelow") op = { insertRows: at, values: blank() };
+    else if (what === "copyRows") op = rows.length && { insertRows: at, copy: rows };
+    else if (what === "deleteRows") op = rows.length && { deleteRows: rows };
+    else if (what === "pasteRows") { const t = cx.read_from_clipboard(); op = t && { insertRows: at, values: parseCsv(t.replace(/\r?\n$/, ""), "\t") }; }
+    else if (what === "colsLeft") op = { insertCols: q.c0, count: k };
+    else if (what === "colsRight") op = { insertCols: q.c1 + 1, count: k };
+    else if (what === "copyCols") op = { insertCols: q.c1 + 1, count: k, copy: q.c0 };
+    else if (what === "deleteCols") op = { deleteCols: q.c0, count: k };
+    if (!op) return;
+    if ((op.values ?? op.copy ?? []).length * cols > MAX_EDIT) { this.note = "Too many rows to insert at once"; return cx.notify(); }
+    if (!this.actions.reshape(op, cx)) { this.note = "Not changed: the sheet is still updating, try again"; return cx.notify(); }
+    if (op.insertCols != null) this.shiftCols(op.insertCols, k);
+    else if (op.deleteCols != null) this.shiftCols(q.c0, -k);
+    // Without a view, the new rows (inserted below or copied) are selected, as a spreadsheet does.
+    else if (!this.order && (what === "rowsBelow" || what === "copyRows")) this.sel = selectRows(at, at + n - 1, cols);
+    cx.notify();
+  }
+
+  // Column-keyed view state (widths set by hand, filters, the sort) follows `count` columns inserted (or deleted, < 0)
+  // at `at`.
+  shiftCols(at, count) {
+    const to = (c) => (c < at ? c : c < at - count ? null : c + count);
+    const remap = (m) => new Map([...m].flatMap(([c, v]) => (to(c) == null ? [] : [[to(c), v]])));
+    this.widthOf = remap(this.widthOf); this.filters = remap(this.filters);
+    if (this.sort) this.sort = to(this.sort.c) == null ? null : { ...this.sort, c: to(this.sort.c) };
+    this.filterCol = -1;  // the filter input picks its column's text up again
   }
 
   // `sheet` is csv.js sheetOf's; `c` the colors { bg, fg, grid, head, dim, accent, hover }; `readonly` blocks editing.
@@ -432,7 +519,7 @@ export class SheetGrid {
           .text_size(11.5).text_color(c.fg)))
       .children(filtered.map(([col, text]) => tool(`csv-unfilter-${col}`, `${columnLabel(col)} ⊃ “${text}” ×`, cx => this.setFilter(col, "", cx))))
       .when(filtered.length > 0, el => el.child(div().flex_none().child(`${(rows - 1).toLocaleString()} of ${(sheet.rows.length - 1).toLocaleString()} rows`)))
-      .child(div().flex_1().min_w(0).truncate().text_right().child(readonly ? "Read-only (remote)" : "Double-click, Enter or type to edit a cell"))
+      .child(div().flex_1().min_w(0).truncate().text_right().child(readonly ? "Read-only (remote)" : "Double-click, Enter or type to edit a cell; right-click for rows and columns"))
       .when(this.pending, el => el.child(div().flex_none().child("Updating rows…")))
       .child(tool("csv-sort-up", "Sort ▲", cx => this.sortBy(a.c, 1, cx), this.sort?.c === a.c && this.sort.dir > 0))
       .child(tool("csv-sort-down", "Sort ▼", cx => this.sortBy(a.c, -1, cx), this.sort?.c === a.c && this.sort.dir < 0))
@@ -448,6 +535,7 @@ export class SheetGrid {
         else this.scroll(this.x - d.x, this.y - d.y, cx);
       })
       .on_mouse_down("left", (e, cx) => this.mouseDown(e, cx))
+      .on_mouse_down("right", (e, cx) => this.contextMenu(e, cx))
       .on_key_down((e, cx) => this.keyDown(e, cx))
       .child(row(LETTERS_H, "", col => cell(columnLabel(col), widths[col]).bg(c.head).text_color(this.filters.has(col) ? c.accent : c.dim).text_center()))
       .child(row(ROW_H, "1", head))
@@ -461,6 +549,21 @@ export class SheetGrid {
       .when(Boolean(this.note), el => el.child(div().absolute().left(numW + 8).bottom(BAR + 2).px(8).py(2).rounded(4).bg(c.head)
         .text_size(11.5).text_color(c.dim).child(this.note ?? "")))
       .when(Boolean(tx) && this.width > 0, el => el.child(bar("x")))
-      .when(Boolean(ty) && this.height > 0, el => el.child(bar("y"))));
+      .when(Boolean(ty) && this.height > 0, el => el.child(bar("y")))
+      .when(Boolean(this.menu), el => el.child(this.renderMenu(c, W, H))));
+  }
+
+  // The right-click menu at its spot, kept inside the grid; a press on an item runs it (and stops there, so the grid
+  // under it neither selects nor closes it first).
+  renderMenu(c, W, H) {
+    const items = this.menuItems(), h = items.reduce((s, it) => s + (it ? MENU_ROW : 9), 8);
+    return div().id("csv-menu").absolute().left(Math.max(0, Math.min(this.menu.x, W - MENU_W))).top(Math.max(0, Math.min(this.menu.y, H - h)))
+      .w(MENU_W).py(4).rounded(6).bg(c.head).border(1).border_color(c.grid).text_size(12).text_color(c.fg)
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .children(items.map(it => (it
+        ? h_flex().id(`csv-menu-${it[0]}`).h(MENU_ROW).px(10).items_center().justify_between().cursor_pointer().hover(s => s.bg(c.hover ?? c.grid))
+          .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.runMenu(it[0], cx); })
+          .child(it[1]).child(div().text_color(c.dim).child(it[2]))
+        : div().h(1).my(4).bg(c.grid))));
   }
 }
