@@ -18,6 +18,8 @@
 //   file keeps its order, and selection, edits, copy and paste work in view rows mapped back to file rows (src).
 //   Filter (toolbar): rows whose active column contains the typed text (case-insensitive), per column, all at once;
 //   a chip per filtered column clears it, Esc in the input clears its own. A view too, mapped the same way.
+//   Column widths: drag a column's right edge in the letters or header row (EDGE px either side, a col-resize cursor
+//   there) to size it; a double-click there fits it back to its measured width. Kept per tab, over sheet.widths.
 import { div } from "gpui-kit";
 import { h_flex, v_flex, InputState, Input } from "gpui-base";
 import { columnLabel, isNumber, cellText, visibleColumns, clampX, scrollToShow, columnStarts, columnAt, toTsv, parseCsv, thumbOf, scrollAtTrack } from "./csv.js";
@@ -25,6 +27,8 @@ import { axisSpans, axisAt, axisEnd, sourceRow, viewRows } from "./sheetview.js"
 import { selectCell, extendTo, selectRows, selectCols, selectAll, rectOf, rectCells, moveBy, clampSel } from "./selection.js";
 
 const ROW_H = 22, LETTERS_H = 20, BAR = 12, TOOLS_H = 26, SORT_W = 24;
+// A column edge's grab zone either side of it, and the widths a drag keeps to.
+const EDGE = 4, MIN_W = 30, MAX_W = 2000;
 // The most cells one clear or paste writes (the viewer writes them a chunk of rows per tick), and one copy takes (read a
 // few ms per tick): the app cuts off a long call.
 const MAX_EDIT = 50000, MAX_COPY = 500000;
@@ -37,6 +41,7 @@ export class SheetGrid {
     this.actions = actions;
     this.x = 0; this.y = 0; this.width = 0; this.height = 0;  // the scroll, and the grid's size
     this.thumb = null; this.drag = null;                       // a bar or a selection being dragged
+    this.widthOf = new Map(); this.resize = null;              // widths set by hand (column -> px), and one being dragged
     this.sel = selectCell(1, 0); this.edit = null; this.note = null;
     this.freeze = { rows: 1, cols: 0 };                        // rows and columns held in place (freezeAt)
     // The view's rows (sheetview.js): the sort and the filters (column -> text), and the order they give for the sheet
@@ -118,6 +123,24 @@ export class SheetGrid {
     return { r: axisAt(p.y, this.rowAxis()), c: axisAt(p.x, this.colAxis()) };
   }
 
+  // The column whose right edge is within EDGE px of a point in the letters or header row (the nearest), or null.
+  edgeAt(p) {
+    if (!this.g || !p || p.y < 0 || p.y >= LETTERS_H + ROW_H) return null;
+    let best = null;
+    for (const [c, x] of this.g.edges) if (Math.abs(p.x - x) <= EDGE && (best == null || Math.abs(p.x - x) < Math.abs(p.x - best[1]))) best = [c, x];
+    return best?.[0] ?? null;
+  }
+  // A column's width by hand, held to [MIN_W, MAX_W]; null: back to its measured width.
+  setWidth(c, w, cx) {
+    if (w == null) { if (!this.widthOf.delete(c)) return; }
+    else {
+      w = Math.round(Math.max(MIN_W, Math.min(MAX_W, w)));
+      if (this.widthOf.get(c) === w) return;
+      this.widthOf.set(c, w);
+    }
+    cx.notify();
+  }
+
   // Freezes the rows above and the columns left of the active cell (the header row always stays), as Excel's Freeze
   // Panes; unfreeze() goes back to the header row alone.
   freezeAt(cx) { const a = this.sel.active; this.freeze = { rows: Math.max(1, a.r), cols: a.c }; this.x = this.y = 0; cx.notify(); }
@@ -146,6 +169,12 @@ export class SheetGrid {
     this.note = null;
     if (this.edit) this.finishEdit(true, cx);
     if (!h) return;
+    const edge = this.edgeAt(e.local_position);
+    if (edge != null) {
+      if (e.click_count >= 2) return this.setWidth(edge, null, cx);
+      this.resize = { c: edge, at: e.position.x, from: g.widths[edge] };
+      return;
+    }
     const shift = e.modifiers?.shift;
     if (h.r === 0 && h.c >= 0 && e.local_position.x >= axisEnd(h.c, this.colAxis()) - SORT_W) return this.cycleSort(h.c, cx);
     if (h.r < 0 && h.c < 0) this.sel = selectAll(g.rows, g.cols);
@@ -160,7 +189,8 @@ export class SheetGrid {
   // element only while it is hovered, and the bars sit on the sheet's edges, so a pointer drifting a few px past one
   // used to end the drag (the viewer passes its moves here, and its release or the pointer leaving it to pointerUp).
   pointerMove(e, cx) {
-    const t = this.thumb, d = this.drag;
+    const t = this.thumb, d = this.drag, z = this.resize;
+    if (z) return this.setWidth(z.c, z.from + e.position.x - z.at, cx);
     if (t) return t.axis === "x" ? this.scroll(t.from + (e.position.x - t.at) * t.ratio, this.y, cx) : this.scroll(this.x, t.from + (e.position.y - t.at) * t.ratio, cx);
     const h = d && this.origin && this.hit({ x: e.position.x - this.origin.x, y: e.position.y - this.origin.y }), g = this.g;
     if (!h) return;
@@ -168,7 +198,7 @@ export class SheetGrid {
     const next = d.cols != null ? selectCols(d.cols, c, g.rows) : d.rows != null ? selectRows(d.rows, r, g.cols) : extendTo(this.sel, r, c);
     if (JSON.stringify(next) !== JSON.stringify(this.sel)) { this.sel = next; cx.notify(); }
   }
-  pointerUp() { this.thumb = null; this.drag = null; }
+  pointerUp() { this.thumb = null; this.drag = null; this.resize = null; }
 
   move(dr, dc, extend, cx) {
     this.sel = moveBy(this.sel, dr, dc, extend, this.g.rows, this.g.cols);
@@ -288,7 +318,7 @@ export class SheetGrid {
     const key = JSON.stringify([this.sort, [...this.filters]]);
     if (sheet !== this.viewOf || key !== this.viewKey) this.refresh(sheet, key, cx);
     // View rows: the header and the data rows in the view's order.
-    const rows = this.order ? this.order.length + 1 : sheet.rows.length, widths = sheet.widths, starts = columnStarts(widths), H = this.height || 900, W = this.width || 1600;
+    const rows = this.order ? this.order.length + 1 : sheet.rows.length, widths = this.widthOf.size ? sheet.widths.map((w, i) => this.widthOf.get(i) ?? w) : sheet.widths, starts = columnStarts(widths), H = this.height || 900, W = this.width || 1600;
     const numW = Math.max(40, String(sheet.rows.length).length * 8 + 16);
     // The frozen panes, held to at most half the grid each way so there is always room to scroll.
     let fr = Math.max(1, Math.min(this.freeze.rows, rows)), fc = Math.max(0, Math.min(this.freeze.cols, sheet.cols - 1));
@@ -336,8 +366,11 @@ export class SheetGrid {
           .text_size(11).text_color(dir ? c.accent : c.dim).child(dir > 0 ? "▲" : dir < 0 ? "▼" : "↕"));
     };
     const split = numW + frozenW;
-    const gridLines = [numW - 1, ...fixed.map(col => numW + starts[col + 1] - 1), ...cols.map(col => split + starts[col + 1] - frozenW - this.x - 1)]
-      .filter(x => x < split + view).map(x => div().absolute().top(0).bottom(0).left(x).w(1).bg(c.grid));
+    // Each column's right edge on screen [col, x] (edgeAt grabs them), and a grid line just left of each.
+    const edges = this.g.edges = [...fixed.map(col => [col, numW + starts[col + 1]]), ...cols.map(col => [col, split + starts[col + 1] - frozenW - this.x])]
+      .filter(([, x]) => x <= split + view);
+    const gridLines = [numW - 1, ...edges.map(([, x]) => x - 1)].map(x => div().absolute().top(0).bottom(0).left(x).w(1).bg(c.grid));
+    const grips = edges.map(([, x]) => div().absolute().top(0).left(x - EDGE).w(2 * EDGE).h(LETTERS_H + ROW_H).cursor_col_resize());
     // Lines along the frozen panes' edges past the header row, as a spreadsheet draws them.
     if (fc > 0) gridLines.push(div().absolute().top(0).bottom(0).left(split - 1).w(1).bg(c.dim));
     if (fr > 1) gridLines.push(div().absolute().left(0).right(0).top(topH - 1).h(1).bg(c.dim));
@@ -412,6 +445,7 @@ export class SheetGrid {
       .children(frozen)
       .child(div().flex_1().min_h(0).overflow_hidden().child(v_flex().relative().top(-(this.y % ROW_H)).children(lines)))
       .children(gridLines)
+      .children(grips)
       .children(marks)
       .when(Boolean(at), el => el.child(Input.new(this.edit.state).absolute().left(at.left).top(at.top).w(Math.max(at.w, 120)).h(ROW_H)
         .px(5).bg(c.bg).border_2().border_color(c.accent).text_size(12.5).text_color(c.fg)))

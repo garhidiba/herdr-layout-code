@@ -204,3 +204,73 @@ test("copy in a sorted view takes the rows as shown", async () => {
   await cx.idle();
   assert.equal(cx.clip, "가방\t4\n다람쥐\t30");
 });
+
+// Column widths by hand: every column 100 px from x 40, so column c's right edge is at 140 + 100c.
+const drag = (grid, cx, from, to, y = 10) => {
+  grid.mouseDown(press(from, y), cx);
+  grid.pointerMove({ position: { x: to, y } }, cx);
+  grid.pointerUp();
+};
+
+test("a column's right edge is grabbed within 4 px in the letters and header rows, frozen or scrolled", () => {
+  const { grid, cx, draw } = gridOf(table(50));
+  assert.equal(grid.edgeAt({ x: 243, y: 10 }), 1, "letters row, B's right edge");
+  assert.equal(grid.edgeAt({ x: 137, y: 30 }), 0, "header row, A's right edge");
+  assert.equal(grid.edgeAt({ x: 245, y: 10 }), null, "5 px off");
+  assert.equal(grid.edgeAt({ x: 240, y: 50 }), null, "not in the data rows");
+  grid.sel = selectCell(1, 2);
+  handler(draw(), "csv-freeze")(null, cx);
+  draw();
+  grid.scroll(150, 0, cx);
+  draw();
+  // A..B frozen (edges 140, 240); the rest scrolled 150 px past them, so C's edge (190) hides behind them and D's is at 290.
+  assert.equal(grid.edgeAt({ x: 241, y: 10 }), 1, "the frozen pane's last edge");
+  assert.equal(grid.edgeAt({ x: 290, y: 30 }), 3, "a scrolled column's edge");
+  assert.equal(grid.edgeAt({ x: 190, y: 10 }), null, "an edge scrolled behind the frozen pane");
+});
+
+test("dragging a column's edge sizes it live, past the grid too, held to 30 px at least", () => {
+  const { grid, cx, draw } = gridOf(table(5));
+  drag(grid, cx, 240, 300);
+  draw();
+  assert.equal(grid.g.widths[1], 160);
+  assert.equal(grid.g.starts[2], 260, "the columns after it move over");
+  assert.deepEqual(grid.hit({ x: 290, y: 30 }), { r: 0, c: 1 });
+  drag(grid, cx, 300, -500, 30);
+  draw();
+  assert.equal(grid.g.widths[1], 30);
+  assert.equal(grid.sort, null, "a grab on the header's edge does not sort");
+  grid.pointerMove({ position: { x: 600, y: 10 } }, cx);
+  draw();
+  assert.equal(grid.g.widths[1], 30, "the drag ends on release");
+});
+
+test("a double-click on a column's edge fits it back to its measured width", () => {
+  const { grid, cx, draw } = gridOf(table(5));
+  drag(grid, cx, 240, 300);
+  draw();
+  grid.mouseDown(press(300, 10), cx);
+  grid.mouseDown(press(300, 10, { click_count: 2 }), cx);
+  grid.pointerUp();
+  draw();
+  assert.equal(grid.g.widths[1], 100);
+});
+
+test("a width set by hand stays when the sheet is parsed again", () => {
+  const { grid, cx } = gridOf(table(5));
+  drag(grid, cx, 240, 300);
+  const again = sheetOf(table(6));
+  again.widths = again.widths.map(() => 100);
+  cx.rendering(() => grid.render(again, COLORS, false, cx));
+  assert.equal(grid.g.widths[1], 160);
+});
+
+test("clicks just outside an edge still select the column and sort", () => {
+  const { grid, cx } = gridOf(table(5));
+  grid.mouseDown(press(235, 10), cx);
+  grid.pointerUp();
+  assert.deepEqual([grid.sel.anchor.c, grid.sel.focus.c], [1, 1]);
+  grid.mouseDown(press(235, 30), cx);
+  assert.deepEqual(grid.sort, { c: 1, dir: 1 });
+  assert.equal(grid.g.widths[1], 100);
+});
