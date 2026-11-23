@@ -13,7 +13,8 @@
 //   row above the grid says how to edit (or that the file is read-only).
 //   Freeze panes (toolbar, Freeze at <cell> / Unfreeze): the rows above and the columns left of the active cell stay
 //   put while the rest scrolls (sheetview.js maps cells to the frozen and scrolled panes); the header row always does.
-//   Sort: the mark at a header cell's right edge cycles ascending, descending and the file's order. It is a view: the
+//   Sort: the mark at a header cell's right edge cycles ascending, descending and the file's order; the toolbar's
+//   Sort ▲ / Sort ▼ sort by the active column, and Unsort goes back to the file's order. It is a view: the
 //   file keeps its order, and selection, edits, copy and paste work in view rows mapped back to file rows (src).
 //   Filter (toolbar): rows whose active column contains the typed text (case-insensitive), per column, all at once;
 //   a chip per filtered column clears it, Esc in the input clears its own. A view too, mapped the same way.
@@ -23,7 +24,7 @@ import { columnLabel, isNumber, cellText, visibleColumns, clampX, scrollToShow, 
 import { axisSpans, axisAt, axisEnd, sourceRow, viewRows } from "./sheetview.js";
 import { selectCell, extendTo, selectRows, selectCols, selectAll, rectOf, rectCells, moveBy, clampSel } from "./selection.js";
 
-const ROW_H = 22, LETTERS_H = 20, BAR = 12, TOOLS_H = 26, SORT_W = 16;
+const ROW_H = 22, LETTERS_H = 20, BAR = 12, TOOLS_H = 26, SORT_W = 24;
 // The most cells one clear or paste writes (the viewer writes them a chunk of rows per tick), and one copy takes (read a
 // few ms per tick): the app cuts off a long call.
 const MAX_EDIT = 50000, MAX_COPY = 500000;
@@ -63,11 +64,10 @@ export class SheetGrid {
   src(r) { return sourceRow(this.order, r); }
   value(r, c) { return this.sheet?.rows[this.src(r)]?.[c] ?? ""; }
 
+  // Sorts by column c (dir 1 ascending, -1 descending; null: the file's order).
+  sortBy(c, dir, cx) { this.sort = dir ? { c, dir } : null; cx.notify(); }
   // Header clicks on the sort mark: ascending, descending, then the file's order again.
-  cycleSort(c, cx) {
-    this.sort = this.sort?.c !== c ? { c, dir: 1 } : this.sort.dir > 0 ? { c, dir: -1 } : null;
-    cx.notify();
-  }
+  cycleSort(c, cx) { this.sortBy(c, this.sort?.c !== c ? 1 : this.sort.dir > 0 ? -1 : null, cx); }
 
   // Works the view's order out again for a new sheet, sort or filter: a slice now (a small file is done at once), the rest a
   // slice per tick. Until it lands, the last order stays on screen and edits wait (they would map to stale rows).
@@ -332,7 +332,8 @@ export class SheetGrid {
       const dir = this.sort?.c === col ? this.sort.dir : 0;
       return h_flex().w(widths[col]).h_full().pl(6).bg(c.head).font_bold()
         .child(div().flex_1().min_w(0).truncate().child(cellText(sheet.rows[0]?.[col] ?? "")))
-        .child(div().w(SORT_W).flex_none().text_center().text_size(10).text_color(dir ? c.accent : c.dim).child(dir > 0 ? "▲" : dir < 0 ? "▼" : "↕"));
+        .child(div().w(SORT_W).flex_none().h_full().flex().items_center().justify_center().border_l(1).border_color(c.grid)
+          .text_size(11).text_color(dir ? c.accent : c.dim).child(dir > 0 ? "▲" : dir < 0 ? "▼" : "↕"));
     };
     const split = numW + frozenW;
     const gridLines = [numW - 1, ...fixed.map(col => numW + starts[col + 1] - 1), ...cols.map(col => split + starts[col + 1] - frozenW - this.x - 1)]
@@ -374,8 +375,8 @@ export class SheetGrid {
     };
     // The sheet's own toolbar above the grid, outside its key handler (an input there types into itself, not the grid),
     // with ghost buttons as the viewer's.
-    const tool = (id, label, onClick) => div().id(id).flex_none().px(7).h(20).flex().items_center().rounded(4).cursor_pointer()
-      .text_color(c.fg).hover(s => s.bg(c.hover ?? c.grid)).on_click((_e, cx) => onClick(cx)).child(label);
+    const tool = (id, label, onClick, on = false) => div().id(id).flex_none().px(7).h(20).flex().items_center().rounded(4).cursor_pointer()
+      .text_color(on ? c.accent : c.fg).hover(s => s.bg(c.hover ?? c.grid)).on_click((_e, cx) => onClick(cx)).child(label);
     // Filter: the input filters the active column (it follows the selection while not typed in; Esc clears it); each
     // filtered column shows as a chip that clears it, then how many rows show.
     if (!this.filterFocus && this.filterCol !== a.c) { this.filterCol = a.c; this.filterInput.set_value(this.filters.get(a.c) ?? ""); }
@@ -391,6 +392,9 @@ export class SheetGrid {
       .when(filtered.length > 0, el => el.child(div().flex_none().child(`${(rows - 1).toLocaleString()} of ${(sheet.rows.length - 1).toLocaleString()} rows`)))
       .child(div().flex_1().min_w(0).truncate().text_right().child(readonly ? "Read-only (remote)" : "Double-click, Enter or type to edit a cell"))
       .when(this.pending, el => el.child(div().flex_none().child("Updating rows…")))
+      .child(tool("csv-sort-up", "Sort ▲", cx => this.sortBy(a.c, 1, cx), this.sort?.c === a.c && this.sort.dir > 0))
+      .child(tool("csv-sort-down", "Sort ▼", cx => this.sortBy(a.c, -1, cx), this.sort?.c === a.c && this.sort.dir < 0))
+      .when(Boolean(this.sort), el => el.child(tool("csv-unsort", `Unsort ${columnLabel(this.sort.c)}`, cx => this.sortBy(0, null, cx))))
       .child(tool("csv-freeze", `Freeze at ${columnLabel(a.c)}${this.src(a.r) + 1}`, cx => this.freezeAt(cx)))
       .when(this.freeze.rows > 1 || this.freeze.cols > 0, el => el.child(tool("csv-unfreeze", "Unfreeze", cx => this.unfreeze(cx))));
     return v_flex().flex_1().min_h(0).child(tools).child(div().id("csv-sheet").track_focus(this.handle).relative().flex_1().min_h(0).overflow_hidden().flex().flex_col()

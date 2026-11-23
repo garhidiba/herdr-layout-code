@@ -69,8 +69,8 @@ test("frozen panes are held to half the grid, and Unfreeze goes back to the head
 
 const press = (x, y, extra = {}) => ({ position: { x, y }, local_position: { x, y }, modifiers: {}, click_count: 1, ...extra });
 const key = (k, char) => ({ key: k, key_char: char, modifiers: {} });
-// Column B (index 1) spans x 140..240; its header's sort mark is the last 16 px.
-const SORT_B = [230, 30];
+// Column B (index 1) spans x 140..240; its header's sort mark is the last 24 px.
+const SORT_B = [218, 30];
 const people = () => [["name", "age"], ["다람쥐", "30"], ["가방", "4"], ["나무", ""], ["라면", "100"]];
 
 test("typing on a selected cell opens the editor with that character, and Enter writes it to that row", () => {
@@ -95,6 +95,20 @@ test("a click on a header's sort mark cycles ascending, descending and file orde
   grid.mouseDown(press(...SORT_B), cx);
   assert.deepEqual(names(), ["다람쥐", "가방", "나무", "라면"]);
   assert.deepEqual(grid.sel.active, { r: 1, c: 0 }, "the sort mark does not select");
+});
+
+test("the toolbar's Sort ▲ / Sort ▼ sort by the active column, and Unsort goes back to the file's order", () => {
+  const { grid, cx, draw, sheet } = gridOf(people());
+  const ages = () => { draw(); return Array.from({ length: grid.g.rows - 1 }, (_, i) => sheet.rows[grid.src(i + 1)][1]); };
+  grid.mouseDown(press(150, 20 + 22 * 2 + 5), cx);  // a cell in column B
+  handler(draw(), "csv-sort-up")(null, cx);
+  assert.deepEqual(ages(), ["4", "30", "100", ""]);
+  handler(draw(), "csv-sort-down")(null, cx);
+  assert.deepEqual(ages(), ["100", "30", "4", ""]);
+  assert.ok(texts(draw()).includes("Unsort B"));
+  handler(draw(), "csv-unsort")(null, cx);
+  assert.deepEqual(ages(), ["30", "4", "", "100"]);
+  assert.equal(handler(draw(), "csv-unsort"), null, "no Unsort while unsorted");
 });
 
 test("in a sorted view, an edit, a clear and a paste write the file rows on screen, not the view's row numbers", () => {
