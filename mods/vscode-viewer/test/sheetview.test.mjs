@@ -78,6 +78,20 @@ test("worked a slice at a time it yields along the way and lands on the same ord
   assert.deepEqual(vals, [...vals].sort((a, b) => a - b));
 });
 
+test("a filter keeps the rows whose column contains its text, ignoring case; several filters all apply", () => {
+  const rows = [["name", "role"], ["Kim", "조건부 참가자"], ["Lee", "참가자"], ["kimura", "Host"], ["Park", ""]];
+  assert.deepEqual(run(viewRows(rows, { filters: [[0, "KIM"]] })), [1, 3]);
+  assert.deepEqual(run(viewRows(rows, { filters: [[1, "참가"]] })), [1, 2]);
+  assert.deepEqual(run(viewRows(rows, { filters: [[0, "kim"], [1, "참가"]] })), [1]);
+  assert.deepEqual(run(viewRows(rows, { filters: [[0, ""]] })), [1, 2, 3, 4], "an empty text filters nothing");
+  assert.deepEqual(run(viewRows(rows, { filters: [[5, "x"]] })), [], "a column a row lacks holds nothing");
+});
+
+test("filtered rows are then sorted", () => {
+  const rows = [["n"], ["b1"], ["a1"], ["c2"], ["a2"]];
+  assert.deepEqual(run(viewRows(rows, { filters: [[0, "a"]], sort: { c: 0, dir: -1 } })), [4, 2]);
+});
+
 test("a view row maps back to the file row it shows; the header is always row 0", () => {
   assert.equal(sourceRow([3, 1, 2], 0), 0);
   assert.equal(sourceRow([3, 1, 2], 1), 3);

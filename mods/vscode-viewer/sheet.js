@@ -15,6 +15,8 @@
 //   put while the rest scrolls (sheetview.js maps cells to the frozen and scrolled panes); the header row always does.
 //   Sort: the mark at a header cell's right edge cycles ascending, descending and the file's order. It is a view: the
 //   file keeps its order, and selection, edits, copy and paste work in view rows mapped back to file rows (src).
+//   Filter (toolbar): rows whose active column contains the typed text (case-insensitive), per column, all at once;
+//   a chip per filtered column clears it, Esc in the input clears its own. A view too, mapped the same way.
 import { div } from "gpui-kit";
 import { h_flex, v_flex, InputState, Input } from "gpui-base";
 import { columnLabel, isNumber, cellText, visibleColumns, clampX, scrollToShow, columnStarts, columnAt, toTsv, parseCsv, thumbOf, scrollAtTrack } from "./csv.js";
@@ -36,8 +38,25 @@ export class SheetGrid {
     this.thumb = null; this.drag = null;                       // a bar or a selection being dragged
     this.sel = selectCell(1, 0); this.edit = null; this.note = null;
     this.freeze = { rows: 1, cols: 0 };                        // rows and columns held in place (freezeAt)
-    // The view's rows (sheetview.js): the sort, and the order it gives for the sheet `viewOf` (null: the file's own).
-    this.sort = null; this.order = null; this.viewOf = null; this.viewKey = ""; this.viewToken = 0; this.pending = false;
+    // The view's rows (sheetview.js): the sort and the filters (column -> text), and the order they give for the sheet
+    // `viewOf` (null: every row in the file's own order).
+    this.sort = null; this.filters = new Map();
+    this.order = null; this.viewOf = null; this.viewKey = ""; this.viewToken = 0; this.pending = false;
+    // The toolbar's filter input, for the active column (`filterCol`, following it while the input is not typed in).
+    this.filterCol = 0; this.filterFocus = false;
+    this.filterInput = InputState.new({ placeholder: "contains…" });
+    this.filterInput.on("change", (_e, cx) => this.setFilter(this.filterCol, this.filterInput.value(), cx));
+    this.filterInput.on("focus", () => { this.filterFocus = true; });
+    this.filterInput.on("blur", () => { this.filterFocus = false; });
+    this.filterInput.on("submit", () => this.handle.focus());
+  }
+
+  // A column's filter text ("" clears it).
+  setFilter(c, text, cx) {
+    if (text === (this.filters.get(c) ?? "")) return;
+    if (text) this.filters.set(c, text); else this.filters.delete(c);
+    if (c === this.filterCol && this.filterInput.value() !== text) this.filterInput.set_value(text);
+    cx.notify();
   }
 
   // Selection, editing and copying work in view rows; the file is read and written at the rows they show.
@@ -50,14 +69,14 @@ export class SheetGrid {
     cx.notify();
   }
 
-  // Works the view's order out again for a new sheet or sort: a slice now (a small file is done at once), the rest a
+  // Works the view's order out again for a new sheet, sort or filter: a slice now (a small file is done at once), the rest a
   // slice per tick. Until it lands, the last order stays on screen and edits wait (they would map to stale rows).
   // In-place edits keep the sheet, so an edited row stays where it is until the next sort.
   refresh(sheet, key, cx) {
     this.viewOf = sheet; this.viewKey = key;
     const token = ++this.viewToken;
-    if (!this.sort) { this.order = null; this.pending = false; return; }
-    const it = viewRows(sheet.rows, { sort: this.sort });
+    if (!this.sort && !this.filters.size) { this.order = null; this.pending = false; return; }
+    const it = viewRows(sheet.rows, { sort: this.sort, filters: [...this.filters] });
     const slice = () => { for (const until = Date.now() + 8; ;) { const s = it.next(); if (s.done) return s.value; if (Date.now() >= until) return null; } };
     const land = (order) => { this.order = order; this.pending = false; };
     const order = slice();
@@ -75,7 +94,7 @@ export class SheetGrid {
   // Whether edits can go to the file now: not on a read-only file, nor while the view's rows are being worked out.
   writable() {
     if (this.readonly) this.note = "Read-only (remote)";
-    else if (this.pending) this.note = "Sorting… try again in a moment";
+    else if (this.pending) this.note = "Updating rows… try again in a moment";
     return !this.readonly && !this.pending;
   }
 
@@ -263,7 +282,7 @@ export class SheetGrid {
   // `sheet` is csv.js sheetOf's; `c` the colors { bg, fg, grid, head, dim, accent, hover }; `readonly` blocks editing.
   render(sheet, c, readonly, cx) {
     this.sheet = sheet; this.readonly = readonly;
-    const key = JSON.stringify(this.sort);
+    const key = JSON.stringify([this.sort, [...this.filters]]);
     if (sheet !== this.viewOf || key !== this.viewKey) this.refresh(sheet, key, cx);
     // View rows: the header and the data rows in the view's order.
     const rows = this.order ? this.order.length + 1 : sheet.rows.length, widths = sheet.widths, starts = columnStarts(widths), H = this.height || 900, W = this.width || 1600;
@@ -354,11 +373,22 @@ export class SheetGrid {
     // with ghost buttons as the viewer's.
     const tool = (id, label, onClick) => div().id(id).flex_none().px(7).h(20).flex().items_center().rounded(4).cursor_pointer()
       .text_color(c.fg).hover(s => s.bg(c.hover ?? c.grid)).on_click((_e, cx) => onClick(cx)).child(label);
-    const tools = h_flex().h(TOOLS_H).flex_none().px(10).gap(10).items_center().bg(c.head).border_b(1).border_color(c.grid)
+    // Filter: the input filters the active column (it follows the selection while not typed in; Esc clears it); each
+    // filtered column shows as a chip that clears it, then how many rows show.
+    if (!this.filterFocus && this.filterCol !== a.c) { this.filterCol = a.c; this.filterInput.set_value(this.filters.get(a.c) ?? ""); }
+    const filtered = [...this.filters].sort(([x], [y]) => x - y);
+    const tools = h_flex().h(TOOLS_H).flex_none().px(10).gap(8).items_center().bg(c.head).border_b(1).border_color(c.grid)
       .text_size(11.5).text_color(c.dim)
-      .child(div().flex_1().min_w(0).truncate().child(readonly ? "Read-only (remote)" : "Double-click, Enter or type to edit a cell"))
-      .when(this.pending, el => el.child(div().flex_none().child("Sorting…")))
-      .child(tool("csv-freeze", `Freeze at ${columnLabel(a.c)}${a.r + 1}`, cx => this.freezeAt(cx)))
+      .child(div().flex_none().child(`Filter ${columnLabel(this.filterCol)}`))
+      .child(div().id("csv-filter").flex_none().w(150)
+        .on_key_down((e, cx) => { if (e.key === "escape") { this.setFilter(this.filterCol, "", cx); this.handle.focus(); cx.stop_propagation(); } })
+        .child(Input.new(this.filterInput).h(20).px(5).rounded(4).bg(c.bg).border(1).border_color(this.filterFocus ? c.accent : c.grid)
+          .text_size(11.5).text_color(c.fg)))
+      .children(filtered.map(([col, text]) => tool(`csv-unfilter-${col}`, `${columnLabel(col)} ⊃ “${text}” ×`, cx => this.setFilter(col, "", cx))))
+      .when(filtered.length > 0, el => el.child(div().flex_none().child(`${(rows - 1).toLocaleString()} of ${(sheet.rows.length - 1).toLocaleString()} rows`)))
+      .child(div().flex_1().min_w(0).truncate().text_right().child(readonly ? "Read-only (remote)" : "Double-click, Enter or type to edit a cell"))
+      .when(this.pending, el => el.child(div().flex_none().child("Updating rows…")))
+      .child(tool("csv-freeze", `Freeze at ${columnLabel(a.c)}${this.src(a.r) + 1}`, cx => this.freezeAt(cx)))
       .when(this.freeze.rows > 1 || this.freeze.cols > 0, el => el.child(tool("csv-unfreeze", "Unfreeze", cx => this.unfreeze(cx))));
     return v_flex().flex_1().min_h(0).child(tools).child(div().id("csv-sheet").track_focus(this.handle).relative().flex_1().min_h(0).overflow_hidden().flex().flex_col()
       .bg(c.bg).text_color(c.fg).text_size(12.5)
@@ -370,7 +400,7 @@ export class SheetGrid {
       })
       .on_mouse_down("left", (e, cx) => this.mouseDown(e, cx))
       .on_key_down((e, cx) => this.keyDown(e, cx))
-      .child(row(LETTERS_H, "", col => cell(columnLabel(col), widths[col]).bg(c.head).text_color(c.dim).text_center()))
+      .child(row(LETTERS_H, "", col => cell(columnLabel(col), widths[col]).bg(c.head).text_color(this.filters.has(col) ? c.accent : c.dim).text_center()))
       .child(row(ROW_H, "1", head))
       .children(frozen)
       .child(div().flex_1().min_h(0).overflow_hidden().child(v_flex().relative().top(-(this.y % ROW_H)).children(lines)))

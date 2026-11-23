@@ -1,7 +1,7 @@
 // The CSV sheet's view (sheet.js), apart from the data: which rows show in which order, and where cells land on
 // screen with frozen panes. Pure.
 //   Rows: the view shows the header (view row 0, always the file's row 0), then the data rows in `order` (file row
-//   indices; null: the file's own order). viewRows works it out a slice at a time; sourceRow maps back, so edits,
+//   indices, filtered and sorted; null: all of them in the file's own order). viewRows works it out a slice at a time; sourceRow maps back, so edits,
 //   copies and pastes in a sorted view reach the right rows of the file.
 //   Panes, one axis at a time, rows or columns alike: its first `frozen` items stay put from `base`, the rest scroll by
 //   `scroll` in the room after them, up to `end`. `start(i)` is item i's offset from item 0 (start(count) the whole
@@ -17,13 +17,18 @@ const collator = typeof Intl === "object" && Intl.Collator ? new Intl.Collator(u
 const textOrder = collator ? collator.compare : (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 const NUM = 0, TEXT = 1, EMPTY = 2;
 
-// The data rows of `rows` in view order: sorted by `sort` { c, dir: 1 ascending | -1 descending }: numbers by value
-// before text (after it descending), text in language order, empty cells last either way, ties in file order. A
-// generator that yields every `step` units of work, so a caller can run it a few ms per tick (the app cuts off a long
-// call); its return value is the order.
-export function* viewRows(rows, { sort = null } = {}, step = 400) {
+// The data rows of `rows` in view order: those whose cells hold every one of `filters` [[c, text]] (case-insensitive
+// substrings; an empty text filters nothing), sorted by `sort` { c, dir: 1 ascending | -1 descending }: numbers by
+// value before text (after it descending), text in language order, empty cells last either way, ties in file order.
+// A generator that yields every `step` units of work, so a caller can run it a few ms per tick (the app cuts off a
+// long call); its return value is the order.
+export function* viewRows(rows, { sort = null, filters = [] } = {}, step = 400) {
+  const tests = filters.filter(([, t]) => t).map(([c, t]) => [c, t.toLowerCase()]);
   let order = [];
-  for (let r = 1; r < rows.length; r++) order.push(r);
+  for (let r = 1; r < rows.length; r++) {
+    if (tests.every(([c, t]) => (rows[r]?.[c] ?? "").toLowerCase().includes(t))) order.push(r);
+    if (r % step === 0) yield;
+  }
   if (!sort) return order;
   const { c, dir } = sort, kind = new Uint8Array(rows.length), val = new Array(rows.length);
   for (let k = 0; k < order.length; k++) {

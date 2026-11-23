@@ -115,6 +115,70 @@ test("in a sorted view, an edit, a clear and a paste write the file rows on scre
   assert.deepEqual(commits.pop(), [{ r: 1, c: 0, value: "p" }, { r: 4, c: 0, value: "q" }]);
 });
 
+// Types `text` into the toolbar's filter input, as the input's change event reports it.
+const typeFilter = (grid, cx, text) => { grid.filterInput.set_value(text); grid.filterInput.handlers.change(null, cx); };
+
+test("the filter input filters the active column, counts the rows shown, and edits land on the file rows", () => {
+  const { grid, commits, cx, draw, sheet } = gridOf(people());
+  grid.sel = selectCell(1, 0);
+  assert.ok(texts(draw()).includes("Filter A"));
+  typeFilter(grid, cx, "무");  // 나무, file row 3
+  const shown = texts(draw());
+  assert.equal(grid.g.rows, 2);
+  assert.ok(shown.includes("1 of 4 rows"), shown.join("|"));
+  assert.equal(sheet.rows[grid.src(1)][0], "나무");
+  grid.sel = selectCell(1, 1);
+  grid.keyDown(key("7", "7"), cx);
+  grid.keyDown(key("enter"), cx);
+  assert.deepEqual(commits.pop(), [{ r: 3, c: 1, value: "7" }]);
+});
+
+test("the filter input follows the selection to another column; a chip or Esc clears a filter", () => {
+  const { grid, cx, draw } = gridOf(people());
+  grid.sel = selectCell(1, 0);
+  draw();
+  typeFilter(grid, cx, "가");
+  draw();
+  grid.sel = selectCell(1, 1);
+  assert.ok(texts(draw()).includes("Filter B"));
+  assert.equal(grid.filterInput.value(), "", "column B has no filter yet");
+  typeFilter(grid, cx, "4");
+  draw();
+  assert.equal(grid.g.rows, 2, "both filters apply: 가방, 4");
+  handler(draw(), "csv-unfilter-0")(null, cx);
+  draw();
+  assert.deepEqual([...grid.filters], [[1, "4"]]);
+  handler(draw(), "csv-filter", "on_key_down")({ key: "escape", modifiers: {} }, cx);
+  assert.equal(grid.filters.size, 0);
+  assert.equal(grid.filterInput.value(), "");
+  draw();
+  assert.equal(grid.order, null, "no filter and no sort: the file's own rows");
+});
+
+test("while the view's rows are being worked out, edits wait instead of writing rows by a stale order", () => {
+  const { grid, commits, cx } = gridOf(people());
+  grid.pending = true;
+  grid.keyDown(key("x", "x"), cx);
+  grid.keyDown(key("delete"), cx);
+  assert.equal(grid.edit, null);
+  assert.deepEqual(commits, []);
+  assert.match(grid.note, /try again/);
+});
+
+test("a large sort lands across ticks with the same order", async () => {
+  const rows = [["n"], ...Array.from({ length: 60000 }, (_, i) => [String((i * 7919) % 60013)])];
+  const { grid, cx, draw } = gridOf(rows);
+  const t0 = Date.now();
+  grid.mouseDown(press(150, 30), cx);  // column A's sort mark (row numbers 56 px wide here, so A is 56..156)
+  draw();
+  assert.ok(Date.now() - t0 < 100, "the first slice is short");
+  await cx.idle();
+  draw();
+  assert.equal(grid.pending, false);
+  const vals = Array.from({ length: 60000 }, (_, i) => Number(rows[grid.src(i + 1)][0]));
+  assert.ok(vals.every((v, i) => i === 0 || vals[i - 1] <= v));
+});
+
 test("copy in a sorted view takes the rows as shown", async () => {
   const { grid, cx, draw } = gridOf(people());
   grid.mouseDown(press(...SORT_B), cx);
