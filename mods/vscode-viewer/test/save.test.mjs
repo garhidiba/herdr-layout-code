@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, mkdirSync, existsSync, readFileSync, chmodSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { saveArgv, saveRemote, utf8Length, windowsSave, isWindowsPath, psQuote, SAVE_UNIX } from "../save.js";
+import { saveArgv, saveRemote, utf8Length, windowsSave, isWindowsPath, psQuote, plainStderr, SAVE_UNIX } from "../save.js";
 
 function machine({ cut = false } = {}) {
   const d = mkdtempSync(join(tmpdir(), "viewer-save-")), bin = join(d, "home", ".local", "bin"), log = join(d, "hc.log");
@@ -75,6 +75,17 @@ test("Windows paths get the PowerShell writer, -EncodedCommand of a validated si
   assert.equal(psQuote("a’b"), "'a’’b'");
   assert.throws(() => windowsSave("C:\\a\nb.csv", 1));
   assert.throws(() => windowsSave("C:\\a.csv", -1));
+});
+
+test("PowerShell's CLIXML progress records stay out of the error text; its error texts are kept", async () => {
+  assert.ok(windowsSave("C:\\a.csv", 1).startsWith("$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'\n"));
+  const progress = '#< CLIXML\r\n<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><Obj S="progress" RefId="0"><TN RefId="0"><T>System.Management.Automation.PSCustomObject</T></TN><MS><I64 N="SourceId">1</I64><PR N="Record"><AV>ëª¨ë“ˆ</AV></PR></MS></Obj></Objs>';
+  assert.equal(plainStderr(`${progress}only 3 of 21 bytes arrived\r\n`), "only 3 of 21 bytes arrived\r\n");
+  assert.equal(plainStderr(`#< CLIXML\r\n<Objs Version="1.1.0.1"><S S="Error">Access &amp; denied_x000D__x000A_</S></Objs>`), "Access & denied\r\n");
+  assert.equal(plainStderr("plain text"), "plain text");
+  const exec = async (cmd) => cmd === "rm" ? { code: 0 } : { code: 4, stderr: `${progress}only 3 of 21 bytes arrived\r\n` };
+  await assert.rejects(saveRemote(exec, async () => {}, { on: "win-amd64", path: "C:/a.csv", text: "x", tmp: "/nowhere" }),
+    { message: "Cannot save to win-amd64: only 3 of 21 bytes arrived" });
 });
 
 test("utf8Length counts the bytes the text takes", () => {

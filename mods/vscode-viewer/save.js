@@ -38,7 +38,7 @@ export function encodeCommand(script) {
 // There (Windows): stdin = the text, all of it read before the file is opened.
 export function windowsSave(path, size) {
   if (!isWindowsPath(path) || /[\x00-\x1f]/.test(path) || !Number.isInteger(size) || size < 0) throw new Error(`Cannot save ${path}`);
-  return `$ErrorActionPreference = 'Stop'
+  return `$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'
 try {
   $buf = New-Object IO.MemoryStream; [Console]::OpenStandardInput().CopyTo($buf)
   if ($buf.Length -ne ${size}) { [Console]::Error.WriteLine("only $($buf.Length) of ${size} bytes arrived"); exit 4 }
@@ -64,6 +64,15 @@ export function utf8Length(text) {
   return n;
 }
 
+// stderr without PowerShell's CLIXML blocks ("#< CLIXML <Objs …>…</Objs>", written when it isn't a console, progress
+// records among it): each block gives way to its error texts, decoded (vscode-explorer's remote.js plainStderr).
+export function plainStderr(text) {
+  const unescape = (t) => t.replace(/_x([0-9A-Fa-f]{4})_/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/&(lt|gt|quot|apos|amp|#x[0-9A-Fa-f]+|#\d+);/g, (m, e) => ({ lt: "<", gt: ">", quot: '"', apos: "'", amp: "&" })[e] ?? String.fromCodePoint(e[1] === "x" ? parseInt(e.slice(2), 16) : +e.slice(1)));
+  return String(text ?? "").replace(/#< CLIXML\s*(<Objs[\s\S]*?(<\/Objs>|$))?/g, (block) =>
+    [...block.matchAll(/<S S="Error">([^<]*)<\/S>/g)].map((m) => unescape(m[1])).join(""));
+}
+
 // Writes `text` to machine `on`'s file `path` through the local file `tmp` (removed after). Rejects with why.
 export async function saveRemote(exec, writeTextFile, { on, path, text, tmp }) {
   await exec("rm", ["-f", tmp]);
@@ -71,6 +80,7 @@ export async function saveRemote(exec, writeTextFile, { on, path, text, tmp }) {
     await writeTextFile(tmp, text, null);
     const r = await exec("sh", ["-c", SEND, "herdr-save", on, tmp, ...saveArgv(path, utf8Length(text))], { timeout: 150000 })
       .catch(e => ({ code: -1, stderr: String(e?.message ?? e) }));
-    if (r.code !== 0) throw new Error(`Cannot save to ${on}${r.stderr?.trim() ? `: ${r.stderr.trim().split("\n").pop()}` : ""}`);
+    const why = plainStderr(r.stderr).trim().split(/\r?\n/).pop();
+    if (r.code !== 0) throw new Error(`Cannot save to ${on}${why ? `: ${why}` : ""}`);
   } finally { await exec("rm", ["-f", tmp]).catch(() => {}); }
 }
