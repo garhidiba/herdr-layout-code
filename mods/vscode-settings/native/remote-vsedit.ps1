@@ -52,13 +52,14 @@ if ($code -eq 86) {
   Read-Host 'Press Enter to close' | Out-Null
 }
 # --close-on-exit: the tab closes with the editor. Herdr runs a tab.new argv inside the machine's interactive shell,
-# which stays open after it ends (vsedit.sh's `exec` replaces that shell; PowerShell can't), so a Ctrl+W left a Git
-# Bash or PowerShell prompt in the tab. The shell that started this script is ended instead, only when it is one.
-if ($rest -contains '--close-on-exit') {
+# which stays open after it ends (vsedit.sh's `exec` replaces that shell; PowerShell can't, and the shell sits several
+# MSYS layers up), so a Ctrl+W left a Git Bash or PowerShell prompt in the tab. Herdr's core ends this terminal
+# instead (`hc kill`, its id in HC_TERMINAL_ID), which closes the tab as its × does.
+if ($rest -contains '--close-on-exit' -and $env:HC_TERMINAL_ID) {
   try {
-    $parent = (Get-CimInstance Win32_Process -Filter "ProcessId=$PID").ParentProcessId
-    $shell = Get-Process -Id $parent -ErrorAction Stop
-    if ($shell.ProcessName -match '^(bash|sh|zsh|fish|dash|ksh|nu|pwsh|powershell|cmd)$') { Stop-Process -Id $parent -Force }
+    $hc = (Get-Command hc -ErrorAction SilentlyContinue).Source
+    if (-not $hc) { $hc = Join-Path $env:LOCALAPPDATA 'Programs\herdr-core\hc.exe' }
+    & $hc kill $env:HC_TERMINAL_ID 2>&1 | Out-Null
   } catch {}
 }
 exit $code
