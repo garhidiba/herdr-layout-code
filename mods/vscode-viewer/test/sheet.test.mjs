@@ -66,3 +66,61 @@ test("frozen panes are held to half the grid, and Unfreeze goes back to the head
   draw();
   assert.deepEqual([grid.g.fr, grid.g.fc], [1, 0]);
 });
+
+const press = (x, y, extra = {}) => ({ position: { x, y }, local_position: { x, y }, modifiers: {}, click_count: 1, ...extra });
+const key = (k, char) => ({ key: k, key_char: char, modifiers: {} });
+// Column B (index 1) spans x 140..240; its header's sort mark is the last 16 px.
+const SORT_B = [230, 30];
+const people = () => [["name", "age"], ["다람쥐", "30"], ["가방", "4"], ["나무", ""], ["라면", "100"]];
+
+test("typing on a selected cell opens the editor with that character, and Enter writes it to that row", () => {
+  const { grid, commits, cx } = gridOf(people());
+  grid.mouseDown(press(60, 20 + 22 * 2 + 5), cx);  // row 3 (가방), column A
+  assert.deepEqual(grid.sel.active, { r: 2, c: 0 });
+  grid.keyDown(key("x", "x"), cx);
+  assert.equal(grid.edit.state.value(), "x");
+  grid.edit.state.set_value("xyz");
+  grid.keyDown(key("enter"), cx);
+  assert.deepEqual(commits, [[{ r: 2, c: 0, value: "xyz" }]]);
+  assert.deepEqual(grid.sel.active, { r: 3, c: 0 }, "and moves down");
+});
+
+test("a click on a header's sort mark cycles ascending, descending and file order; numbers by value, empties last", () => {
+  const { grid, cx, draw, sheet } = gridOf(people());
+  const names = () => { draw(); return Array.from({ length: grid.g.rows - 1 }, (_, i) => sheet.rows[grid.src(i + 1)][0]); };
+  grid.mouseDown(press(...SORT_B), cx);
+  assert.deepEqual(names(), ["가방", "다람쥐", "라면", "나무"]);
+  grid.mouseDown(press(...SORT_B), cx);
+  assert.deepEqual(names(), ["라면", "다람쥐", "가방", "나무"]);
+  grid.mouseDown(press(...SORT_B), cx);
+  assert.deepEqual(names(), ["다람쥐", "가방", "나무", "라면"]);
+  assert.deepEqual(grid.sel.active, { r: 1, c: 0 }, "the sort mark does not select");
+});
+
+test("in a sorted view, an edit, a clear and a paste write the file rows on screen, not the view's row numbers", () => {
+  const { grid, commits, cx, draw } = gridOf(people());
+  grid.mouseDown(press(...SORT_B), cx);  // age ascending: 가방 (2), 다람쥐 (1), 라면 (4), 나무 (3)
+  draw();
+  grid.sel = selectCell(1, 0);
+  grid.keyDown(key("f2"), cx);
+  grid.edit.state.set_value("bag");
+  grid.keyDown(key("enter"), cx);
+  assert.deepEqual(commits.pop(), [{ r: 2, c: 0, value: "bag" }]);
+  grid.sel = selectCell(3, 1);
+  grid.keyDown(key("delete"), cx);
+  assert.deepEqual(commits.pop(), [{ r: 4, c: 1, value: "" }]);
+  cx.clip = "p\nq";
+  grid.sel = selectCell(2, 0);
+  grid.keyDown({ key: "v", modifiers: { platform: true } }, cx);
+  assert.deepEqual(commits.pop(), [{ r: 1, c: 0, value: "p" }, { r: 4, c: 0, value: "q" }]);
+});
+
+test("copy in a sorted view takes the rows as shown", async () => {
+  const { grid, cx, draw } = gridOf(people());
+  grid.mouseDown(press(...SORT_B), cx);
+  draw();
+  grid.sel = { anchor: { r: 1, c: 0 }, focus: { r: 2, c: 1 }, active: { r: 1, c: 0 } };
+  grid.keyDown({ key: "c", modifiers: { platform: true } }, cx);
+  await cx.idle();
+  assert.equal(cx.clip, "가방\t4\n다람쥐\t30");
+});

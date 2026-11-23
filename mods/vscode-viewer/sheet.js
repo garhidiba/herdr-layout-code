@@ -13,13 +13,15 @@
 //   row above the grid says how to edit (or that the file is read-only).
 //   Freeze panes (toolbar, Freeze at <cell> / Unfreeze): the rows above and the columns left of the active cell stay
 //   put while the rest scrolls (sheetview.js maps cells to the frozen and scrolled panes); the header row always does.
+//   Sort: the mark at a header cell's right edge cycles ascending, descending and the file's order. It is a view: the
+//   file keeps its order, and selection, edits, copy and paste work in view rows mapped back to file rows (src).
 import { div } from "gpui-kit";
 import { h_flex, v_flex, InputState, Input } from "gpui-base";
 import { columnLabel, isNumber, cellText, visibleColumns, clampX, scrollToShow, columnStarts, columnAt, toTsv, parseCsv, thumbOf, scrollAtTrack } from "./csv.js";
-import { axisSpans, axisAt } from "./sheetview.js";
+import { axisSpans, axisAt, axisEnd, sourceRow, viewRows } from "./sheetview.js";
 import { selectCell, extendTo, selectRows, selectCols, selectAll, rectOf, rectCells, moveBy, clampSel } from "./selection.js";
 
-const ROW_H = 22, LETTERS_H = 20, BAR = 12, TOOLS_H = 26;
+const ROW_H = 22, LETTERS_H = 20, BAR = 12, TOOLS_H = 26, SORT_W = 16;
 // The most cells one clear or paste writes (the viewer writes them a chunk of rows per tick), and one copy takes (read a
 // few ms per tick): the app cuts off a long call.
 const MAX_EDIT = 50000, MAX_COPY = 500000;
@@ -34,9 +36,48 @@ export class SheetGrid {
     this.thumb = null; this.drag = null;                       // a bar or a selection being dragged
     this.sel = selectCell(1, 0); this.edit = null; this.note = null;
     this.freeze = { rows: 1, cols: 0 };                        // rows and columns held in place (freezeAt)
+    // The view's rows (sheetview.js): the sort, and the order it gives for the sheet `viewOf` (null: the file's own).
+    this.sort = null; this.order = null; this.viewOf = null; this.viewKey = ""; this.viewToken = 0; this.pending = false;
   }
 
-  value(r, c) { return this.sheet?.rows[r]?.[c] ?? ""; }
+  // Selection, editing and copying work in view rows; the file is read and written at the rows they show.
+  src(r) { return sourceRow(this.order, r); }
+  value(r, c) { return this.sheet?.rows[this.src(r)]?.[c] ?? ""; }
+
+  // Header clicks on the sort mark: ascending, descending, then the file's order again.
+  cycleSort(c, cx) {
+    this.sort = this.sort?.c !== c ? { c, dir: 1 } : this.sort.dir > 0 ? { c, dir: -1 } : null;
+    cx.notify();
+  }
+
+  // Works the view's order out again for a new sheet or sort: a slice now (a small file is done at once), the rest a
+  // slice per tick. Until it lands, the last order stays on screen and edits wait (they would map to stale rows).
+  // In-place edits keep the sheet, so an edited row stays where it is until the next sort.
+  refresh(sheet, key, cx) {
+    this.viewOf = sheet; this.viewKey = key;
+    const token = ++this.viewToken;
+    if (!this.sort) { this.order = null; this.pending = false; return; }
+    const it = viewRows(sheet.rows, { sort: this.sort });
+    const slice = () => { for (const until = Date.now() + 8; ;) { const s = it.next(); if (s.done) return s.value; if (Date.now() >= until) return null; } };
+    const land = (order) => { this.order = order; this.pending = false; };
+    const order = slice();
+    if (order) return land(order);
+    this.pending = true;
+    cx.spawn(async cx => {
+      for (;;) {
+        cx.notify(); await cx.sleep(1);
+        if (token !== this.viewToken) return;
+        const order = slice();
+        if (order) { land(order); return cx.notify(); }
+      }
+    });
+  }
+  // Whether edits can go to the file now: not on a read-only file, nor while the view's rows are being worked out.
+  writable() {
+    if (this.readonly) this.note = "Read-only (remote)";
+    else if (this.pending) this.note = "Sorting… try again in a moment";
+    return !this.readonly && !this.pending;
+  }
 
   // The grid's two axes for sheetview.js: rows under the letters row, the first g.fr frozen (the header at least);
   // columns right of the row numbers, the first g.fc frozen.
@@ -84,6 +125,7 @@ export class SheetGrid {
     if (this.edit) this.finishEdit(true, cx);
     if (!h) return;
     const shift = e.modifiers?.shift;
+    if (h.r === 0 && h.c >= 0 && e.local_position.x >= axisEnd(h.c, this.colAxis()) - SORT_W) return this.cycleSort(h.c, cx);
     if (h.r < 0 && h.c < 0) this.sel = selectAll(g.rows, g.cols);
     else if (h.r < 0) { const from = shift ? this.sel.anchor.c : h.c; this.sel = selectCols(from, h.c, g.rows); this.drag = { cols: from }; }
     else if (h.c < 0) { const from = shift ? this.sel.anchor.r : h.r; this.sel = selectRows(from, h.r, g.cols); this.drag = { rows: from }; }
@@ -139,14 +181,15 @@ export class SheetGrid {
     cx.notify();
   }
 
-  // An input over the cell, holding its value (or the typed character that opened it).
+  // An input over the cell, holding its value (or the typed character that opened it). It keeps the file row it opened
+  // on (`src`), so a view reordered meanwhile still writes there.
   startEdit(r, c, typed, cx) {
-    if (this.readonly) { this.note = "Read-only (remote)"; return cx.notify(); }
+    if (!this.writable()) return cx.notify();
     const text = typed ?? this.value(r, c), state = InputState.new({ value: text });
     state.set_selected_range({ start: text.length, end: text.length });
     state.on("submit", (_e, cx) => this.commitAndMove(1, 0, cx));
     state.on("blur", (_e, cx) => this.finishEdit(true, cx));
-    this.edit = { r, c, state };
+    this.edit = { r, c, src: this.src(r), state };
     this.sel = selectCell(r, c);
     this.reveal({ r, c });
     state.focus();
@@ -163,35 +206,38 @@ export class SheetGrid {
     const e = this.edit;
     if (!e) return;
     this.edit = null;
-    if (commit && e.state.value() !== this.value(e.r, e.c) && !this.actions.commit([{ r: e.r, c: e.c, value: e.state.value() }], cx))
+    if (commit && e.state.value() !== (this.sheet.rows[e.src]?.[e.c] ?? "") && !this.actions.commit([{ r: e.src, c: e.c, value: e.state.value() }], cx))
       this.note = "Not written: the sheet is still updating, try again";
     this.handle.focus();
     cx.timer.after(100, () => e.state.release());  // not from inside its own submit or blur handler
     cx.notify();
   }
 
-  // Writes `valueAt(r, c)` into every cell of a range (a clear), within what one call can do.
+  // Writes `valueAt(r, c)` into every cell of a view range (a clear, a paste), at the file rows it shows, within what
+  // one call can do.
   writeRange(q, valueAt, cx) {
-    if (this.readonly) { this.note = "Read-only (remote)"; return; }
+    if (!this.writable()) return;
     if (rectCells(q) > MAX_EDIT) { this.note = "Too many cells to change at once here: use Edit"; return; }
     const edits = [];
     for (let r = q.r0; r <= q.r1; r++) for (let c = q.c0; c <= q.c1; c++) {
       const v = valueAt(r, c);
-      if (v !== this.value(r, c)) edits.push({ r, c, value: v });
+      if (v !== this.value(r, c)) edits.push({ r: this.src(r), c, value: v });
     }
     if (edits.length) this.actions.commit(edits, cx);
   }
 
-  // The range as TSV, read a few ms per tick (a big range takes a moment), then onto the clipboard.
+  // The range as TSV, read a few ms per tick (a big range takes a moment), then onto the clipboard: the rows as the
+  // view shows them when it starts.
   copy(cx) {
     const q = rectOf(this.sel), n = rectCells(q);
     if (n > MAX_COPY) { this.note = "Too many cells to copy at once"; return; }
-    const lines = [], sheet = this.sheet;
+    const lines = [], sheet = this.sheet, order = this.order;
     cx.spawn(async cx => {
       for (let r = q.r0; r <= q.r1;) {
         for (const until = Date.now() + 8; r <= q.r1 && Date.now() < until; r++) {
           const row = [];
-          for (let c = q.c0; c <= q.c1; c++) row.push(sheet.rows[r]?.[c] ?? "");
+          const src = sheet.rows[sourceRow(order, r)];
+          for (let c = q.c0; c <= q.c1; c++) row.push(src?.[c] ?? "");
           lines.push(toTsv([row]));
         }
         if (r <= q.r1) { this.note = `Copying… ${Math.round((r - q.r0) * 100 / (q.r1 - q.r0 + 1))}%`; cx.notify(); await cx.sleep(1); }
@@ -215,10 +261,13 @@ export class SheetGrid {
   }
 
   // `sheet` is csv.js sheetOf's; `c` the colors { bg, fg, grid, head, dim, accent, hover }; `readonly` blocks editing.
-  render(sheet, c, readonly) {
+  render(sheet, c, readonly, cx) {
     this.sheet = sheet; this.readonly = readonly;
-    const rows = sheet.rows.length, widths = sheet.widths, starts = columnStarts(widths), H = this.height || 900, W = this.width || 1600;
-    const numW = Math.max(40, String(rows).length * 8 + 16);
+    const key = JSON.stringify(this.sort);
+    if (sheet !== this.viewOf || key !== this.viewKey) this.refresh(sheet, key, cx);
+    // View rows: the header and the data rows in the view's order.
+    const rows = this.order ? this.order.length + 1 : sheet.rows.length, widths = sheet.widths, starts = columnStarts(widths), H = this.height || 900, W = this.width || 1600;
+    const numW = Math.max(40, String(sheet.rows.length).length * 8 + 16);
     // The frozen panes, held to at most half the grid each way so there is always room to scroll.
     let fr = Math.max(1, Math.min(this.freeze.rows, rows)), fc = Math.max(0, Math.min(this.freeze.cols, sheet.cols - 1));
     while (fr > 1 && (fr + 1) * ROW_H > H / 2) fr--;
@@ -247,13 +296,22 @@ export class SheetGrid {
       .child(cell(label, numW).flex_none().bg(c.head).text_color(c.dim).text_right())
       .when(fc > 0, el => el.child(h_flex().w(frozenW).flex_none().h_full().overflow_hidden().children(fixed.map(cellAt))))
       .child(div().flex_1().min_w(0).h_full().overflow_hidden().child(h_flex().w(shownW).h_full().relative().left(-shift).children(cols.map(cellAt))));
-    const values = (r) => (col) => {
-      const v = sheet.rows[r][col] ?? "", el = cell(/[\r\n]/.test(v) ? cellText(v) : v, widths[col]);
+    // A view row's cells, from the file row it shows (numbered as in the file).
+    const values = (src) => (col) => {
+      const v = sheet.rows[src]?.[col] ?? "", el = cell(/[\r\n]/.test(v) ? cellText(v) : v, widths[col]);
       return isNumber(v) ? el.text_right() : el;
     };
+    const line = (r) => { const src = this.src(r); return row(ROW_H, String(src + 1), values(src)); };
     const frozen = [], lines = [];
-    for (let r = 1; r < fr; r++) frozen.push(row(ROW_H, String(r + 1), values(r)));
-    for (let r = r0; r < r1; r++) lines.push(row(ROW_H, String(r + 1), values(r)));
+    for (let r = 1; r < fr; r++) frozen.push(line(r));
+    for (let r = r0; r < r1; r++) lines.push(line(r));
+    // A header cell with its sort mark at the right edge (a click there sorts: mouseDown): ▲ / ▼ on the sorted column.
+    const head = (col) => {
+      const dir = this.sort?.c === col ? this.sort.dir : 0;
+      return h_flex().w(widths[col]).h_full().pl(6).bg(c.head).font_bold()
+        .child(div().flex_1().min_w(0).truncate().child(cellText(sheet.rows[0]?.[col] ?? "")))
+        .child(div().w(SORT_W).flex_none().text_center().text_size(10).text_color(dir ? c.accent : c.dim).child(dir > 0 ? "▲" : dir < 0 ? "▼" : "↕"));
+    };
     const split = numW + frozenW;
     const gridLines = [numW - 1, ...fixed.map(col => numW + starts[col + 1] - 1), ...cols.map(col => split + starts[col + 1] - frozenW - this.x - 1)]
       .filter(x => x < split + view).map(x => div().absolute().top(0).bottom(0).left(x).w(1).bg(c.grid));
@@ -299,6 +357,7 @@ export class SheetGrid {
     const tools = h_flex().h(TOOLS_H).flex_none().px(10).gap(10).items_center().bg(c.head).border_b(1).border_color(c.grid)
       .text_size(11.5).text_color(c.dim)
       .child(div().flex_1().min_w(0).truncate().child(readonly ? "Read-only (remote)" : "Double-click, Enter or type to edit a cell"))
+      .when(this.pending, el => el.child(div().flex_none().child("Sorting…")))
       .child(tool("csv-freeze", `Freeze at ${columnLabel(a.c)}${a.r + 1}`, cx => this.freezeAt(cx)))
       .when(this.freeze.rows > 1 || this.freeze.cols > 0, el => el.child(tool("csv-unfreeze", "Unfreeze", cx => this.unfreeze(cx))));
     return v_flex().flex_1().min_h(0).child(tools).child(div().id("csv-sheet").track_focus(this.handle).relative().flex_1().min_h(0).overflow_hidden().flex().flex_col()
@@ -312,7 +371,7 @@ export class SheetGrid {
       .on_mouse_down("left", (e, cx) => this.mouseDown(e, cx))
       .on_key_down((e, cx) => this.keyDown(e, cx))
       .child(row(LETTERS_H, "", col => cell(columnLabel(col), widths[col]).bg(c.head).text_color(c.dim).text_center()))
-      .child(row(ROW_H, "1", col => values(0)(col).bg(c.head).font_bold()))
+      .child(row(ROW_H, "1", head))
       .children(frozen)
       .child(div().flex_1().min_h(0).overflow_hidden().child(v_flex().relative().top(-(this.y % ROW_H)).children(lines)))
       .children(gridLines)

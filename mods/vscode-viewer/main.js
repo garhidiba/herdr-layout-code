@@ -390,7 +390,7 @@ export default class Viewer extends View {
     cx.notify();
   }
 
-  body(t) {
+  body(t, cx) {
     if (this.kind === "image" || this.kind === "video") return this.img
       ? v_flex().flex_1().min_h(0).relative().items_center().justify_center().p(16).overflow_hidden().bg(EDITOR_BG)
         .child(window.paint_path(RECT(), Background.checkerboard("#323842", 8)).absolute().top(0).left(0).size_full())
@@ -398,7 +398,7 @@ export default class Viewer extends View {
       : div().p(12).text_color(t.dim).child(this.error || this.fetching || `Loading ${this.kind}…`);
     if (!this.code) return div().p(12).text_color(t.dim).child(this.error || "Loading file…");
     if (this.preview && this.kind === "csv") return this.sheet?.cols
-      ? this.grid.render(this.sheet, { bg: EDITOR_BG, fg: EDITOR_FG, grid: t.border, head: t.chrome, dim: t.dim, accent: t.accent ?? "#61afef", hover: t.hover }, Boolean(this.on))
+      ? this.grid.render(this.sheet, { bg: EDITOR_BG, fg: EDITOR_FG, grid: t.border, head: t.chrome, dim: t.dim, accent: t.accent ?? "#61afef", hover: t.hover }, Boolean(this.on), cx)
       : div().flex_1().p(12).bg(EDITOR_BG).text_color(t.dim).child(this.sheet ? "Empty file" : `Reading rows… ${(this.sheetRows ?? 0).toLocaleString()}`);
     if (this.preview) return TextView.markdown("preview", this.kind === "html" ? this.htmlText(this.code.value()) : this.code.value()).scrollable(true).selectable(true)
       .flex_1().min_h(0).px(28).py(16).bg(EDITOR_BG).text_color(EDITOR_FG).text_size(14);
@@ -442,7 +442,7 @@ export default class Viewer extends View {
         .child(div().flex_1().text_color("#e5c07b").child(`Restore unsaved changes from ${timeText(this.restore.time)}?${this.restore.changed ? " The file has changed on disk since." : ""}`))
         .child(button("restore", "Restore", cx => this.restoreBackup(cx)))
         .child(button("discard", "Discard", cx => this.discardBackup(cx)))))
-      .child(this.body(t))
+      .child(this.body(t, cx))
       .child(h_flex().h(22).flex_none().px(12).gap(16).items_center().bg(t.chrome).border_t(1).border_color(t.border).text_size(11.5).text_color(t.muted)
         .child(div().child(text ? this.language : IMAGES[extOf(this.file)] ?? VIDEOS[extOf(this.file)]))
         .when(this.on, el => el.child(div().child("Read-only (remote)")))
