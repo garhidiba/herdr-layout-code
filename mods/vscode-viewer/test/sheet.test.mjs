@@ -19,7 +19,7 @@ function gridOf(rows, readonly = false) {
   const sheet = sheetOf(rows);
   sheet.widths = sheet.widths.map(() => 100);
   grid.width = 600; grid.height = 400;
-  const draw = () => grid.render(sheet, COLORS, readonly, cx);
+  const draw = () => cx.rendering(() => grid.render(sheet, COLORS, readonly, cx));
   draw();
   return { grid, sheet, commits, cx, draw };
 }
@@ -165,6 +165,8 @@ test("while the view's rows are being worked out, edits wait instead of writing 
   assert.match(grid.note, /try again/);
 });
 
+// The render starts the later slices: the task must not notify before its first await (the app refuses a notify
+// during render, which left the sort pending forever).
 test("a large sort lands across ticks with the same order", async () => {
   const rows = [["n"], ...Array.from({ length: 60000 }, (_, i) => [String((i * 7919) % 60013)])];
   const { grid, cx, draw } = gridOf(rows);

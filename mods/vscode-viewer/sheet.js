@@ -72,6 +72,9 @@ export class SheetGrid {
   // Works the view's order out again for a new sheet, sort or filter: a slice now (a small file is done at once), the rest a
   // slice per tick. Until it lands, the last order stays on screen and edits wait (they would map to stale rows).
   // In-place edits keep the sheet, so an edited row stays where it is until the next sort.
+  // It runs from render, and a spawned body runs at once in its caller's call up to its first await, where the app
+  // refuses cx.notify(): the task waits a tick before anything else. (The app's script engine is far slower than node:
+  // a few hundred rows already outlast the first slice.)
   refresh(sheet, key, cx) {
     this.viewOf = sheet; this.viewKey = key;
     const token = ++this.viewToken;
@@ -84,7 +87,7 @@ export class SheetGrid {
     this.pending = true;
     cx.spawn(async cx => {
       for (;;) {
-        cx.notify(); await cx.sleep(1);
+        await cx.sleep(1);
         if (token !== this.viewToken) return;
         const order = slice();
         if (order) { land(order); return cx.notify(); }

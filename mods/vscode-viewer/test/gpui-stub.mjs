@@ -37,12 +37,19 @@ export function handler(n, id, name = "on_click") {
   return null;
 }
 
-// A Context for handlers: spawned tasks run to the end before `cx.idle()` resolves.
+// A Context for handlers: spawned tasks run to the end before `cx.idle()` resolves. As in the app, a spawned body runs
+// at once in the caller's call up to its first await, and `cx.notify()` throws while `cx.rendering(fn)` runs a render.
 export function fakeCx() {
   const tasks = [];
+  let inRender = false;
   const cx = {
     notified: 0, clip: null,
-    notify() { cx.notified++; }, stop_propagation() {}, focus_handle: () => ({ focus() {} }),
+    notify() {
+      if (inRender) throw new TypeError("cx.notify() is not allowed during the `render` phase; request a re-render from an event handler instead");
+      cx.notified++;
+    },
+    rendering(fn) { inRender = true; try { return fn(); } finally { inRender = false; } },
+    stop_propagation() {}, focus_handle: () => ({ focus() {} }),
     timer: { after() {} }, sleep: async () => {},
     spawn(fn) { tasks.push(fn(cx)); },
     write_to_clipboard(t) { cx.clip = t; }, read_from_clipboard: () => cx.clip,
