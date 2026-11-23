@@ -51,4 +51,14 @@ if ($code -eq 86) {
   Write-Host "The editor could not start on this machine (run $here\vsedit.exe with VSEDIT_DEBUG=1 to see why)."
   Read-Host 'Press Enter to close' | Out-Null
 }
+# --close-on-exit: the tab closes with the editor. Herdr runs a tab.new argv inside the machine's interactive shell,
+# which stays open after it ends (vsedit.sh's `exec` replaces that shell; PowerShell can't), so a Ctrl+W left a Git
+# Bash or PowerShell prompt in the tab. The shell that started this script is ended instead, only when it is one.
+if ($rest -contains '--close-on-exit') {
+  try {
+    $parent = (Get-CimInstance Win32_Process -Filter "ProcessId=$PID").ParentProcessId
+    $shell = Get-Process -Id $parent -ErrorAction Stop
+    if ($shell.ProcessName -match '^(bash|sh|zsh|fish|dash|ksh|nu|pwsh|powershell|cmd)$') { Stop-Process -Id $parent -Force }
+  } catch {}
+}
 exit $code
