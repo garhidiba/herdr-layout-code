@@ -9,13 +9,14 @@
 //   rows, columns or all; arrows move (Shift: extend), Tab moves right, ⌘A selects all, ⌘C copies the range as TSV.
 //   Editing (not on a remote, read-only file): double-click, Enter, F2 or typing opens an input on the active cell;
 //   Enter commits and moves down, Tab right, Esc cancels, leaving it commits. Delete/Backspace clear the range, ⌘V
-//   pastes TSV from the active cell, ⌘Z/⌘⇧Z undo and redo. The viewer owns the text (`actions`, main.js).
+//   pastes TSV from the active cell, ⌘Z/⌘⇧Z undo and redo. The viewer owns the text (`actions`, main.js). A toolbar
+//   row above the grid says how to edit (or that the file is read-only).
 import { div } from "gpui-kit";
 import { h_flex, v_flex, InputState, Input } from "gpui-base";
 import { columnLabel, isNumber, cellText, visibleColumns, clampX, scrollToShow, columnStarts, columnAt, toTsv, parseCsv, thumbOf, scrollAtTrack } from "./csv.js";
 import { selectCell, extendTo, selectRows, selectCols, selectAll, rectOf, rectCells, moveBy, clampSel } from "./selection.js";
 
-const ROW_H = 22, LETTERS_H = 20, HEAD_H = LETTERS_H + ROW_H, BAR = 12;
+const ROW_H = 22, LETTERS_H = 20, HEAD_H = LETTERS_H + ROW_H, BAR = 12, TOOLS_H = 26;
 // The most cells one clear or paste writes (the viewer writes them a chunk of rows per tick), and one copy takes (read a
 // few ms per tick): the app cuts off a long call.
 const MAX_EDIT = 50000, MAX_COPY = 500000;
@@ -263,7 +264,11 @@ export class SheetGrid {
         .when(!x, el => el.top(HEAD_H).right(0).w(BAR).h(bodyH).child(knob.top(t.at).left(2).h(t.len).w(BAR - 4)))
         .on_mouse_down("left", press(axis, t, track, seen, whole, true));
     };
-    return div().id("csv-sheet").track_focus(this.handle).relative().flex_1().min_h(0).overflow_hidden().flex().flex_col()
+    // The sheet's own toolbar above the grid, outside its key handler (an input there types into itself, not the grid).
+    const tools = h_flex().h(TOOLS_H).flex_none().px(10).gap(10).items_center().bg(c.head).border_b(1).border_color(c.grid)
+      .text_size(11.5).text_color(c.dim)
+      .child(div().flex_1().min_w(0).truncate().child(readonly ? "Read-only (remote)" : "Double-click, Enter or type to edit a cell"));
+    return v_flex().flex_1().min_h(0).child(tools).child(div().id("csv-sheet").track_focus(this.handle).relative().flex_1().min_h(0).overflow_hidden().flex().flex_col()
       .bg(c.bg).text_color(c.fg).text_size(12.5)
       .on_size_change((size, cx) => { if (size.width !== this.width || size.height !== this.height) { this.width = size.width; this.height = size.height; cx.notify(); } })
       .on_scroll_wheel((e, cx) => {
@@ -283,6 +288,6 @@ export class SheetGrid {
       .when(Boolean(this.note), el => el.child(div().absolute().left(numW + 8).bottom(BAR + 2).px(8).py(2).rounded(4).bg(c.head)
         .text_size(11.5).text_color(c.dim).child(this.note ?? "")))
       .when(Boolean(tx) && this.width > 0, el => el.child(bar("x")))
-      .when(Boolean(ty) && this.height > 0, el => el.child(bar("y")));
+      .when(Boolean(ty) && this.height > 0, el => el.child(bar("y"))));
   }
 }
