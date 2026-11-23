@@ -18,7 +18,7 @@ import { ImagePanel } from "./image.js";
 import { place, zoomTo, zoomStep, pinchTo, wheelTo, dragTo, zoomKey, fitOrActual } from "./imagefit.js";
 import { ownPane, closeOwnArgs } from "./pane.js";
 import { htmlToMarkdown } from "./html.js";
-import { csvRows, sheetOf, delimiterOf, editCells, rowChunks } from "./csv.js";
+import { csvRows, sheetOf, delimiterOf, editCells, rowChunks, reshape } from "./csv.js";
 import { SheetGrid } from "./sheet.js";
 // Herdr starts with PATH=/usr/bin:/bin, so Homebrew/user tools (node, code, codex, trash) are looked up here too.
 const userExec = (cmd, args, opts) => exec("sh", ["-c", 'PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; exec "$0" "$@"', cmd, ...args], opts);
@@ -140,7 +140,7 @@ export default class Viewer extends View {
     // drag running, the last pinch step's time (wheelTo), and the focus its keys need.
     if (this.kind === "image") { this.zoom = FIT_VIEW; this.zoomView = null; this.zoomDrag = null; this.pinchAt = 0; this.imageFocus = cx.focus_handle(); }
     if (this.kind === "csv") this.grid = new SheetGrid(cx, { commit: (edits, cx) => this.editSheet(edits, cx),
-      undo: (cx) => this.undoSheet(false, cx), redo: (cx) => this.undoSheet(true, cx) });
+      reshape: (op, cx) => this.reshapeSheet(op, cx), undo: (cx) => this.undoSheet(false, cx), redo: (cx) => this.undoSheet(true, cx) });
     this.autoSave = { mode: "off", delay: 1 }; this.autoToken = 0; this.hadFocus = false; this.restore = null; this.pane = null; this.missing = 0;
     this.load(cx);
     // Every 3 s; a local markdown preview every second, so it follows the terminal editor's saves.
@@ -391,6 +391,38 @@ export default class Viewer extends View {
     return true;
   }
   applySheetChange(start, end, insert) { this.code.set_selected_range({ start, end }); this.code.replace(insert); }
+  // Rows or columns inserted, copied or deleted from the sheet (csv.js reshape `op`), written into the buffer as its
+  // changes for a few ms per tick, then parsed again; one step on the sheet's undo. Returns whether it started.
+  reshapeSheet(op, cx) {
+    if (this.on || !this.sheet || !this.code || this.sheetBusy || this.code.value() !== this.sheetSource) return false;
+    const it = reshape(this.sheetSource, this.sheet, delimiterOf(this.file), op, SHEET_CHUNK_ROWS), group = [];
+    let lost = false;  // the buffer changed another way meanwhile: stop, and the parse it starts drops the undo
+    const step = () => {
+      if ((lost = this.code.value() !== this.sheetSource)) return false;
+      for (const until = Date.now() + 8; Date.now() < until;) {
+        const n = it.next();
+        if (n.done) return false;
+        const { start, end, insert } = n.value;
+        group.push({ start, before: this.sheetSource.slice(start, end), after: insert });
+        this.applySheetChange(start, end, insert);
+        this.sheetSource = this.code.value();
+      }
+      return true;
+    };
+    const done = (cx) => {
+      this.sheetBusy = false;
+      if (!lost && group.length) { this.sheetUndo.push(group); this.sheetRedo = []; this.sheetSource = null; }
+      this.parseSheet(cx, !lost);
+      cx.notify();
+    };
+    if (!step()) { done(cx); return true; }
+    this.sheetBusy = true;
+    cx.spawn(async cx => {
+      try { do { cx.notify(); await cx.sleep(1); } while (step()); }
+      finally { done(cx); }
+    });
+    return true;
+  }
   // Undo (or redo) the sheet's last commit, its changes in reverse (or in order); the sheet is parsed again after it.
   // A buffer changed since another way (the editor, the disk) drops the stacks.
   undoSheet(redo, cx) {

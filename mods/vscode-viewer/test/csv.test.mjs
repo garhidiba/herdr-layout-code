@@ -3,7 +3,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { parseCsv, csvRows, delimiterOf, columnLabel, isNumber, cellText, columnWidths, sheetOf, visibleColumns, clampX,
-  rowSpans, fieldText, editCells, rowChunks, toTsv, scrollToShow, columnStarts, columnAt, thumbOf, scrollAtTrack } from "../csv.js";
+  rowSpans, fieldText, editCells, rowChunks, toTsv, scrollToShow, columnStarts, columnAt, thumbOf, scrollAtTrack, reshape } from "../csv.js";
 
 test("plain rows split on commas; a trailing newline adds no empty row", () => {
   assert.deepEqual(parseCsv("a,b,c\n1,2,3\n"), [["a", "b", "c"], ["1", "2", "3"]]);
@@ -198,4 +198,47 @@ test("rows come one at a time, so a big file can be parsed a slice per tick", ()
   assert.deepEqual(it.next().value, ["a", "b\nc"]);
   assert.deepEqual(it.next().value, ["d", "e"]);
   assert.equal(it.next().done, true);
+});
+
+// A structural edit (reshape) applied to `text` change by change, as the viewer writes it.
+function reshaped(text, op, sep = ",", chunk = 80) {
+  const starts = [], sheet = sheetOf([...csvRows(text, sep, starts)], starts);
+  let out = text, last = Infinity;
+  for (const { start, end, insert } of reshape(text, sheet, sep, op, chunk)) {
+    assert.ok(end <= last, "each change comes before the previous one");
+    out = out.slice(0, start) + insert + out.slice(end);
+    last = start;
+  }
+  return out;
+}
+
+test("inserting rows writes them before a file row, quoted as needed, with the file's own line breaks", () => {
+  assert.equal(reshaped('h1,h2\r\n"a, b",c\r\n', { insertRows: 1, values: [["", ""], ["x,y", "z"]] }), 'h1,h2\r\n,\r\n"x,y",z\r\n"a, b",c\r\n');
+  assert.equal(reshaped("h\nx\n", { insertRows: 2, values: [["y"]] }), "h\nx\ny\n", "after the last row");
+  assert.equal(reshaped("h\nx", { insertRows: 2, values: [["y"], ["z"]] }), "h\nx\ny\nz", "no line break at the end: still none");
+  assert.equal(reshaped("h\nx", { insertRows: 2, values: [[""]] }), "h\nx\n\n", "an empty last row keeps a line break after it to count");
+});
+
+test("copied rows keep their own text, quotes and line breaks inside fields too, and big inserts go in chunks", () => {
+  const text = 'h,i\n"a\nb",""""\nc,d\n';
+  assert.equal(reshaped(text, { insertRows: 3, copy: [1, 2] }), 'h,i\n"a\nb",""""\nc,d\n"a\nb",""""\nc,d\n');
+  const rows = Array.from({ length: 7 }, (_, k) => [String(k)]);
+  assert.equal(reshaped("h\nx", { insertRows: 1, values: rows }, ",", 3), "h\n0\n1\n2\n3\n4\n5\n6\nx");
+  assert.equal(reshaped("h\nx", { insertRows: 2, values: rows }, ",", 3), "h\nx\n0\n1\n2\n3\n4\n5\n6");
+});
+
+test("deleting rows takes their whole text, runs at a time, never the header row", () => {
+  const text = "h\r\n1\r\n2\r\n3\r\n4\r\n";
+  assert.equal(reshaped(text, { deleteRows: [4, 2, 1, 0] }), "h\r\n3\r\n");
+  assert.equal(reshaped("h\n1\n2", { deleteRows: [2] }), "h\n1", "the last row goes with the line break before it");
+  assert.equal(reshaped('h\n"a\nb"\nc\n', { deleteRows: [1] }), "h\nc\n", "a field with a line break inside is one row");
+});
+
+test("inserting, copying and deleting columns changes every row's fields there and keeps the rest of the text", () => {
+  const text = '﻿a,"b,1",c\r\n1,"x""y",3\r\nshort\r\n';
+  assert.equal(reshaped(text, { insertCols: 1, count: 2 }), '﻿a,,,"b,1",c\r\n1,,,"x""y",3\r\nshort\r\n', "a short row stays");
+  assert.equal(reshaped(text, { insertCols: 2, count: 1, copy: 1 }), '﻿a,"b,1","b,1",c\r\n1,"x""y","x""y",3\r\nshort\r\n');
+  assert.equal(reshaped(text, { deleteCols: 1, count: 2 }), "﻿a\r\n1\r\nshort\r\n");
+  assert.equal(reshaped(text, { deleteCols: 0, count: 1 }), '﻿"b,1",c\r\n"x""y",3\r\n\r\n');
+  assert.equal(reshaped("a\tb\n1\t2\n", { insertCols: 0, count: 1 }, "\t", 1), "\ta\tb\n\t1\t2\n", "TSV, a row per change");
 });

@@ -5,7 +5,8 @@
 //   sheetOf (parsed rows): the first row is the header; columns are as many as the widest row, each as wide as its
 //   longest text in the first rows (columnWidths), within a minimum and a maximum (longer text is cut with an ellipsis).
 //   visibleColumns / clampX / scrollToShow / columnAt: what a scrolled viewport shows, and where.
-//   rowSpans / fieldText / editCells: editing cells in the text itself, by each field's own offsets (toTsv: copying).
+//   rowSpans / fieldText / editCells: editing cells in the text itself, by each field's own offsets (toTsv: copying);
+//   reshape: inserting, copying and deleting rows and columns the same way.
 
 export const delimiterOf = (file) => (/\.tsv$/i.test(file) ? "\t" : ",");
 
@@ -213,4 +214,66 @@ export function editCells(text, sheet, sep, edits) {
     sheet.starts[k] += d;
   }
   return { start: parts[0].start, end: parts[parts.length - 1].end, insert };
+}
+
+// The line break a text uses (its first one), "\n" when it has none.
+export const lineBreakOf = (text) => /\r\n|\r|\n/.exec(text)?.[0] ?? "\n";
+
+// Rows or columns inserted, copied or deleted in a sheet's text (sheetOf's `sheet`; row 0 is the header), as text
+// changes { start, end, insert }, the last in the file first: each leaves the text before it as it was, so all are
+// worked out on `text` as it is now and applied in turn. Only the rows and fields touched change; every other field
+// keeps its text (quoting too), and the line breaks are the file's own. A generator of a change per `chunk` rows at
+// most, so a caller can write a big edit a few changes per tick (the app cuts off a long call). `op`:
+//   { insertRows: at, values: [[v, ...], ...] }  rows of values before file row `at` (rows.length: after the last one)
+//   { insertRows: at, copy: [r, ...] }           those file rows' own text, there
+//   { deleteRows: [r, ...] }                     file rows (the header row stays)
+//   { insertCols: at, count, copy?: c }          `count` empty columns before column `at` in every row, or copies of
+//                                                the `count` from column `copy`; a row short of `at` stays as it is
+//   { deleteCols: at, count }
+export function* reshape(text, sheet, sep, op, chunk = 80) {
+  const { starts } = sheet, n = starts.length, eol = lineBreakOf(text), closed = /[\r\n]$/.test(text);
+  const rowEnd = (r) => rowSpans(text, starts[r], sep).end;
+  if (op.insertRows != null) {
+    const at = op.insertRows, count = (op.values ?? op.copy).length, pos = at < n ? starts[at] : text.length;
+    const line = (k) => (op.values ? op.values[k].map(v => fieldText(v, sep)).join(sep) : text.slice(starts[op.copy[k]], rowEnd(op.copy[k])));
+    for (let hi = count; hi > 0; hi -= chunk) {
+      const lines = [];
+      for (let k = Math.max(0, hi - chunk); k < hi; k++) lines.push(line(k));
+      // After a last row with no line break: each chunk starts with one; an empty last row needs one after it to count.
+      const insert = pos < text.length || closed ? lines.map(l => l + eol).join("")
+        : eol + lines.join(eol) + (hi === count && lines[lines.length - 1] === "" ? eol : "");
+      yield { start: pos, end: pos, insert };
+    }
+  } else if (op.deleteRows) {
+    const rows = [...new Set(op.deleteRows)].filter(r => r >= 1 && r < n).sort((a, b) => b - a);
+    for (let i = 0; i < rows.length;) {
+      const b = rows[i];
+      let a = b;
+      while (++i < rows.length && rows[i] === a - 1) a = rows[i];
+      // The last row goes with the line break before it when the file doesn't end with one.
+      const cut = b + 1 >= n && !closed ? (text[starts[a] - 2] === "\r" && text[starts[a] - 1] === "\n" ? 2 : 1) : 0;
+      yield { start: starts[a] - cut, end: b + 1 < n ? starts[b + 1] : text.length, insert: "" };
+    }
+  } else if (op.insertCols != null || op.deleteCols != null) {
+    const del = op.deleteCols != null, at = del ? op.deleteCols : op.insertCols, { count } = op;
+    // A row's fields (raw text) after the edit, or null when it stays as it is.
+    const edit = (f) => {
+      if (del) return f.length > at ? (f.splice(at, count), f) : null;
+      const add = Array.from({ length: count }, (_, k) => (op.copy != null ? f[op.copy + k] ?? "" : ""));
+      if (f.length <= at) { if (add.every(v => !v)) return null; while (f.length < at) f.push(""); }
+      f.splice(at, 0, ...add);
+      return f;
+    };
+    for (let hi = n; hi > 0; hi -= chunk) {
+      const lo = Math.max(0, hi - chunk);
+      let insert = "", end = 0, changed = false;
+      for (let r = lo; r < hi; r++) {
+        const { spans, end: e } = rowSpans(text, starts[r], sep), f = edit(spans.map(([a, b]) => text.slice(a, b)));
+        if (f) changed = true;
+        insert += (f ? f.join(sep) : text.slice(starts[r], e)) + (r < hi - 1 ? text.slice(e, starts[r + 1]) : "");
+        end = e;
+      }
+      if (changed) yield { start: starts[lo], end, insert };
+    }
+  }
 }
