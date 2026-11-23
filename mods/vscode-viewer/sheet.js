@@ -11,12 +11,15 @@
 //   Enter commits and moves down, Tab right, Esc cancels, leaving it commits. Delete/Backspace clear the range, ⌘V
 //   pastes TSV from the active cell, ⌘Z/⌘⇧Z undo and redo. The viewer owns the text (`actions`, main.js). A toolbar
 //   row above the grid says how to edit (or that the file is read-only).
+//   Freeze panes (toolbar, Freeze at <cell> / Unfreeze): the rows above and the columns left of the active cell stay
+//   put while the rest scrolls (sheetview.js maps cells to the frozen and scrolled panes); the header row always does.
 import { div } from "gpui-kit";
 import { h_flex, v_flex, InputState, Input } from "gpui-base";
 import { columnLabel, isNumber, cellText, visibleColumns, clampX, scrollToShow, columnStarts, columnAt, toTsv, parseCsv, thumbOf, scrollAtTrack } from "./csv.js";
+import { axisSpans, axisAt } from "./sheetview.js";
 import { selectCell, extendTo, selectRows, selectCols, selectAll, rectOf, rectCells, moveBy, clampSel } from "./selection.js";
 
-const ROW_H = 22, LETTERS_H = 20, HEAD_H = LETTERS_H + ROW_H, BAR = 12, TOOLS_H = 26;
+const ROW_H = 22, LETTERS_H = 20, BAR = 12, TOOLS_H = 26;
 // The most cells one clear or paste writes (the viewer writes them a chunk of rows per tick), and one copy takes (read a
 // few ms per tick): the app cuts off a long call.
 const MAX_EDIT = 50000, MAX_COPY = 500000;
@@ -30,17 +33,32 @@ export class SheetGrid {
     this.x = 0; this.y = 0; this.width = 0; this.height = 0;  // the scroll, and the grid's size
     this.thumb = null; this.drag = null;                       // a bar or a selection being dragged
     this.sel = selectCell(1, 0); this.edit = null; this.note = null;
+    this.freeze = { rows: 1, cols: 0 };                        // rows and columns held in place (freezeAt)
   }
 
   value(r, c) { return this.sheet?.rows[r]?.[c] ?? ""; }
 
+  // The grid's two axes for sheetview.js: rows under the letters row, the first g.fr frozen (the header at least);
+  // columns right of the row numbers, the first g.fc frozen.
+  rowAxis() {
+    const g = this.g;
+    return { frozen: g.fr, start: i => i * ROW_H, base: LETTERS_H, scroll: this.y, end: g.topH + g.bodyH, at: o => Math.min(g.rows - 1, Math.floor(o / ROW_H)) };
+  }
+  colAxis() {
+    const g = this.g;
+    return { frozen: g.fc, start: i => g.starts[i], base: g.numW, scroll: this.x, end: g.numW + g.frozenW + g.view, at: o => columnAt(g.widths, o) };
+  }
+
   // The cell under a point in the grid: r -1 is the letters row, c -1 the row-number column.
   hit(p) {
-    const g = this.g;
-    if (!g || !p) return null;
-    const r = p.y < LETTERS_H ? -1 : p.y < HEAD_H ? 0 : Math.min(g.rows - 1, 1 + Math.floor((p.y - HEAD_H + this.y) / ROW_H));
-    return { r, c: p.x < g.numW ? -1 : columnAt(g.widths, p.x - g.numW + this.x) };
+    if (!this.g || !p) return null;
+    return { r: axisAt(p.y, this.rowAxis()), c: axisAt(p.x, this.colAxis()) };
   }
+
+  // Freezes the rows above and the columns left of the active cell (the header row always stays), as Excel's Freeze
+  // Panes; unfreeze() goes back to the header row alone.
+  freezeAt(cx) { const a = this.sel.active; this.freeze = { rows: Math.max(1, a.r), cols: a.c }; this.x = this.y = 0; cx.notify(); }
+  unfreeze(cx) { this.freeze = { rows: 1, cols: 0 }; cx.notify(); }
 
   scroll(x, y, cx) {
     const g = this.g;
@@ -48,12 +66,12 @@ export class SheetGrid {
     if (x !== this.x || y !== this.y) { this.x = x; this.y = y; cx.notify(); }
   }
 
-  // Scrolls just enough to show a cell (the header row always shows).
+  // Scrolls just enough to show a cell (frozen ones always show).
   reveal({ r, c }) {
     const g = this.g;
     if (!g) return;
-    if (r >= 1) this.y = clampX(scrollToShow((r - 1) * ROW_H, ROW_H, this.y, g.bodyH), g.tall, g.bodyH);
-    this.x = clampX(scrollToShow(g.starts[c], g.widths[c], this.x, g.view), g.total, g.view);
+    if (r >= g.fr) this.y = clampX(scrollToShow((r - g.fr) * ROW_H, ROW_H, this.y, g.bodyH), g.tall, g.bodyH);
+    if (c >= g.fc) this.x = clampX(scrollToShow(g.starts[c] - g.frozenW, g.widths[c], this.x, g.view), g.total, g.view);
   }
 
   mouseDown(e, cx) {
@@ -196,46 +214,56 @@ export class SheetGrid {
     this.sel = extendTo(selectCell(q.r0, q.c0), q.r1, q.c1);
   }
 
-  // `sheet` is csv.js sheetOf's; `c` the colors { bg, fg, grid, head, dim, accent }; `readonly` blocks editing.
+  // `sheet` is csv.js sheetOf's; `c` the colors { bg, fg, grid, head, dim, accent, hover }; `readonly` blocks editing.
   render(sheet, c, readonly) {
     this.sheet = sheet; this.readonly = readonly;
-    const rows = sheet.rows.length, widths = sheet.widths, starts = columnStarts(widths), total = starts[widths.length];
+    const rows = sheet.rows.length, widths = sheet.widths, starts = columnStarts(widths), H = this.height || 900, W = this.width || 1600;
     const numW = Math.max(40, String(rows).length * 8 + 16);
+    // The frozen panes, held to at most half the grid each way so there is always room to scroll.
+    let fr = Math.max(1, Math.min(this.freeze.rows, rows)), fc = Math.max(0, Math.min(this.freeze.cols, sheet.cols - 1));
+    while (fr > 1 && (fr + 1) * ROW_H > H / 2) fr--;
+    while (fc > 0 && starts[fc] > (W - numW) / 2) fc--;
+    const topH = LETTERS_H + fr * ROW_H, frozenW = starts[fc], total = starts[widths.length] - frozenW;
     // Each bar takes a BAR-wide gutter of its own when there is something to scroll, so its track never covers cells.
-    const tall = (rows - 1) * ROW_H, hasY = tall > (this.height || 900) - HEAD_H;
-    const view = Math.max(0, (this.width || 1600) - numW - (hasY ? BAR : 0)), hasX = total > view;
-    const bodyH = Math.max(0, (this.height || 900) - HEAD_H - (hasX ? BAR : 0));
+    const tall = (rows - fr) * ROW_H, hasY = tall > H - topH;
+    const view = Math.max(0, W - numW - frozenW - (hasY ? BAR : 0)), hasX = total > view;
+    const bodyH = Math.max(0, H - topH - (hasX ? BAR : 0));
     this.x = clampX(this.x, total, view); this.y = clampX(this.y, tall, bodyH);
-    this.g = { numW, view, total, tall, bodyH, starts, widths, rows, cols: sheet.cols };
+    this.g = { numW, view, total, tall, bodyH, starts, widths, rows, cols: sheet.cols, fr, fc, topH, frozenW };
     this.sel = clampSel(this.sel, rows, sheet.cols);
     if (this.edit && (this.edit.r >= rows || this.edit.c >= sheet.cols)) this.edit = null;
-    const { first, end, shift } = visibleColumns(widths, this.x, view), cols = [];
+    // The scrolled columns on screen, past the frozen ones (csv.js visibleColumns over the whole row, from their start).
+    const { first, end, shift } = visibleColumns(widths, frozenW + this.x, view), cols = [], fixed = [];
     for (let col = first; col < end; col++) cols.push(col);
-    const r0 = 1 + Math.floor(this.y / ROW_H), r1 = Math.min(rows, 1 + Math.ceil((this.y + bodyH) / ROW_H));
+    for (let col = 0; col < fc; col++) fixed.push(col);
+    const r0 = fr + Math.floor(this.y / ROW_H), r1 = Math.min(rows, fr + Math.ceil((this.y + bodyH) / ROW_H));
     // A render is a handful of calls per cell, every frame a scroll moves: cells are kept to the fewest (the vertical
     // grid lines are drawn once per column below, not per cell; the row's width keeps cells from shrinking).
     const cell = (text, w) => div().w(w).px(6).truncate().child(text);
     const shownW = starts[end] - starts[first];
-    // One grid line: its number, then the columns on screen, cut at the viewport's edges. The line height is a px
-    // string: a bare number is a multiplier of the font size.
+    // One grid line: its number, the frozen columns, then the scrolled ones on screen, cut at the viewport's edges. The
+    // line height is a px string: a bare number is a multiplier of the font size.
     const row = (h, label, cellAt) => h_flex().h(h).flex_none().overflow_hidden().line_height(`${h - 1}px`).border_b(1).border_color(c.grid)
       .child(cell(label, numW).flex_none().bg(c.head).text_color(c.dim).text_right())
+      .when(fc > 0, el => el.child(h_flex().w(frozenW).flex_none().h_full().overflow_hidden().children(fixed.map(cellAt))))
       .child(div().flex_1().min_w(0).h_full().overflow_hidden().child(h_flex().w(shownW).h_full().relative().left(-shift).children(cols.map(cellAt))));
     const values = (r) => (col) => {
       const v = sheet.rows[r][col] ?? "", el = cell(/[\r\n]/.test(v) ? cellText(v) : v, widths[col]);
       return isNumber(v) ? el.text_right() : el;
     };
-    const lines = [];
+    const frozen = [], lines = [];
+    for (let r = 1; r < fr; r++) frozen.push(row(ROW_H, String(r + 1), values(r)));
     for (let r = r0; r < r1; r++) lines.push(row(ROW_H, String(r + 1), values(r)));
-    const gridLines = [numW - 1, ...cols.map(col => numW + starts[col + 1] - this.x - 1)].filter(x => x < numW + view)
-      .map(x => div().absolute().top(0).bottom(0).left(x).w(1).bg(c.grid));
-    // Where a cell span shows on screen, clipped to the part of the grid its rows belong to; null when off screen.
+    const split = numW + frozenW;
+    const gridLines = [numW - 1, ...fixed.map(col => numW + starts[col + 1] - 1), ...cols.map(col => split + starts[col + 1] - frozenW - this.x - 1)]
+      .filter(x => x < split + view).map(x => div().absolute().top(0).bottom(0).left(x).w(1).bg(c.grid));
+    // Lines along the frozen panes' edges past the header row, as a spreadsheet draws them.
+    if (fc > 0) gridLines.push(div().absolute().top(0).bottom(0).left(split - 1).w(1).bg(c.dim));
+    if (fr > 1) gridLines.push(div().absolute().left(0).right(0).top(topH - 1).h(1).bg(c.dim));
+    // Where a cell span shows on screen: a box per pane it reaches (sheetview.js axisSpans), none when off screen.
     const box = (ra, rb, ca, cb) => {
-      const left = Math.max(numW, numW + starts[ca] - this.x), right = Math.min(numW + view, numW + starts[cb + 1] - this.x);
-      const out = [];
-      if (ra === 0) out.push({ top: LETTERS_H, bottom: HEAD_H });
-      if (rb >= 1) out.push({ top: Math.max(HEAD_H, HEAD_H + (Math.max(ra, 1) - 1) * ROW_H - this.y), bottom: Math.min(HEAD_H + bodyH, HEAD_H + rb * ROW_H - this.y) });
-      return right > left ? out.filter(b => b.bottom > b.top).map(b => ({ ...b, left, w: right - left })) : [];
+      const ys = axisSpans(ra, rb, this.rowAxis()), xs = axisSpans(ca, cb, this.colAxis());
+      return ys.flatMap(([top, bottom]) => xs.map(([left, right]) => ({ top, bottom, left, w: right - left })));
     };
     const q = rectOf(this.sel), a = this.sel.active;
     const marks = [
@@ -260,14 +288,19 @@ export class SheetGrid {
       const knob = div().id(`csv-thumb-${axis}`).absolute().rounded(3).bg(c.dim).opacity(0.5)
         .on_mouse_down("left", press(axis, t, track, seen, whole, false));
       return div().id(`csv-track-${axis}`).absolute().bg(c.bg)
-        .when(x, el => el.left(numW).bottom(0).w(view).h(BAR).child(knob.left(t.at).top(2).w(t.len).h(BAR - 4)))
-        .when(!x, el => el.top(HEAD_H).right(0).w(BAR).h(bodyH).child(knob.top(t.at).left(2).h(t.len).w(BAR - 4)))
+        .when(x, el => el.left(split).bottom(0).w(view).h(BAR).child(knob.left(t.at).top(2).w(t.len).h(BAR - 4)))
+        .when(!x, el => el.top(topH).right(0).w(BAR).h(bodyH).child(knob.top(t.at).left(2).h(t.len).w(BAR - 4)))
         .on_mouse_down("left", press(axis, t, track, seen, whole, true));
     };
-    // The sheet's own toolbar above the grid, outside its key handler (an input there types into itself, not the grid).
+    // The sheet's own toolbar above the grid, outside its key handler (an input there types into itself, not the grid),
+    // with ghost buttons as the viewer's.
+    const tool = (id, label, onClick) => div().id(id).flex_none().px(7).h(20).flex().items_center().rounded(4).cursor_pointer()
+      .text_color(c.fg).hover(s => s.bg(c.hover ?? c.grid)).on_click((_e, cx) => onClick(cx)).child(label);
     const tools = h_flex().h(TOOLS_H).flex_none().px(10).gap(10).items_center().bg(c.head).border_b(1).border_color(c.grid)
       .text_size(11.5).text_color(c.dim)
-      .child(div().flex_1().min_w(0).truncate().child(readonly ? "Read-only (remote)" : "Double-click, Enter or type to edit a cell"));
+      .child(div().flex_1().min_w(0).truncate().child(readonly ? "Read-only (remote)" : "Double-click, Enter or type to edit a cell"))
+      .child(tool("csv-freeze", `Freeze at ${columnLabel(a.c)}${a.r + 1}`, cx => this.freezeAt(cx)))
+      .when(this.freeze.rows > 1 || this.freeze.cols > 0, el => el.child(tool("csv-unfreeze", "Unfreeze", cx => this.unfreeze(cx))));
     return v_flex().flex_1().min_h(0).child(tools).child(div().id("csv-sheet").track_focus(this.handle).relative().flex_1().min_h(0).overflow_hidden().flex().flex_col()
       .bg(c.bg).text_color(c.fg).text_size(12.5)
       .on_size_change((size, cx) => { if (size.width !== this.width || size.height !== this.height) { this.width = size.width; this.height = size.height; cx.notify(); } })
@@ -280,6 +313,7 @@ export class SheetGrid {
       .on_key_down((e, cx) => this.keyDown(e, cx))
       .child(row(LETTERS_H, "", col => cell(columnLabel(col), widths[col]).bg(c.head).text_color(c.dim).text_center()))
       .child(row(ROW_H, "1", col => values(0)(col).bg(c.head).font_bold()))
+      .children(frozen)
       .child(div().flex_1().min_h(0).overflow_hidden().child(v_flex().relative().top(-(this.y % ROW_H)).children(lines)))
       .children(gridLines)
       .children(marks)

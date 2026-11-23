@@ -398,7 +398,7 @@ export default class Viewer extends View {
       : div().p(12).text_color(t.dim).child(this.error || this.fetching || `Loading ${this.kind}…`);
     if (!this.code) return div().p(12).text_color(t.dim).child(this.error || "Loading file…");
     if (this.preview && this.kind === "csv") return this.sheet?.cols
-      ? this.grid.render(this.sheet, { bg: EDITOR_BG, fg: EDITOR_FG, grid: t.border, head: t.chrome, dim: t.dim, accent: t.accent ?? "#61afef" }, Boolean(this.on))
+      ? this.grid.render(this.sheet, { bg: EDITOR_BG, fg: EDITOR_FG, grid: t.border, head: t.chrome, dim: t.dim, accent: t.accent ?? "#61afef", hover: t.hover }, Boolean(this.on))
       : div().flex_1().p(12).bg(EDITOR_BG).text_color(t.dim).child(this.sheet ? "Empty file" : `Reading rows… ${(this.sheetRows ?? 0).toLocaleString()}`);
     if (this.preview) return TextView.markdown("preview", this.kind === "html" ? this.htmlText(this.code.value()) : this.code.value()).scrollable(true).selectable(true)
       .flex_1().min_h(0).px(28).py(16).bg(EDITOR_BG).text_color(EDITOR_FG).text_size(14);
