@@ -2,7 +2,7 @@
 // machine yet: an Install Editor button asks the Explorer to install it, as its confirm dialog's yes does), preview?: true
 // | "html" (shown rendered whatever its extension, as markdown or as HTML: the terminal editor's preview, editor/mdpreview.cjs) }.
 // Opens straight into Herdr's built-in editor (Atom One Dark colors, VS Code's file-type recognition from langs.json),
-// saves with Cmd+S ("vscode-viewer.save" in keys.json), flags changes on disk, and shows a VS Code-style status bar.
+// saves with Cmd+S ("vscode-viewer.save" in keys.json; a file on another machine through save.js), flags changes on disk, and shows a VS Code-style status bar.
 // Images open as a preview that zooms and pans like the Image Viewer column (imagefit.js), videos as a still with Open in Player (from another machine both are fetched first:
 // preview.js); markdown opens rendered, with Edit to switch to the editor; HTML too (as Markdown: html.js), with Open in Browser.
 // CSV and TSV open as a spreadsheet grid of the buffer's text (csv.js, sheet.js), with Edit too; cells select, copy and
@@ -13,6 +13,7 @@ import { View, div, image, PathBuilder, Background } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState, TextView } from "gpui-base";
 import { props, readTextFile, writeTextFile, exec, theme, appHome, nextCommand, focused, panes, spaces, run, shared, setShared } from "herdr";
 import { CACHE, IMAGES, pathHash, statOf as statOn, cachePreview } from "./preview.js";
+import { saveRemote } from "./save.js";
 import { ImagePanel } from "./image.js";
 import { place, zoomTo, zoomStep, pinchTo, wheelTo, dragTo, zoomKey, fitOrActual } from "./imagefit.js";
 import { ownPane, closeOwnArgs } from "./pane.js";
@@ -197,24 +198,25 @@ export default class Viewer extends View {
   // Herdr calls this when the tab closes: keep unsaved text as a hot-exit backup (bounded: one stat and one write).
   async close() {
     if (this.imageView) return this.imageView.close?.();
-    if (!this.code || !this.dirty || this.on) return;
+    if (!this.code || !this.dirty) return;
     try {
-      const st = await statOf(this.file);
+      // A remote file isn't asked about on the way out (its machine may be slow or gone): its backup keeps which
+      // machine and which text it was loaded as instead (`on`, `base`: pathHash of that text).
+      const st = this.on ? null : await statOf(this.file);
       await exec("mkdir", ["-p", `${appHome()}/${BACKUPS}`]);
       await writeTextFile(this.backupPath(), JSON.stringify({ path: this.file, text: this.code.value(), cursor: null, time: Date.now(),
-        mtimeMs: st ? st.mtime * 1000 : null, size: st?.size ?? null }));
+        mtimeMs: st ? st.mtime * 1000 : null, size: st?.size ?? null, ...(this.on ? { on: this.on, base: pathHash(this.text ?? "") } : {}) }));
     } catch {}
   }
-  backupPath() { return `${appHome()}/${BACKUPS}/${pathHash(this.file)}.json`; }
-  removeBackup() { if (!this.on) exec("rm", ["-f", this.backupPath()]).catch(() => {}); }
+  backupPath() { return `${appHome()}/${BACKUPS}/${pathHash(this.on ? `${this.on}:${this.file}` : this.file)}.json`; }
+  removeBackup() { exec("rm", ["-f", this.backupPath()]).catch(() => {}); }
   // On first load: a backup with other text than the disk is offered back.
   async findBackup(disk) {
-    if (this.on) return;
     const b = await readTextFile(this.backupPath()).then(t => JSON.parse(t)).catch(() => null);
-    if (!b || b.path !== this.file || typeof b.text !== "string") return;
+    if (!b || b.path !== this.file || (b.on ?? null) !== this.on || typeof b.text !== "string") return;
     if (b.text === disk) return this.removeBackup();
-    const st = await statOf(this.file);
-    const changed = b.mtimeMs == null ? !!st : !st || Math.floor(b.mtimeMs / 1000) !== st.mtime || b.size !== st.size;
+    const st = this.on ? null : await statOf(this.file);
+    const changed = this.on ? b.base !== pathHash(disk) : b.mtimeMs == null ? !!st : !st || Math.floor(b.mtimeMs / 1000) !== st.mtime || b.size !== st.size;
     this.restore = { text: b.text, time: b.time, changed };
   }
   restoreBackup(cx) {
@@ -227,7 +229,7 @@ export default class Viewer extends View {
   discardBackup(cx) { this.restore = null; this.removeBackup(); cx.notify(); }
   // afterDelay: save `delay` seconds after the last change (a newer change restarts the wait).
   scheduleAutoSave(cx) {
-    if (this.autoSave.mode !== "afterDelay" || !this.dirty || this.on) return;
+    if (this.autoSave.mode !== "afterDelay" || !this.dirty) return;
     const token = ++this.autoToken;
     cx.timer.after(this.autoSave.delay * 1000, cx => { if (token === this.autoToken && !this.conflict) this.save(cx); });
   }
@@ -235,7 +237,7 @@ export default class Viewer extends View {
   build(value) {
     this.code?.release();
     const name = this.file.split("/").pop();
-    this.code = EditorState.new({ language: lookup(name, this.table) ?? "text", readonly: Boolean(this.on), value, font_size: 13,
+    this.code = EditorState.new({ language: lookup(name, this.table) ?? "text", value, font_size: 13,
       soft_wrap: this.wrap, syntax: { ...ONE_DARK, ...(this.palette ?? {}) } });
     this.code.on("change", (_e, cx) => { this.dirty = this.code.value() !== this.text; this.scheduleAutoSave(cx); cx.notify(); });
   }
@@ -253,7 +255,10 @@ export default class Viewer extends View {
           this.language = scope ? NAMES[scope] ?? scope.replace(/^(source|text)\./, "") : "Plain Text";
         }
         if (this.kind === "image" || this.kind === "video") return await this.loadPreview(cx);
+        const saves = this.saves;
         const disk = await readTextFile(this.file, { on: this.on });
+        // A read that overlapped a save may hold the text from before (or, remotely, from during) it.
+        if (this.saving || saves !== this.saves) return;
         this.noteMissing(disk === null);
         if (disk === null) this.error = "This file is no longer available";
         else if (disk.includes("\0")) { this.code?.release(); this.code = null; this.error = "Binary file · no text preview"; }
@@ -294,16 +299,22 @@ export default class Viewer extends View {
     } finally { this.copying = false; }
   }
 
-  // Writes only if the disk still holds what was loaded; otherwise the conflict banner decides.
+  // Writes only if the disk still holds what was loaded; otherwise the conflict banner decides. A remote file goes
+  // through save.js, read back first instead, as writeTextFile's `expected` can't reach it (a change landing between
+  // that read and the write isn't caught); a remote write that fails keeps the buffer and says why (saveError).
   async save(cx, force = false) {
-    if (!this.code || !this.dirty || this.on) return;
+    if (!this.code || !this.dirty || this.saving) return;
     const value = this.code.value();
+    this.saving = true;
     try {
-      const expected = force ? await readTextFile(this.file) : this.text;
-      await writeTextFile(this.file, value, expected);
-      this.text = value; this.facts = facts(value); this.dirty = false; this.conflict = false; this.error = null;
+      if (!this.on) await writeTextFile(this.file, value, force ? await readTextFile(this.file) : this.text);
+      else if (!force && await readTextFile(this.file, { on: this.on }).catch(() => undefined) !== this.text) throw new Error("conflict");
+      else await saveRemote(exec, writeTextFile, { on: this.on, path: this.file, text: value, tmp: `${appHome()}/${CACHE}/${pathHash(`${this.on}:${this.file}`)}.save.part` });
+      this.text = value; this.facts = facts(value); this.dirty = this.code.value() !== value; this.conflict = false; this.error = null; this.saveError = null;
       this.removeBackup();
-    } catch { this.conflict = true; }
+    } catch (e) { if (this.on && e.message !== "conflict") this.saveError = e.message; else this.conflict = true; }
+    finally { this.saving = false; this.saves = (this.saves ?? 0) + 1; }
+    if (!this.saveError) this.scheduleAutoSave(cx);  // typing that went on during the save
     cx.notify();
   }
 
@@ -356,7 +367,7 @@ export default class Viewer extends View {
   // Many rows (a cleared column, a big paste) go a chunk of rows per tick, each its own change, since a long call is cut
   // off; the sheet's undo takes them back together. Another commit waits for a chunked one to finish (returns false).
   editSheet(edits, cx) {
-    if (this.on || !this.sheet || !this.code || this.sheetBusy || this.code.value() !== this.sheetSource) return false;
+    if (!this.sheet || !this.code || this.sheetBusy || this.code.value() !== this.sheetSource) return false;
     const group = [], chunks = rowChunks(edits, SHEET_CHUNK_ROWS), sep = delimiterOf(this.file);
     const step = (chunk) => {
       const text = this.code.value();
@@ -383,7 +394,7 @@ export default class Viewer extends View {
   // Undo (or redo) the sheet's last commit, its changes in reverse (or in order); the sheet is parsed again after it.
   // A buffer changed since another way (the editor, the disk) drops the stacks.
   undoSheet(redo, cx) {
-    if (!this.code || this.on || this.sheetBusy) return;
+    if (!this.code || this.sheetBusy) return;
     if (this.code.value() !== this.sheetSource) { this.sheetUndo = []; this.sheetRedo = []; return; }
     const group = (redo ? this.sheetRedo : this.sheetUndo).pop();
     if (!group) return;
@@ -441,7 +452,7 @@ export default class Viewer extends View {
       : div().p(12).text_color(t.dim).child(this.error || this.fetching || `Loading ${this.kind}…`);
     if (!this.code) return div().p(12).text_color(t.dim).child(this.error || "Loading file…");
     if (this.preview && this.kind === "csv") return this.sheet?.cols
-      ? this.grid.render(this.sheet, { bg: EDITOR_BG, fg: EDITOR_FG, grid: t.border, head: t.chrome, dim: t.dim, accent: t.accent ?? "#61afef", hover: t.hover }, Boolean(this.on), cx)
+      ? this.grid.render(this.sheet, { bg: EDITOR_BG, fg: EDITOR_FG, grid: t.border, head: t.chrome, dim: t.dim, accent: t.accent ?? "#61afef", hover: t.hover }, false, cx)
       : div().flex_1().p(12).bg(EDITOR_BG).text_color(t.dim).child(this.sheet ? "Empty file" : `Reading rows… ${(this.sheetRows ?? 0).toLocaleString()}`);
     if (this.preview) return TextView.markdown("preview", this.kind === "html" ? this.htmlText(this.code.value()) : this.code.value()).scrollable(true).selectable(true)
       .flex_1().min_h(0).px(28).py(16).bg(EDITOR_BG).text_color(EDITOR_FG).text_size(14);
@@ -481,11 +492,15 @@ export default class Viewer extends View {
         .when(this.kind === "video" && Boolean(this.img), el => el.child(button("play", "Open in Player", () => exec("open", [this.img.local]).catch(() => {}))))
         .when(Boolean(this.install), el => el.child(button("install", this.install === "asked" ? "Installing…" : `Install Editor on ${this.on}`, cx => this.install === "offer" && this.installEditor(cx))))
         .when(!this.on, el => el.child(button("vscode", "Open in VS Code", () => userExec("code", [this.file]).catch(() => {}))))
-        .when(text && !this.on, el => el.child(button("save", this.dirty ? "Save ⌘S" : "Saved", cx => this.save(cx), this.dirty))))
+        .when(text, el => el.child(button("save", this.dirty ? "Save ⌘S" : "Saved", cx => this.save(cx), this.dirty))))
       .when(this.conflict, el => el.child(h_flex().flex_none().px(14).py(6).gap(10).items_center().bg(t.chrome).border_b(1).border_color(t.border).text_size(12)
         .child(div().flex_1().text_color("#e5c07b").child("This file changed on disk."))
         .child(button("reload", "Reload (discard my edits)", cx => this.revert(cx)))
         .child(button("overwrite", "Overwrite", cx => this.save(cx, true)))))
+      .when(Boolean(this.saveError), el => el.child(h_flex().flex_none().px(14).py(6).gap(10).items_center().bg(t.chrome).border_b(1).border_color(t.border).text_size(12)
+        .child(div().flex_1().text_color("#e06c75").child(`${this.saveError} · your edits are kept.`))
+        .child(button("retry-save", "Retry", cx => this.save(cx)))
+        .child(button("dismiss-save", "Dismiss", cx => { this.saveError = null; cx.notify(); }))))
       .when(Boolean(this.restore), el => el.child(h_flex().flex_none().px(14).py(6).gap(10).items_center().bg(t.chrome).border_b(1).border_color(t.border).text_size(12)
         .child(div().flex_1().text_color("#e5c07b").child(`Restore unsaved changes from ${timeText(this.restore.time)}?${this.restore.changed ? " The file has changed on disk since." : ""}`))
         .child(button("restore", "Restore", cx => this.restoreBackup(cx)))
@@ -493,8 +508,8 @@ export default class Viewer extends View {
       .child(this.body(t, cx))
       .child(h_flex().h(22).flex_none().px(12).gap(16).items_center().bg(t.chrome).border_t(1).border_color(t.border).text_size(11.5).text_color(t.muted)
         .child(div().child(text ? this.language : IMAGES[extOf(this.file)] ?? VIDEOS[extOf(this.file)]))
-        .when(this.on, el => el.child(div().child("Read-only (remote)")))
-        .when(text && !this.on && this.autoSave.mode !== "off", el => el.child(div().child(this.autoSave.mode === "afterDelay" ? `Auto Save: after ${this.autoSave.delay}s` : "Auto Save: on focus change")))
+        .when(Boolean(this.on), el => el.child(div().child(`On ${this.on}`)))
+        .when(text && this.autoSave.mode !== "off", el => el.child(div().child(this.autoSave.mode === "afterDelay" ? `Auto Save: after ${this.autoSave.delay}s` : "Auto Save: on focus change")))
         .child(div().flex_1())
         .when(Boolean(this.img), el => el.when(Boolean(this.img.dims), el => el.child(div().child(`${this.img.dims.width} × ${this.img.dims.height}`))).child(div().child(sizeText(this.img.size))))
         .when(Boolean(this.facts), el => el.child(div().child(`${this.facts.lines.toLocaleString()} lines`)).child(div().child(this.facts.indent)).child(div().child("UTF-8")).child(div().child(this.facts.eol))));
