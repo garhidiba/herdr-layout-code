@@ -394,7 +394,7 @@ export default class Viewer extends View {
   // Rows or columns inserted, copied or deleted from the sheet (csv.js reshape `op`), written into the buffer as its
   // changes for a few ms per tick, then parsed again; one step on the sheet's undo. Returns whether it started.
   reshapeSheet(op, cx) {
-    if (this.on || !this.sheet || !this.code || this.sheetBusy || this.code.value() !== this.sheetSource) return false;
+    if (!this.sheet || !this.code || this.sheetBusy || this.code.value() !== this.sheetSource) return false;
     const it = reshape(this.sheetSource, this.sheet, delimiterOf(this.file), op, SHEET_CHUNK_ROWS), group = [];
     let lost = false;  // the buffer changed another way meanwhile: stop, and the parse it starts drops the undo
     const step = () => {
