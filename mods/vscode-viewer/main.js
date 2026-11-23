@@ -3,7 +3,7 @@
 // | "html" (shown rendered whatever its extension, as markdown or as HTML: the terminal editor's preview, editor/mdpreview.cjs) }.
 // Opens straight into Herdr's built-in editor (Atom One Dark colors, VS Code's file-type recognition from langs.json),
 // saves with Cmd+S ("vscode-viewer.save" in keys.json), flags changes on disk, and shows a VS Code-style status bar.
-// Images open as a preview, videos as a still with Open in Player (from another machine both are fetched first:
+// Images open as a preview that zooms and pans like the Image Viewer column (imagefit.js), videos as a still with Open in Player (from another machine both are fetched first:
 // preview.js); markdown opens rendered, with Edit to switch to the editor; HTML too (as Markdown: html.js), with Open in Browser.
 // CSV and TSV open as a spreadsheet grid of the buffer's text (csv.js, sheet.js), with Edit too; cells select, copy and
 // edit in place there, writing into the same buffer.
@@ -14,6 +14,7 @@ import { v_flex, h_flex, Editor, EditorState, TextView } from "gpui-base";
 import { props, readTextFile, writeTextFile, exec, theme, appHome, nextCommand, focused, panes, spaces, run, shared, setShared } from "herdr";
 import { CACHE, IMAGES, pathHash, statOf as statOn, cachePreview } from "./preview.js";
 import { ImagePanel } from "./image.js";
+import { place, zoomTo, zoomStep, pinchTo, wheelTo, dragTo, zoomKey, fitOrActual } from "./imagefit.js";
 import { ownPane, closeOwnArgs } from "./pane.js";
 import { htmlToMarkdown } from "./html.js";
 import { csvRows, sheetOf, delimiterOf, editCells, rowChunks } from "./csv.js";
@@ -68,11 +69,13 @@ const PREVIEWS = ["markdown", "html", "csv"];
 // Rows one sheet change writes per tick (about 0.1 ms each in the app's engine, and a call is cut off near 50 ms).
 const SHEET_CHUNK_ROWS = 80;
 const sizeText = (b) => b < 1024 ? `${b} B` : b < 1048576 ? `${(b / 1024).toFixed(1)} KB` : `${(b / 1048576).toFixed(1)} MB`;
-// `sips -g pixelWidth -g pixelHeight` output -> "W × H" (null when it has none).
+// `sips -g pixelWidth -g pixelHeight` output -> { width, height } (null when it has none).
 function sipsSize(out) {
   const w = /pixelWidth: (\d+)/.exec(out ?? ""), h = /pixelHeight: (\d+)/.exec(out ?? "");
-  return w && h ? `${w[1]} × ${h[1]}` : null;
+  return w && h ? { width: +w[1], height: +h[1] } : null;
 }
+// The image tab's own view (imagefit.js): the picture fits, never enlarged past its pixels.
+const FIT_VIEW = Object.freeze({ fit: "shrink", scale: 1, x: null, y: null });
 // Hot-exit backups: <app>/mods/vscode-viewer/.backups/<path hash>.json, the format editor/backup.cjs reads and writes:
 // { path, text, cursor, time, mtimeMs, size } (mtimeMs/size: the file on disk at backup time; compared to the second).
 const BACKUPS = "mods/vscode-viewer/.backups";
@@ -132,6 +135,9 @@ export default class Viewer extends View {
     this.kind = p.preview === "html" ? "html" : p.preview ? "markdown" : kindOf(this.file ?? ""); this.preview = PREVIEWS.includes(this.kind); this.img = null;
     // The CSV preview: its parsed sheet (parseSheet), its grid (sheet.js) and the sheet's undo/redo (editSheet).
     this.sheet = null; this.sheetUndo = []; this.sheetRedo = [];
+    // The image preview's zoom, as the Image Viewer column's (imagefit.js): its view state, the picture area's size, a
+    // drag running, the last pinch step's time (wheelTo), and the focus its keys need.
+    if (this.kind === "image") { this.zoom = FIT_VIEW; this.zoomView = null; this.zoomDrag = null; this.pinchAt = 0; this.imageFocus = cx.focus_handle(); }
     if (this.kind === "csv") this.grid = new SheetGrid(cx, { commit: (edits, cx) => this.editSheet(edits, cx),
       undo: (cx) => this.undoSheet(false, cx), redo: (cx) => this.undoSheet(true, cx) });
     this.autoSave = { mode: "off", delay: 1 }; this.autoToken = 0; this.hadFocus = false; this.restore = null; this.pane = null; this.missing = 0;
@@ -390,7 +396,44 @@ export default class Viewer extends View {
     cx.notify();
   }
 
+  // The image's zoom (imagefit.js), when its size and the area's are known: [dims, view, placed], else null.
+  zoomed() {
+    const d = this.kind === "image" ? this.img?.dims : null, v = this.zoomView;
+    return d && v ? [d, v, place(this.zoom, d, v)] : null;
+  }
+  setZoom(next, cx) { if (next) { this.zoom = next; cx.notify(); } }
+
+  // The image preview, zoomed as the Image Viewer column: a trackpad pinch or ⌘/Ctrl+wheel at the pointer, a plain wheel
+  // or a drag pans a picture larger than the view, a double-click goes between the fit and actual size, keys + - 0.
+  imageBody() {
+    const z = this.zoomed(), [d, v, p] = z ?? [], large = Boolean(z) && (p.width > v.width + 0.5 || p.height > v.height + 0.5);
+    return div().id("image-tab").flex_1().min_h(0).relative().overflow_hidden().bg(EDITOR_BG).track_focus(this.imageFocus)
+      .child(window.paint_path(RECT(), Background.checkerboard("#323842", 8)).absolute().top(0).left(0).size_full())
+      .on_size_change((s, cx) => { if (s.width !== v?.width || s.height !== v?.height) { this.zoomView = s; cx.notify(); } })
+      .on_key_down((e, cx) => {
+        if (!z || e.modifiers.platform || e.modifiers.control) return;
+        const next = zoomKey(this.zoom, d, v, e.key_char ?? e.key);
+        if (next) { this.setZoom(next, cx); cx.stop_propagation(); }
+      })
+      .on_pinch((e, cx) => { if (z) { this.pinchAt = Date.now(); this.setZoom(pinchTo(this.zoom, d, v, e.delta, e.local_position), cx); } })
+      .on_scroll_wheel((e, cx) => { if (z) this.setZoom(wheelTo(this.zoom, d, v, e, Date.now() - this.pinchAt), cx); })
+      .on_mouse_down("left", (e, cx) => {
+        this.imageFocus.focus();
+        if (!z) return;
+        if (e.click_count === 2) { this.zoomDrag = null; return this.setZoom(fitOrActual(this.zoom, d, v, e.local_position, FIT_VIEW.fit), cx); }
+        if (large) this.zoomDrag = { at: e.position, x: p.x, y: p.y };
+      })
+      .on_mouse_move((e, cx) => { if (z && this.zoomDrag) this.setZoom(dragTo(this.zoom, d, v, this.zoomDrag, e.position), cx); })
+      .on_mouse_up("left", (_e, cx) => { if (this.zoomDrag) { this.zoomDrag = null; cx.notify(); } })
+      .on_hover((on) => { if (!on) this.zoomDrag = null; })
+      .when(large, el => this.zoomDrag ? el.cursor_grabbing() : el.cursor_grab())
+      // A size sips couldn't read: shown whole, without zoom.
+      .child(z ? image(this.img.path).absolute().left(p.x).top(p.y).w(p.width).h(p.height)
+        : v_flex().size_full().items_center().justify_center().child(image(this.img.path).max_w("100%").max_h("100%")));
+  }
+
   body(t, cx) {
+    if (this.kind === "image" && this.img) return this.imageBody();
     if (this.kind === "image" || this.kind === "video") return this.img
       ? v_flex().flex_1().min_h(0).relative().items_center().justify_center().p(16).overflow_hidden().bg(EDITOR_BG)
         .child(window.paint_path(RECT(), Background.checkerboard("#323842", 8)).absolute().top(0).left(0).size_full())
@@ -407,7 +450,7 @@ export default class Viewer extends View {
 
   render(cx) {
     if (this.imageView) return this.imageView.render(cx);
-    const t = theme(), text = this.kind !== "image" && this.kind !== "video", parts = (this.file ?? "").split("/").filter(Boolean), name = parts[parts.length - 1] ?? "";
+    const t = theme(), text = this.kind !== "image" && this.kind !== "video", zoomed = this.zoomed(), parts = (this.file ?? "").split("/").filter(Boolean), name = parts[parts.length - 1] ?? "";
     // Ghost buttons like VS Code's editor actions: no fill until hovered or active.
     const button = (id, label, onClick, on = false) => div().id(id).px(7).h(22).flex().items_center().rounded(4).cursor_pointer().text_size(11.5)
       .text_color(on ? t.foreground : t.muted).when(on, el => el.bg(t.selected)).hover(s => s.bg(t.hover)).on_click((_e, cx) => onClick(cx)).child(label);
@@ -426,6 +469,11 @@ export default class Viewer extends View {
       .child(h_flex().h(30).flex_none().pl(16).pr(10).gap(6).items_center()
         .child(crumbs)
         .when(this.dirty, el => el.child(div().size(8).rounded(4).bg("#e5c07b").flex_none()))
+        // The image's zoom: − / its % (click: actual size) / + / Fit.
+        .when(Boolean(zoomed), el => el.child(button("zoom-out", "−", cx => this.setZoom(zoomStep(this.zoom, zoomed[0], zoomed[1], -1), cx)))
+          .child(button("zoom-actual", `${Math.round(zoomed[2].scale * 100)}%`, cx => this.setZoom(zoomTo(this.zoom, zoomed[0], zoomed[1], 1), cx)))
+          .child(button("zoom-in", "+", cx => this.setZoom(zoomStep(this.zoom, zoomed[0], zoomed[1], 1), cx)))
+          .child(button("zoom-fit", "Fit", cx => this.setZoom(FIT_VIEW, cx), Boolean(this.zoom.fit))))
         .when(PREVIEWS.includes(this.kind), el => el.child(button("preview", this.preview ? "Edit" : "Preview", cx => { this.preview = !this.preview; this.parseSheet(cx); cx.notify(); })))
         .when(this.kind === "html" && !this.on, el => el.child(button("browser", "Open in Browser", () => exec("open", [this.file]).catch(() => {}))))
         .when(text && !this.preview, el => el.child(button("wrap", "Wrap", cx => this.toggleWrap(cx), this.wrap)))
@@ -448,7 +496,7 @@ export default class Viewer extends View {
         .when(this.on, el => el.child(div().child("Read-only (remote)")))
         .when(text && !this.on && this.autoSave.mode !== "off", el => el.child(div().child(this.autoSave.mode === "afterDelay" ? `Auto Save: after ${this.autoSave.delay}s` : "Auto Save: on focus change")))
         .child(div().flex_1())
-        .when(Boolean(this.img), el => el.when(Boolean(this.img.dims), el => el.child(div().child(this.img.dims))).child(div().child(sizeText(this.img.size))))
+        .when(Boolean(this.img), el => el.when(Boolean(this.img.dims), el => el.child(div().child(`${this.img.dims.width} × ${this.img.dims.height}`))).child(div().child(sizeText(this.img.size))))
         .when(Boolean(this.facts), el => el.child(div().child(`${this.facts.lines.toLocaleString()} lines`)).child(div().child(this.facts.indent)).child(div().child("UTF-8")).child(div().child(this.facts.eol))));
   }
 }
