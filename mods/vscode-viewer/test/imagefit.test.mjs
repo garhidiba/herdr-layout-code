@@ -1,7 +1,8 @@
 // node --test mods/vscode-viewer/test/imagefit.test.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
-import { fitScale, clampPan, place, zoomTo, zoomStep, pan, toggleFit, nextFit, imageSize, svgSize, imagesIn, STEPS, resampleWidth, resampleName, scopeOf, stateKey, scopedEntry, withEntry, GLOBAL, viewOf, fromView, drawnAt, widthToApply } from "../imagefit.js";
+import { fitScale, clampPan, place, zoomTo, zoomStep, pan, toggleFit, nextFit, imageSize, svgSize, imagesIn, STEPS, resampleWidth, resampleName, scopeOf, stateKey, scopedEntry, withEntry, GLOBAL, viewOf, fromView, drawnAt, widthToApply,
+  pinchTo, wheelTo, dragTo, zoomKey, fitOrActual, PINCH_QUIET_MS, WHEEL_LINE } from "../imagefit.js";
 
 const view = { width: 400, height: 300 };
 const wide = { width: 1600, height: 600 }, tall = { width: 300, height: 1200 }, small = { width: 100, height: 50 };
@@ -206,4 +207,74 @@ test("a kept view comes back on the same spot at the same zoom, also in a resize
   assert.equal(again.fit, "width"); assert.equal(again.y, scrolled.y);
   assert.deepEqual(fromView(null, wide, view), { fit: "contain", scale: 1, x: null, y: null });
   assert.equal(fromView({ scale: 999, cx: 0.5, cy: 0.5 }, wide, view).scale, 32);
+});
+
+// ----- gestures -----
+const hand = (scale, x = 0, y = 0) => ({ fit: null, scale, x, y });
+const imagePointAt = (p, at) => ({ x: (at.x - p.x) / p.scale, y: (at.y - p.y) / p.scale });
+
+test("a pinch grows the scale by its delta, the image point under the pointer staying under it", () => {
+  const at = { x: 100, y: 60 }, before = place(hand(1, -200, -100), wide, view), next = pinchTo(hand(1, -200, -100), wide, view, 0.1, at);
+  assert.equal(next.scale, 1.1);
+  const after = place(next, wide, view);
+  for (const k of ["x", "y"]) assert.ok(Math.abs(imagePointAt(after, at)[k] - imagePointAt(before, at)[k]) < 1e-9);
+});
+
+test("a pinch from a fit becomes a hand zoom; without a pointer it zooms at the center", () => {
+  const next = pinchTo({ fit: "contain" }, wide, view, -0.2);
+  assert.equal(next.fit, null); assert.equal(next.scale, 0.2);
+  assert.equal(next.x + next.scale * wide.width / 2, view.width / 2);
+});
+
+test("a pinch is clamped to the zoom range, and a step that would flip or zero the scale changes nothing", () => {
+  assert.equal(pinchTo(hand(30), wide, view, 0.5).scale, STEPS[STEPS.length - 1]);
+  assert.equal(pinchTo(hand(0.06), wide, view, -0.5).scale, STEPS[0]);
+  const s = hand(2);
+  assert.equal(pinchTo(s, wide, view, -1), s);
+  assert.equal(pinchTo(s, wide, view, NaN), s);
+});
+
+test("⌘ or Ctrl + wheel zooms at the pointer: down zooms in, up out", () => {
+  const e = (dy, mod) => ({ delta: { x: 0, y: dy }, modifiers: { [mod]: true }, local_position: { x: 0, y: 0 } });
+  assert.ok(wheelTo(hand(1), wide, view, e(100, "platform")).scale > 1);
+  assert.ok(wheelTo(hand(1), wide, view, e(-100, "control")).scale < 1);
+});
+
+test("a plain wheel pans a picture larger than the view, a line counting WHEEL_LINE px", () => {
+  const s = hand(1, -100, -100);
+  assert.deepEqual(wheelTo(s, wide, view, { delta: { x: 10, y: -20 }, modifiers: {} }), { ...s, x: -90, y: -120 });
+  assert.deepEqual(wheelTo(s, wide, view, { delta: { x: 0, y: 0 }, delta_lines: { x: 0, y: -1 }, modifiers: {} }), { ...s, y: -100 - WHEEL_LINE });
+});
+
+test("a plain wheel right after a pinch is the pinch's own scroll and changes nothing; later it pans again", () => {
+  const s = hand(1, -100, -100), e = { delta: { x: 30, y: 30 }, modifiers: {} };
+  assert.equal(wheelTo(s, wide, view, e, PINCH_QUIET_MS - 1), s);
+  assert.notEqual(wheelTo(s, wide, view, e, PINCH_QUIET_MS), s);
+});
+
+test("a drag moves the picture with the pointer from where it began, within its edges", () => {
+  const drag = { at: { x: 50, y: 50 }, x: -100, y: -100 };
+  assert.deepEqual(dragTo(hand(1), wide, view, drag, { x: 60, y: 30 }), hand(1, -90, -120));
+  assert.deepEqual(dragTo(hand(1), wide, view, drag, { x: 900, y: 900 }), hand(1, 0, 0));
+});
+
+test("zoom keys: + and = in, - and _ out, 0 actual size, anything else none", () => {
+  assert.equal(zoomKey(hand(1), wide, view, "+").scale, 1.25);
+  assert.equal(zoomKey(hand(1), wide, view, "=").scale, 1.25);
+  assert.equal(zoomKey(hand(1), wide, view, "-").scale, 0.75);
+  assert.equal(zoomKey(hand(1), wide, view, "_").scale, 0.75);
+  assert.equal(zoomKey({ fit: "contain" }, wide, view, "0").scale, 1);
+  assert.equal(zoomKey(hand(1), wide, view, "x"), null);
+});
+
+test("shrink fits a large picture but never enlarges a small one", () => {
+  assert.equal(fitScale(wide, view, "shrink"), 0.25);
+  assert.equal(fitScale(small, view, "shrink"), 1);
+});
+
+test("the tab's double-click: a fit goes to actual size at the pointer, a hand zoom back to the fit", () => {
+  const actual = fitOrActual({ fit: "shrink" }, wide, view, { x: 0, y: 0 }, "shrink");
+  assert.equal(actual.fit, null); assert.equal(actual.scale, 1);
+  assert.deepEqual({ x: actual.x, y: actual.y }, { x: 0, y: 0 }); // the top-left point stays at the top-left
+  assert.deepEqual(fitOrActual(hand(3), wide, view, { x: 0, y: 0 }, "shrink"), { fit: "shrink", scale: 1, x: null, y: null });
 });

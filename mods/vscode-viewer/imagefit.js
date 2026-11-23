@@ -1,7 +1,7 @@
 // The image panel's pure rules (image.js): where the picture sits in its view for a fit mode or a zoom, how zoom steps
 // and pans move it, and an image's pixel size read from its first bytes. No Herdr imports, so node tests load it.
 //
-// A view state is { fit: "contain" | "width" | "height" | null, scale, x, y }: with a fit the scale follows the view's
+// A view state is { fit: "contain" | "width" | "height" | "shrink" | null, scale, x, y }: with a fit the scale follows the view's
 // size, without one (zoomed by hand) `scale` holds; x, y are the picture's top-left in the view (null: centered).
 // `img` and `view` are { width, height } in px.
 
@@ -12,11 +12,12 @@ const clampScale = (s) => Math.min(MAX, Math.max(MIN, s));
 const known = (r) => r?.width > 0 && r?.height > 0;
 
 // The scale a fit gives: each touches the view's walls (the full inner size, no margin): width the left and right, height
-// the top and bottom, contain the two of the limiting side (small pictures enlarged too).
+// the top and bottom, contain the two of the limiting side (small pictures enlarged too); shrink (the image tab's) is
+// contain never past actual size.
 export function fitScale(img, view, fit) {
   if (!known(img) || !known(view)) return 1;
   const sw = view.width / img.width, sh = view.height / img.height;
-  return fit === "width" ? sw : fit === "height" ? sh : Math.min(sw, sh);
+  return fit === "width" ? sw : fit === "height" ? sh : fit === "shrink" ? Math.min(1, sw, sh) : Math.min(sw, sh);
 }
 
 // One axis: a picture smaller than the view is centered, a larger one always covers it (no empty edge to pan into).
@@ -63,6 +64,41 @@ export function pan(state, img, view, dx, dy) {
   const now = place(state, img, view);
   return { ...state, ...clampPan({ x: now.x + dx, y: now.y + dy }, img, view, now.scale) };
 }
+
+// ----- gestures: what a pinch, a wheel, a drag and the zoom keys do to a view state (image.js' column and dialog,
+// main.js' image tab) -----
+
+export const WHEEL_LINE = 40;     // px per wheel line
+export const PINCH_QUIET_MS = 200; // a plain wheel this soon after a pinch is the pinch's own two-finger scroll
+
+// A trackpad pinch step (`delta`: 0.1 is 10% larger) keeping the point under `at` (view px; default the center) in
+// place; a step that would flip or zero the scale changes nothing.
+export function pinchTo(state, img, view, delta, at) {
+  const k = 1 + delta;
+  return Number.isFinite(k) && k > 0 ? zoomTo(state, img, view, place(state, img, view).scale * k, at) : state;
+}
+
+// A wheel event: ⌘/Ctrl zooms at the pointer, a plain wheel pans a picture larger than the view, unless a pinch ran
+// `sincePinch` ms ago (under PINCH_QUIET_MS): then it changes nothing, so the two never fight.
+export function wheelTo(state, img, view, e, sincePinch = Infinity) {
+  const d = e.delta_lines ? { x: e.delta_lines.x * WHEEL_LINE, y: e.delta_lines.y * WHEEL_LINE } : e.delta ?? { x: 0, y: 0 };
+  if (e.modifiers?.platform || e.modifiers?.control) return zoomTo(state, img, view, place(state, img, view).scale * Math.exp(d.y * 0.0025), e.local_position);
+  return sincePinch < PINCH_QUIET_MS ? state : pan(state, img, view, d.x, d.y);
+}
+
+// A drag begun at `drag.at` (pointer) with the picture at `drag.x, drag.y`, the pointer now at `pos`: the picture
+// follows it, within its edges.
+export function dragTo(state, img, view, drag, pos) {
+  const scale = place(state, img, view).scale;
+  return { ...state, ...clampPan({ x: drag.x + pos.x - drag.at.x, y: drag.y + pos.y - drag.at.y }, img, view, scale) };
+}
+
+// The zoom keys: + (=) in, − (_) out, 0 actual size; null for any other key.
+export const zoomKey = (state, img, view, k) => k === "+" || k === "=" ? zoomStep(state, img, view, 1)
+  : k === "-" || k === "_" ? zoomStep(state, img, view, -1) : k === "0" ? zoomTo(state, img, view, 1) : null;
+
+// The image tab's double-click: a fit goes to actual size at the pointer, a hand zoom back to `fit`.
+export const fitOrActual = (state, img, view, at, fit) => state.fit ? zoomTo(state, img, view, 1, at) : { fit, scale: 1, x: null, y: null };
 
 // A fit button: on picks that fit (centered); the one already on goes back to contain.
 export const toggleFit = (state, fit) => ({ fit: state.fit === fit && fit !== "contain" ? "contain" : fit, scale: 1, x: null, y: null });

@@ -1,6 +1,6 @@
 // The Image Viewer column right of the side panel (layouts/vscode.json: the `image-panel` block, props { imagePanel: true })
 // and its zoom dialog (props { imageModal: { fit } }, opened by Expand): one picture filling the view, with Fit / Fit
-// Width / Fit Height, zoom (− / % / +, ⌘/Ctrl+wheel, double-click), panning (drag, wheel) and the folder's other
+// Width / Fit Height, zoom (− / % / +, trackpad pinch, ⌘/Ctrl+wheel, double-click), panning (drag, wheel) and the folder's other
 // images (‹ ›). Both follow the space's image in the shared value STATE, so the dialog shows what the panel does.
 // An image arrives by IMAGE_OPEN (vscode-explorer's menu item and its drag onto the panel button, through vscode-tabs'
 // drag overlay), a drop from Finder, or Import (Herdr has only a folder picker: the folder's first image, then ‹ ›).
@@ -12,7 +12,7 @@ import { div, svg, image } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
 import { props, shared, setShared, spaces, theme, exec, appHome, readTextFile, pickFolder, openOverlay, closeOverlay, layout, run, window } from "herdr";
 import { CACHE, pathHash, statOf, cachePreview, prune, imageExt } from "./preview.js";
-import { FITS, place, clampPan, zoomTo, zoomStep, pan, toggleFit, nextFit, FIT_NAMES, imageSize, svgSize, imagesIn, resampleWidth, resampleName,
+import { FITS, place, zoomTo, zoomStep, toggleFit, pinchTo, wheelTo, dragTo, zoomKey, nextFit, FIT_NAMES, imageSize, svgSize, imagesIn, resampleWidth, resampleName,
   scopeOf, stateKey, scopedEntry, withEntry, viewOf, fromView, drawnAt, widthToApply } from "./imagefit.js";
 import { sharpStart, sharpAsk, sharpDue, sharpStarted, sharpDone, sharpWarmed, sharpShown, WARM_MS } from "./sharp.js";
 import { barsStart, barsShown, barsTick, barsClick, barsEnter, barsLeave, barsOver, barsNext } from "./toolbar.js";
@@ -51,7 +51,6 @@ if command -v magick >/dev/null 2>&1; then magick "$1[0]" -filter Lanczos -resiz
 elif command -v convert >/dev/null 2>&1; then convert "$1[0]" -filter Lanczos -resize "$3"x "$4:$2.part"
 elif command -v sips >/dev/null 2>&1; then sips -s format "$4" --resampleWidth "$3" "$1" --out "$2.part" >/dev/null
 else exit 3; fi && mv "$2.part" "$2"`;
-const WHEEL_LINE = 40; // px per wheel line
 const baseName = (p) => p.slice(p.lastIndexOf("/") + 1);
 const folderOf = (p) => p.slice(0, p.lastIndexOf("/")) || "/";
 const keyOf = (c) => c?.file ? `${c.on ?? ""}:${c.file}` : null;
@@ -72,6 +71,7 @@ export class ImagePanel {
     this.view = null;     // the picture area's size
     this.list = null;     // { folder, on, names }: the images beside it
     this.busy = null; this.error = null; this.drag = null; this.press = null; this.taken = null; // press: a single click's start
+    this.pinchAt = 0;     // the last pinch step's time (imagefit.js wheelTo)
     this.bars = barsStart(); this.barsDue = 0; this.flashUntil = 0; // toolbar.js' state, its next wake
     this.scope = "space"; this.pending = null; this.seenView = null; this.saveToken = 0;
     // The scope setting, read now and every 2 s (the Settings dialog writes the file); the screen's density too (30 s).
@@ -190,9 +190,7 @@ export class ImagePanel {
     if (this.modal && e.key === "escape") return closeOverlay(props().overlay);
     if (e.key === "left" || e.key === "right") this.step(e.key === "left" ? -1 : 1);
     else if (!d || !v) return;
-    else if (k === "+" || k === "=") this.setState(zoomStep(this.state, d, v, 1), cx);
-    else if (k === "-" || k === "_") this.setState(zoomStep(this.state, d, v, -1), cx);
-    else if (k === "0") this.setState(zoomTo(this.state, d, v, 1), cx);
+    else if (zoomKey(this.state, d, v, k)) this.setState(zoomKey(this.state, d, v, k), cx);
     else if (FITS[["f", "w", "h"].indexOf(k.toLowerCase())]) this.setState(toggleFit(this.state, FITS[["f", "w", "h"].indexOf(k.toLowerCase())]), cx);
     else return;
     cx.stop_propagation();
@@ -215,15 +213,17 @@ export class ImagePanel {
     });
   }
 
-  // ⌘/Ctrl + wheel zooms at the pointer; a plain wheel pans a picture larger than the view.
+  // ⌘/Ctrl + wheel zooms at the pointer; a plain wheel pans a picture larger than the view (not right after a pinch).
   wheel(e, cx) {
     const d = this.img?.dims, v = this.view;
+    if (d && v) this.setState(wheelTo(this.state, d, v, e, Date.now() - this.pinchAt), cx);
+  }
+  // A two-finger trackpad pinch zooms at the pointer.
+  pinch(e, cx) {
+    const d = this.img?.dims, v = this.view;
     if (!d || !v) return;
-    const delta = e.delta_lines ? { x: e.delta_lines.x * WHEEL_LINE, y: e.delta_lines.y * WHEEL_LINE } : e.delta;
-    if (e.modifiers.platform || e.modifiers.control) {
-      const scale = place(this.state, d, v).scale * Math.exp(delta.y * 0.0025);
-      this.setState(zoomTo(this.state, d, v, scale, e.local_position), cx);
-    } else this.setState(pan(this.state, d, v, delta.x, delta.y), cx);
+    this.pinchAt = Date.now();
+    this.setState(pinchTo(this.state, d, v, e.delta, e.local_position), cx);
   }
 
   // The copy at `width` (null: none) is wanted now; sharp.js says when to make it, which landed copy to warm and show.
@@ -361,6 +361,7 @@ export class ImagePanel {
         if (file) this.show(file, null); else { this.error = "Drop an image file (PNG, JPEG, GIF, WebP, BMP, ICO, SVG, TIFF)"; cx.notify(); }
       })
       .on_scroll_wheel((e, cx) => this.wheel(e, cx))
+      .on_pinch((e, cx) => this.pinch(e, cx))
       .on_mouse_down("left", (e, cx) => {
         this.handle.focus();
         // A first press may be a click (toolbar.js barsClick on its release); a double-click's second one never is.
@@ -377,7 +378,7 @@ export class ImagePanel {
       .on_mouse_move((e, cx) => {
         const g = this.drag;
         if (!g || !ready) return;
-        this.setState({ ...this.state, ...clampPan({ x: g.x + e.position.x - g.at.x, y: g.y + e.position.y - g.at.y }, d, v, p.scale) }, cx);
+        this.setState(dragTo(this.state, d, v, g, e.position), cx);
       })
       .on_mouse_up("left", (e, cx) => {
         const press = this.press;
