@@ -9,7 +9,8 @@
 //   rows, columns or all; arrows move (Shift: extend), Tab moves right, ⌘A selects all, ⌘C copies the range as TSV.
 //   Editing (not on a remote, read-only file): double-click, Enter, F2 or typing opens an input on the active cell;
 //   Enter commits and moves down, Tab right, Esc cancels, leaving it commits. Delete/Backspace clear the range, ⌘V
-//   pastes TSV from the active cell, ⌘Z/⌘⇧Z undo and redo. The viewer owns the text (`actions`, main.js). A toolbar
+//   pastes TSV from the active cell (over the whole selection when it is a larger multiple of what was copied: one
+//   value fills it, a block repeats), ⌃D fills down and ⌘R / ⌃R right (⌘D is Herdr's split), ⌘Z/⌘⇧Z undo and redo. The viewer owns the text (`actions`, main.js). A toolbar
 //   row above the grid says how to edit (or that the file is read-only).
 //   Freeze panes (toolbar, Freeze at <cell> / Unfreeze): the rows above and the columns left of the active cell stay
 //   put while the rest scrolls (sheetview.js maps cells to the frozen and scrolled panes); the header row always does.
@@ -24,7 +25,7 @@ import { div } from "gpui-kit";
 import { h_flex, v_flex, InputState, Input } from "gpui-base";
 import { columnLabel, isNumber, cellText, visibleColumns, clampX, scrollToShow, columnStarts, columnAt, toTsv, parseCsv, thumbOf, scrollAtTrack } from "./csv.js";
 import { axisSpans, axisAt, axisEnd, sourceRow, viewRows } from "./sheetview.js";
-import { selectCell, extendTo, selectRows, selectCols, selectAll, rectOf, rectCells, moveBy, clampSel } from "./selection.js";
+import { selectCell, extendTo, selectRows, selectCols, selectAll, rectOf, rectCells, moveBy, clampSel, pasteRange, fillPlan } from "./selection.js";
 
 const ROW_H = 22, LETTERS_H = 20, BAR = 12, TOOLS_H = 26, SORT_W = 24;
 // A column edge's grab zone either side of it, and the widths a drag keeps to.
@@ -221,6 +222,7 @@ export class SheetGrid {
     if (cmd && k === "c") this.copy(cx);
     else if (cmd && k === "v") this.paste(cx);
     else if (cmd && k === "a") this.sel = selectAll(this.g.rows, this.g.cols);
+    else if (cmd && (k === "d" || k === "r")) this.fill(k === "d", cx);
     else if (cmd && k === "z") m.shift ? this.actions.redo(cx) : this.actions.undo(cx);
     else if (cmd) return;
     else if (ARROWS[k]) this.move(...ARROWS[k], m.shift, cx);
@@ -300,16 +302,23 @@ export class SheetGrid {
     });
   }
 
-  // TSV from the clipboard, written from the active cell down and right (rows past the last one are left out).
+  // TSV from the clipboard, written from the active cell down and right (rows past the last one are left out), or over
+  // the whole selection when it is a larger multiple of the block (selection.js pasteRange: one value fills it).
   paste(cx) {
     const text = cx.read_from_clipboard();
     if (!text) return;
-    const block = parseCsv(text.replace(/\r?\n$/, ""), "\t"), a = this.sel.active, g = this.g;
+    const block = parseCsv(text.replace(/\r?\n$/, ""), "\t"), g = this.g;
     const width = block.reduce((m, r) => Math.max(m, r.length), 0);
     if (!block.length || !width) return;
-    const q = { r0: a.r, r1: Math.min(g.rows - 1, a.r + block.length - 1), c0: a.c, c1: a.c + width - 1 };
-    this.writeRange(q, (r, c) => block[r - a.r]?.[c - a.c] ?? "", cx);
+    const p = pasteRange(rectOf(this.sel), this.sel.active, block.length, width), q = { ...p, r1: Math.min(g.rows - 1, p.r1) };
+    this.writeRange(q, (r, c) => block[(r - q.r0) % block.length]?.[(c - q.c0) % width] ?? "", cx);
     this.sel = extendTo(selectCell(q.r0, q.c0), q.r1, q.c1);
+  }
+
+  // Fill down (⌃D) or right (⌘R / ⌃R): selection.js fillPlan's row or column copied over the rest of the range.
+  fill(down, cx) {
+    const plan = fillPlan(rectOf(this.sel), down);
+    if (plan) this.writeRange(plan.q, (r, c) => (down ? this.value(plan.from, c) : this.value(r, plan.from)), cx);
   }
 
   // `sheet` is csv.js sheetOf's; `c` the colors { bg, fg, grid, head, dim, accent, hover }; `readonly` blocks editing.

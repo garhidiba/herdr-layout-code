@@ -2,7 +2,7 @@
 // The CSV sheet's selection rules (selection.js).
 import test from "node:test";
 import assert from "node:assert/strict";
-import { selectCell, extendTo, selectRows, selectCols, selectAll, rectOf, rectCells, moveBy, clampSel } from "../selection.js";
+import { selectCell, extendTo, selectRows, selectCols, selectAll, rectOf, rectCells, moveBy, clampSel, pasteRange, fillPlan } from "../selection.js";
 
 test("a click selects one cell, which is also the active one", () => {
   const s = selectCell(3, 2);
@@ -35,4 +35,27 @@ test("arrows move the active cell and collapse the range; Shift+arrows move the 
 
 test("a selection is held to a sheet that shrank", () => {
   assert.deepEqual(rectOf(clampSel(extendTo(selectCell(2, 2), 8, 8), 5, 4)), { r0: 2, r1: 4, c0: 2, c1: 3 });
+});
+
+test("a pasted cell fills a larger selection; a block tiles one that is a whole multiple of it", () => {
+  const q = { r0: 2, r1: 5, c0: 1, c1: 2 }, a = { r: 2, c: 1 };
+  assert.deepEqual(pasteRange(q, a, 1, 1), q, "one value: the whole selection");
+  assert.deepEqual(pasteRange(q, a, 2, 2), q, "2 x 2 into 4 x 2: repeated twice down");
+  assert.deepEqual(pasteRange(q, a, 1, 2), q, "a copied row into four rows");
+  assert.deepEqual(pasteRange(q, a, 3, 2), { r0: 2, r1: 4, c0: 1, c1: 2 }, "not a multiple: the block from the active cell");
+  assert.deepEqual(pasteRange({ r0: 2, r1: 2, c0: 1, c1: 1 }, a, 2, 3), { r0: 2, r1: 3, c0: 1, c1: 3 }, "one cell selected: the block's size");
+});
+
+test("fill down copies the first row over the rest, fill right the first column; one row deep takes the one above", () => {
+  assert.deepEqual(fillPlan({ r0: 2, r1: 5, c0: 0, c1: 1 }, true), { from: 2, q: { r0: 3, r1: 5, c0: 0, c1: 1 } });
+  assert.deepEqual(fillPlan({ r0: 4, r1: 4, c0: 0, c1: 1 }, true), { from: 3, q: { r0: 4, r1: 4, c0: 0, c1: 1 } });
+  assert.deepEqual(fillPlan({ r0: 1, r1: 3, c0: 2, c1: 4 }, false), { from: 2, q: { r0: 1, r1: 3, c0: 3, c1: 4 } });
+  assert.deepEqual(fillPlan({ r0: 1, r1: 3, c0: 2, c1: 2 }, false), { from: 1, q: { r0: 1, r1: 3, c0: 2, c1: 2 } });
+  assert.equal(fillPlan({ r0: 1, r1: 3, c0: 0, c1: 0 }, false), null, "nothing left of column A");
+});
+
+test("fill down leaves the header row alone: a whole column fills from its first data row, row 1 alone has nothing above", () => {
+  assert.deepEqual(fillPlan({ r0: 0, r1: 9, c0: 1, c1: 1 }, true), { from: 1, q: { r0: 2, r1: 9, c0: 1, c1: 1 } });
+  assert.equal(fillPlan({ r0: 1, r1: 1, c0: 0, c1: 0 }, true), null);
+  assert.equal(fillPlan({ r0: 0, r1: 0, c0: 0, c1: 3 }, true), null);
 });

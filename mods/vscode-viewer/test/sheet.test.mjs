@@ -274,3 +274,29 @@ test("clicks just outside an edge still select the column and sort", () => {
   assert.deepEqual(grid.sort, { c: 1, dir: 1 });
   assert.equal(grid.g.widths[1], 100);
 });
+
+const cmdKey = (k, extra = {}) => ({ key: k, modifiers: { platform: true, ...extra } });
+const range = (r0, c0, r1, c1) => ({ anchor: { r: r0, c: c0 }, focus: { r: r1, c: c1 }, active: { r: r0, c: c0 } });
+
+test("⌘V with one copied value fills the whole selection; a copied block repeats over a multiple of it", () => {
+  const { grid, commits, cx } = gridOf(table(6, 3));
+  cx.clip = "x\n";
+  grid.sel = range(1, 0, 2, 1);
+  grid.keyDown(cmdKey("v"), cx);
+  assert.deepEqual(commits.pop(), [{ r: 1, c: 0, value: "x" }, { r: 1, c: 1, value: "x" }, { r: 2, c: 0, value: "x" }, { r: 2, c: 1, value: "x" }]);
+  cx.clip = "a\tb";
+  grid.sel = range(3, 0, 4, 1);
+  grid.keyDown(cmdKey("v"), cx);
+  assert.deepEqual(commits.pop().map(e => e.value), ["a", "b", "a", "b"], "a copied row into two rows");
+  assert.deepEqual(grid.sel, range(3, 0, 4, 1));
+});
+
+test("⌃D fills down from the selection's first row, ⌘R right from its first column", () => {
+  const { grid, commits, cx } = gridOf(table(4, 3));
+  grid.sel = range(1, 0, 3, 0);
+  grid.keyDown({ key: "d", modifiers: { control: true } }, cx);
+  assert.deepEqual(commits.pop(), [{ r: 2, c: 0, value: "r1c0" }, { r: 3, c: 0, value: "r1c0" }]);
+  grid.sel = selectCell(2, 2);
+  grid.keyDown(cmdKey("r"), cx);
+  assert.deepEqual(commits.pop(), [{ r: 2, c: 2, value: "r2c1" }], "one cell takes the one left of it");
+});
