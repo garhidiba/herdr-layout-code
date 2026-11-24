@@ -80,4 +80,4 @@ function save(file, text) {
   return stamp(fs.statSync(file));
 }
 
-module.exports = { decode, encode, detectIndent, load, save, changedOnDisk, MAX_BYTES };
+module.exports = { decode, encode, detectIndent, load, save, changedOnDisk, sameStamp, MAX_BYTES };

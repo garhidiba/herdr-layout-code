@@ -669,6 +669,20 @@ class Editor {
     this.buf.markSaved();
     this.say("Reloaded from disk");
   }
+  // VS Code's watch of the open file (main checks every second, open on switching to a file): an unedited buffer
+  // reloads a change on disk as Reload does, keeping the selection and scroll (held to the new text); an edited one is
+  // told once per change and Save still asks. Its own saves and a deleted file change nothing. True when it acted.
+  checkDisk() {
+    const now = F.changedOnDisk(this.file, this.doc.stamp);
+    if (!now || F.sameStamp(now, this.doc.seen)) return false;
+    this.doc.seen = now;
+    if (this.buf.dirty) { this.say("The file has been changed on disk. Saving will ask before overwriting it.", this.colors.warn, 6000); return true; }
+    const { sel, top, topSub, left } = this;
+    this.reload();
+    this.sel = { anchor: this.buf.clamp(sel.anchor), head: this.buf.clamp(sel.head) };
+    this.top = Math.min(top, this.lines.length - 1); this.topSub = this.top === top ? topSub : 0; this.left = left;
+    return true;
+  }
   // The whole text replaced as one undo step, keeping the cursor where it was.
   replaceAll(text, at = this.head) {
     const last = this.lines.length - 1, before = this.sel;
@@ -741,6 +755,7 @@ class Editor {
       if (!st) { if (record) this.back.pop(); return false; }
       const first = !this.docs.has(file) || st.seenVersion === 0;
       this.activate(st);
+      this.checkDisk();
       if (first) this.offerBackup();
     }
     if (pos) { this.moveTo(pos); this.scrollTo(this.viewRow(this.head) - Math.floor(this.height / 3)); }
@@ -2523,6 +2538,7 @@ async function main() {
     if (reread) ed.inlineWarmup();
     if (reread || rebound) schedule();
   }, 2000).unref();
+  setInterval(() => { if (ed.checkDisk()) schedule(); }, 1000).unref(); // the open file changed by another program
 
   // Shift+clicks from the pane header (clicks.cjs), checked every 50 ms.
   const clickFile = CL.signalFile(), clicks = new CL.Clicks();

@@ -2052,3 +2052,65 @@ test("scrolled right, Up / Down, Shift+Up / Down and Page Up / Down onto a short
   assert.deepEqual(got[0].slice(1, 3), [1, 5]);
   assert.deepEqual(got[2].slice(1, 3), [3, 5]);
 });
+
+// A file opened in the editor, and `write` to change it as another program would (a later mtime each time).
+async function watchedEditor(text, name = "w.txt") {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vsedit-watch-")), file = path.join(dir, name);
+  fs.writeFileSync(file, text);
+  const ed = new Editor(file, F.load(file), await H.loadGrammar(null), H.loadTheme(), null);
+  ed.rows = 10; ed.cols = 60;
+  let t = Math.floor(Date.now() / 1000);
+  const write = (s, to = file) => { fs.writeFileSync(to, s); t += 5; fs.utimesSync(to, t, t); };
+  return { ed, dir, file, write };
+}
+
+test("an unedited file follows a change on disk, keeping the selection and scroll, clamped to the new text", async () => {
+  const { ed, write } = await watchedEditor(Array.from({ length: 40 }, (_, i) => `line ${i}`).join("\n"));
+  ed.scrollTo(20); ed.sel = { anchor: { line: 22, col: 1 }, head: { line: 23, col: 3 } };
+  assert.equal(ed.checkDisk(), false, "nothing changed yet");
+  write(Array.from({ length: 40 }, (_, i) => `LINE ${i}`).join("\n"));
+  assert.equal(ed.checkDisk(), true);
+  assert.equal(ed.lines[0], "LINE 0");
+  assert.equal(ed.buf.dirty, false);
+  assert.deepEqual([ed.top, ed.sel.anchor, ed.sel.head], [20, { line: 22, col: 1 }, { line: 23, col: 3 }]);
+  write("short\ntext");
+  ed.checkDisk();
+  assert.deepEqual(ed.lines, ["short", "text"]);
+  assert.deepEqual([ed.top, ed.sel.head], [1, { line: 1, col: 3 }], "held to the shorter text");
+  assert.equal(ed.checkDisk(), false, "its stamp is known now");
+});
+
+test("an edited file is not reloaded: the change on disk is told once, and Save still asks", async () => {
+  const { ed, file, write } = await watchedEditor("one\n");
+  ed.replaceAll("mine");
+  write("theirs\n");
+  assert.equal(ed.checkDisk(), true);
+  assert.deepEqual(ed.lines, ["mine"]);
+  assert.match(ed.message.text, /changed on disk/);
+  ed.message = null;
+  assert.equal(ed.checkDisk(), false, "the same change isn't told again");
+  assert.equal(ed.message, null);
+  write("theirs again\n");
+  assert.equal(ed.checkDisk(), true, "a newer change is");
+  assert.ok(F.changedOnDisk(file, ed.doc.stamp), "saving still finds the file changed and asks");
+});
+
+test("its own save and a deleted file change nothing", async () => {
+  const { ed, file } = await watchedEditor("one\n");
+  ed.replaceAll("two");
+  assert.equal(await ed.saveFile(), true);
+  assert.equal(ed.checkDisk(), false);
+  fs.unlinkSync(file);
+  assert.equal(ed.checkDisk(), false);
+  assert.deepEqual(ed.lines, ["two"]);
+});
+
+test("a file changed on disk while another one shows is reloaded on switching back to it", async () => {
+  const { ed, dir, file, write } = await watchedEditor("first\n");
+  const other = path.join(dir, "other.txt");
+  fs.writeFileSync(other, "other\n");
+  assert.equal(await ed.open(other), true);
+  write("first, changed\n", file);
+  assert.equal(await ed.open(file), true);
+  assert.deepEqual(ed.lines, ["first, changed"]);
+});
