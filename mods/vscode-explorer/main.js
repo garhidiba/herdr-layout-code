@@ -5,7 +5,7 @@
 // (VS Code's explorer.autoReveal).
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { spaces, panes, focused, terminals, exec, hc, readTextFile, watchFolder, theme, window, appHome, props, shared, setShared, notify, nextCommand, openOverlay, layout } from "herdr";
+import { spaces, panes, focused, terminals, machines, exec, hc, readTextFile, watchFolder, theme, window, appHome, props, shared, setShared, notify, nextCommand, openOverlay, layout } from "herdr";
 import { freshRoot, encode, decode } from "./cache.js";
 import { ExplorerMenu, ExplorerDialog, TabMenu, openMenu, openInCode, explorerAction, refreshKey, openFile, splitOpen, remote, warm, REVEAL, terminalRows, IMAGE_OPEN } from "./menu.js";
 import { OPEN_AT } from "./split.js";
@@ -17,6 +17,7 @@ import { keysOs } from "./remote.js";
 import { ROW, clampTop, rowAt, shown, scrollToShow, dragStarted, dropFolder, dragTarget, targetRange } from "./dnd.js";
 import { createDesktop } from "./desktop.js";
 import { createDetails } from "./details.js";
+import { createRestore } from "./restore.js";
 import { createOps } from "./ops.js";
 import { friendlyError } from "./offline.js";
 // The sash to the Image Viewer column right of this panel (vscode-tabs side.js): this card's right 4 px while the column
@@ -54,6 +55,8 @@ const key = () => JSON.stringify(location());
 const desktop = createDesktop({ hc, exec, appHome, notify });
 // Remote editors' argv and labels for terminalRows() (details.js), shared so vscode-tabs reads them too.
 const details = createDetails({ hc, publish: (d) => setShared(DETAILS, d) });
+// Editor tabs that come back as a plain shell after their machine restarts get their editor again (restore.js).
+const restore = createRestore({ hc, exec, os: () => keysOs(window()?.platform) });
 const PER_FOLDER = 500, TOTAL = 5000;
 
 // The file the focused tab shows, { file, on }: an editor terminal's (its argv or label), or a viewer tab's (it shares its file
@@ -180,6 +183,7 @@ export default class Files extends View {
     this.warmFill(cx, 0);
     cx.timer.every(10000, cx => {
       cx.spawn(() => desktop.sync(terminals(), panes()));
+      cx.spawn(cx => restore.pass(cx, terminalRows()));
       this.warmFill(cx, 0);
       this.tick(cx);
       if (this.known && spaces().some(s => !this.known.has(s.id))) this.preloadAll(cx);
@@ -607,6 +611,10 @@ export default class Files extends View {
     const asked = shared(refreshKey);
     if (asked !== this.asked) { if (this.asked !== undefined) this.refresh(cx); this.asked = asked; }
     details(terminals(), panes());
+    restore.label(terminalRows());
+    // a machine (this computer too) whose layout is read again, after a restart or a reconnect: its editors come back
+    const ready = machines().filter(m => m.layout === "ready").map(m => m.name ?? "").join("\n");
+    if (ready !== this.ready) { this.ready = ready; cx.spawn(cx => restore.pass(cx, terminalRows())); }
     this.autoReveal(cx);
     this.revealAsked(cx);
     this.openAtAsked(cx);

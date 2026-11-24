@@ -130,6 +130,16 @@ test("a warm editor (handed its file later) is a file tab once its label names t
   assert.deepEqual([...fileTabs(space, panes, [...others, handed])].sort(), ["b", "c"]);
 });
 
+test("an editor labelled for a restart keeps its own arguments; once typed into its restored shell it is still a file tab", () => {
+  const others = terminals.filter(t => t.address !== "t2"), labels = { "vscode.file": "/p/b.ts", "vscode.launcher": launcher, "vscode.restore": "1" };
+  const labelled = { address: "t2", argv: ["sh", launcher, "/p/b.ts", "--close-on-exit", "--os", "mac"], labels };
+  assert.deepEqual(tabFileOf("b", space, panes, [...others, labelled], null).argv, [launcher, "/p/b.ts", "--close-on-exit", "--os", "mac"]);
+  const restored = { address: "t2", argv: ["/bin/zsh", "-l"], labels };
+  assert.deepEqual(tabFileOf("b", space, panes, [...others, restored], null),
+    { tab: "b", file: "/p/b.ts", on: null, pane: "p2", argv: [launcher, "/p/b.ts", "--close-on-exit"], root: "/p" });
+  assert.equal(tabFileOf("b", space, panes, [...others, { ...restored, labels: {} }], null), null, "a plain shell");
+});
+
 test("file tabs are the editor and viewer tabs; a shell or an agent never is one", () => {
   assert.deepEqual([...fileTabs(space, panes, terminals)].sort(), ["b", "c"]);
   assert.deepEqual([...fileTabs(null, panes, terminals)], []);

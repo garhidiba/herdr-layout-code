@@ -23,6 +23,7 @@ A VS Code-style layout for [Herdr](https://herdr.dev): a file explorer, a termin
 - Inline AI suggestions as ghost text (Tab to accept) from Ollama, LM Studio, Codestral or Mercury. Settings flags a local model the server doesn't have. A remote editor asks the desktop's provider through a tunnel.
 - Markdown and HTML preview, a hex viewer for binary files, an error page for files that can't be opened, hot exit and auto save, Save As / Save All.
 - Diff tab: VS Code-style inline diff with VS Code's syntax colors.
+- After a reboot or a core crash, editor tabs come back with their file in the editor instead of a bare shell, on remote machines (Windows included) too.
 
 ### Tabs and panes
 - VS Code's tab menu (close variants, copy path, reopen with, reveal, split right, Move into Tab / Move to New Tab), on remote spaces too.

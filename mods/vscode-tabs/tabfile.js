@@ -6,6 +6,8 @@ export const TAB_MENU = { width: 300, height: 393 };
 
 // vscode-explorer's paths.js FILE_LABEL: a mod can't import another mod's files.
 const FILE_LABEL = "vscode.file";
+// Its restore.js LAUNCHER_LABEL: the launcher an editor ran, on its terminal since it was labelled for a restart.
+const LAUNCHER_LABEL = "vscode.launcher";
 // Its DETAILS and withDetails: remote editors' { [address]: { argv, labels } } (its details.js, from `hc get`), filled
 // into terminals() rows that have no argv (Herdr's rows for another machine's terminals may lack them).
 export const DETAILS = "vscode-explorer.terminal-details";
@@ -20,7 +22,9 @@ export const withDetails = (terminals, details) =>
 // was opened from, else the space's first terminal's folder, else the space folder. A tab holding more panes (move.js)
 // gives its focused editor, else its first one.
 // A warm editor (vscode-explorer's warm.js: started as `vsedit.sh --warm <key>`, handed its file later) carries the
-// file as its terminal's FILE_LABEL (paths.js); `argv` is then the launcher's as if it had started with the file.
+// file as its terminal's FILE_LABEL (paths.js); `argv` is then the launcher's as if it had started with the file. So
+// does an editor typed into the shell its terminal got back after a restart (vscode-explorer's restore.js): its argv is
+// that shell's, the launcher its LAUNCHER_LABEL.
 export function tabFileOf(id, space, panes, terminals, viewer) {
   const tabs = new Set((space?.tabs ?? []).map(t => t.id)), on = space?.machine ?? null;
   const spaceRoot = panes.find(p => tabs.has(p.tab) && p.terminal && p.cwd)?.cwd || space?.folder || null;
@@ -28,9 +32,10 @@ export function tabFileOf(id, space, panes, terminals, viewer) {
   for (const p of mine) {
     const term = p.terminal ? terminals.find(t => t.address === p.terminal) : null, argv = term?.argv;
     const i = Array.isArray(argv) ? argv.findIndex(a => /(^|[\\/])vsedit\.(sh|ps1)$/.test(a)) : -1, labelled = term?.labels?.[FILE_LABEL];
-    if (i >= 0 && typeof labelled === "string" && labelled) return { tab: id, file: labelled, on, pane: p.pane, argv: [argv[i], labelled, "--close-on-exit"], root: p.cwd || spaceRoot };
     const file = i >= 0 ? argv[i + 1] : null;
     if (typeof file === "string" && file && !file.startsWith("-")) return { tab: id, file, on, pane: p.pane, argv: argv.slice(i), root: p.cwd || spaceRoot };
+    const launcher = i >= 0 ? argv[i] : term?.labels?.[LAUNCHER_LABEL];
+    if (launcher && typeof labelled === "string" && labelled) return { tab: id, file: labelled, on, pane: p.pane, argv: [launcher, labelled, "--close-on-exit"], root: p.cwd || spaceRoot };
   }
   const v = viewer?.file && mine.find(p => p.mod === "vscode-viewer" && p.pane === viewer.pane);
   return v ? { tab: id, file: viewer.file, on: viewer.on ?? null, pane: v.pane, argv: null, root: spaceRoot } : null;
