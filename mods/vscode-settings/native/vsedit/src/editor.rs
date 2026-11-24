@@ -33,6 +33,8 @@ use std::time::{Duration, Instant};
 /// Shown for the keys of what neither editor has yet (multiple cursors, suggestions, word wrap).
 pub const NOT_YET: &str = "Not yet in the Rust editor";
 const WORD_DELAY: Duration = Duration::from_millis(250);
+/// How often the open file's stamp is checked for a change by another program (check_disk).
+const DISK_CHECK: Duration = Duration::from_secs(1);
 
 /// VS Code's word classes: spaces, word characters, punctuation.
 fn class_of(c: char) -> u8 {
@@ -319,6 +321,8 @@ pub struct Editor {
     pub hits_cache: Option<(String, Vec<Hit>)>,
     seen_version: u64,
     auto_at: Option<Instant>,
+    /// When check_disk runs next.
+    disk_at: Instant,
     pub exit: Option<i32>,
     /// The other open files (Go to File, Open Settings JSON, Save All, quit and hot exit go through them).
     pub(crate) docs: Vec<DocState>,
@@ -424,6 +428,7 @@ impl Editor {
             hits_cache: None,
             seen_version: st.seen_version,
             auto_at: None,
+            disk_at: Instant::now() + DISK_CHECK,
             exit: None,
             docs: vec![],
             back: vec![],
@@ -1696,6 +1701,7 @@ impl Editor {
             };
             let first = self.docs[i].seen_version == 0;
             self.activate(i);
+            self.check_disk();
             if first {
                 self.offer_backup();
             }
@@ -1823,6 +1829,29 @@ impl Editor {
         });
         let edits: Vec<_> = edits.collect();
         self.line_edits(edits);
+    }
+    /// VS Code's watch of the open file (vsedit.cjs checkDisk), every DISK_CHECK (tick) and on switching to a file: an
+    /// unedited buffer reloads a change on disk as Reload does, keeping the selection and scroll (held to the new
+    /// text); an edited one is told once per change and Save still asks. Its own saves, a deleted file and a file
+    /// never saved change nothing. True when it acted.
+    pub fn check_disk(&mut self) -> bool {
+        let Some(now) = self.doc.stamp.and(file::changed_on_disk(&self.file, self.doc.stamp)) else { return false };
+        if self.doc.seen == Some(now) {
+            return false;
+        }
+        self.doc.seen = Some(now);
+        if self.buf.dirty() {
+            let w = self.c.warn.clone();
+            self.say("The file has been changed on disk. Saving will ask before overwriting it.", Some(&w), 6000);
+            return true;
+        }
+        let (sel, top, top_sub, left) = (self.sel, self.top, self.top_sub, self.left);
+        self.reload();
+        self.sel = Sel { anchor: self.buf.clamp(sel.anchor), head: self.buf.clamp(sel.head) };
+        self.top = top.min(self.buf.lines.len() - 1);
+        self.top_sub = if self.top == top { top_sub } else { 0 };
+        self.left = left;
+        true
     }
     fn reload(&mut self) {
         match file::load(&self.file, false) {
@@ -2232,15 +2261,19 @@ impl Editor {
         }
     }
 
-    /// The earliest time something is due (a message to clear, the word highlight, auto save, the drag, git).
+    /// The earliest time something is due (a message to clear, the word highlight, auto save, the drag, git, the disk check).
     pub fn deadline(&self) -> Option<Instant> {
         let word = self.word.as_ref().map(|w| w.1 + WORD_DELAY).filter(|t| *t > Instant::now());
-        [self.message.as_ref().map(|m| m.until), word, self.auto_at, self.drag_next, self.git.deadline(), self.lang_deadline(), self.inline_deadline()].into_iter().flatten().min()
+        [self.message.as_ref().map(|m| m.until), word, self.auto_at, self.drag_next, self.git.deadline(), self.lang_deadline(), self.inline_deadline(), Some(self.disk_at)].into_iter().flatten().min()
     }
     /// Runs what is due; true when the screen should be drawn again.
     pub fn tick(&mut self) -> bool {
         let now = Instant::now();
         let mut redraw = self.message.as_ref().is_some_and(|m| m.until <= now) | self.lang_tick() | self.inline_tick();
+        if self.disk_at <= now {
+            self.disk_at = now + DISK_CHECK;
+            redraw |= self.check_disk();
+        }
         if self.auto_at.is_some_and(|t| t <= now) {
             self.auto_save();
             redraw = true;
@@ -3049,6 +3082,76 @@ pub(crate) mod tests {
         let read = |f: &Path| fs::read_to_string(f).unwrap();
         assert_eq!((read(&a), read(&b), read(&c)), ("x1\n".into(), "x1\n".into(), "changed elsewhere\n".into()));
         assert!(ed.message.as_ref().unwrap().text.contains("Not saved, changed on disk: c.txt"));
+    }
+
+    /// Writes `text` as another program would, with an mtime `secs` later than now (each change its own stamp).
+    fn write_elsewhere(file: &Path, text: &str, secs: u64) {
+        fs::write(file, text).unwrap();
+        let at = std::time::SystemTime::now() + Duration::from_secs(secs);
+        fs::File::options().write(true).open(file).unwrap().set_modified(at).unwrap();
+    }
+
+    #[test]
+    fn an_unedited_file_follows_a_change_on_disk_keeping_the_selection_and_scroll() {
+        let file = temp_folder("disk-follow").join("a.txt");
+        fs::write(&file, (0..40).map(|i| format!("line {i}\n")).collect::<String>()).unwrap();
+        let mut ed = on_disk(&file);
+        ed.top = 20;
+        ed.sel = Sel { anchor: pos(22, 1), head: pos(23, 3) };
+        assert!(!ed.check_disk(), "nothing changed yet");
+        write_elsewhere(&file, &(0..40).map(|i| format!("LINE {i}\n")).collect::<String>(), 5);
+        assert!(ed.check_disk());
+        assert_eq!(ed.buf.lines[0], "LINE 0");
+        assert!(!ed.buf.dirty());
+        assert_eq!((ed.top, ed.sel), (20, Sel { anchor: pos(22, 1), head: pos(23, 3) }));
+        write_elsewhere(&file, "short\ntext", 10);
+        assert!(ed.check_disk());
+        assert_eq!(ed.buf.lines, vec!["short", "text"]);
+        assert_eq!((ed.top, ed.sel.head), (1, pos(1, 3)), "held to the shorter text");
+        assert!(!ed.check_disk(), "its stamp is known now");
+    }
+
+    #[test]
+    fn an_edited_file_is_not_reloaded_and_its_change_on_disk_is_told_once() {
+        let file = temp_folder("disk-edited").join("a.txt");
+        fs::write(&file, "one\n").unwrap();
+        let mut ed = on_disk(&file);
+        ed.typed("x");
+        write_elsewhere(&file, "theirs\n", 5);
+        assert!(ed.check_disk());
+        assert_eq!(ed.buf.lines, vec!["xone"]);
+        assert!(ed.message.take().unwrap().text.contains("changed on disk"));
+        assert!(!ed.check_disk(), "the same change isn't told again");
+        assert!(ed.message.is_none());
+        write_elsewhere(&file, "theirs again\n", 10);
+        assert!(ed.check_disk(), "a newer change is");
+        assert!(file::changed_on_disk(&file, ed.doc.stamp).is_some(), "saving still finds it changed and asks");
+    }
+
+    #[test]
+    fn its_own_save_and_a_deleted_file_change_nothing() {
+        let file = temp_folder("disk-own").join("a.txt");
+        fs::write(&file, "one\n").unwrap();
+        let mut ed = on_disk(&file);
+        ed.typed("x");
+        run(&mut ed, "workbench.action.files.save");
+        assert!(!ed.check_disk());
+        fs::remove_file(&file).unwrap();
+        assert!(!ed.check_disk());
+        assert_eq!(ed.buf.lines, vec!["xone"]);
+    }
+
+    #[test]
+    fn a_file_changed_on_disk_behind_another_is_reloaded_on_switching_back() {
+        let dir = temp_folder("disk-behind");
+        let (a, b) = (dir.join("a.txt"), dir.join("b.txt"));
+        fs::write(&a, "first\n").unwrap();
+        fs::write(&b, "other\n").unwrap();
+        let mut ed = on_disk(&a);
+        assert!(ed.open(&b, None, true));
+        write_elsewhere(&a, "first, changed\n", 5);
+        assert!(ed.open(&a, None, true));
+        assert_eq!(ed.buf.lines, vec!["first, changed"]);
     }
 
     #[test]

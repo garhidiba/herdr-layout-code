@@ -20,11 +20,13 @@ pub struct Doc {
     pub final_newline: bool,
     pub bom: bool,
     pub stamp: Option<Stamp>,
+    /// The last change on disk the editor acted on (Editor::check_disk), so each one is acted on once.
+    pub seen: Option<Stamp>,
 }
 
 impl Doc {
     pub fn empty() -> Doc {
-        Doc { lines: vec![String::new()], crlf: false, final_newline: true, bom: false, stamp: None }
+        Doc { lines: vec![String::new()], crlf: false, final_newline: true, bom: false, stamp: None, seen: None }
     }
 }
 
@@ -77,7 +79,7 @@ pub fn decode(bytes: &[u8], lossy: bool) -> Result<Doc, Refusal> {
     if final_newline {
         lines.pop();
     }
-    Ok(Doc { lines, crlf, final_newline, bom, stamp: None })
+    Ok(Doc { lines, crlf, final_newline, bom, stamp: None, seen: None })
 }
 
 pub fn encode(lines: &[String], doc: &Doc) -> String {

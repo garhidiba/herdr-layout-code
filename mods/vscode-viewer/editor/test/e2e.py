@@ -400,6 +400,33 @@ def run_save_dialog(tmp):
     print("save dialog: ok")
 
 
+def run_disk_change(tmp):
+    """Another program changes the open file: an unedited buffer shows the new text within about a second; an edited
+    one keeps its text, says so once, and saving asks."""
+    file = os.path.join(tmp, "watched.txt")
+    open(file, "w").write("before\n")
+    t = Term(file)
+    assert t.read("Ln 1, Col 1")
+    t.out = b""
+    open(file, "w").write("written elsewhere\n")
+    assert t.read("written elsewhere", timeout=4), "the change on disk never showed"
+    assert t.read("Reloaded from disk", timeout=2)
+    t.send("X")
+    t.out = b""
+    later = time.time() + 5
+    open(file, "w").write("changed again\n")
+    os.utime(file, (later, later))
+    assert t.read("changed on disk", timeout=4), "an edited buffer wasn't told about the change"
+    assert "changed again" not in screen_of(t), "the edited buffer was overwritten"
+    t.send("\x13")                               # Ctrl+S
+    assert t.read("The file has been changed on disk.", timeout=2), "saving didn't ask"
+    t.send("c")
+    t.send(QUIT); t.send("d")
+    t.wait_exit()
+    assert open(file).read() == "changed again\n"
+    print("disk change: ok")
+
+
 def run_close_request(tmp):
     """SIGUSR2 (vscode-tabs closing the tab): unsaved changes ask Save / Don't Save / Cancel, the title says it asks;
     Cancel keeps the editor, Don't Save ends it without a backup; a saved editor ends at once."""
@@ -1653,7 +1680,7 @@ def main():
     engines = os.path.join(tmp, "engines.log")
     ISOLATED.update(VSEDIT_ENGINE_LOG=engines, VSEDIT_INLINE_USAGE=os.path.join(tmp, "inline-usage.json"))
     scenarios = [run_tsx, run_go, run_crlf, run_hex, run_error_page, run_drag_scroll, run_drag_reveal, run_shift_click, run_alt_click, run_shift_click_signal, run_minified, run_scrollbars, run_decorations,
-                 run_autoclose, run_git_gutter, run_folding, run_word_wrap, run_menu_and_cmd_save, run_save_dialog, run_close_request, run_warm, run_auto_save, run_hidden_status_bar, run_cursor_style, run_hot_exit,
+                 run_autoclose, run_git_gutter, run_folding, run_word_wrap, run_menu_and_cmd_save, run_save_dialog, run_disk_change, run_close_request, run_warm, run_auto_save, run_hidden_status_bar, run_cursor_style, run_hot_exit,
                  run_keybindings, run_mac_keys, run_format, run_typescript, run_find_and_status, run_symbols_and_problems, run_install_prompt, run_small_batch,
                  run_files_and_navigation, run_picker_scroll, run_medium_language, run_medium_editing, run_inline_suggest, run_references_and_lenses, run_inline_hosted]
     only = set(sys.argv[1:])
