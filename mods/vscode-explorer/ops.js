@@ -1,7 +1,8 @@
 // The Explorer menu's file operations, on this computer or on a space's machine (`on`), through Herdr's exec
 // (passed in, so the tests run them here). Paths only ever go in as arguments ("$1"), never into a script's text.
 // On a machine Herdr can't reach, exec rejects; that comes out as an Error with `unreachable: true` (a toast).
-import { baseName, parentOf, within, freeName } from "./paths.js";
+import { baseName, parentOf, within, freeName, downloadName, isWindowsPath } from "./paths.js";
+import { psQuote, encodeCommand } from "./remote.js";
 import { friendlyError } from "./offline.js";
 
 // Delete on another machine: its `trash`, else `gio trash`, else gone for good (the dialog says so first).
@@ -27,7 +28,66 @@ while [ $# -gt 1 ]; do
   r=; shift 2
 done`;
 
-// hc(args) as Herdr's: only a drop onto another machine uses it.
+// Here, as an hc terminal: downloads machine $1's $2 to the new local path $3. $4: "file", "dir" (a Unix folder, tarred
+// into a temp file there first, removed after) or "win" (a Windows file: $5 says its size, $6 sends a piece, both
+// PowerShell -EncodedCommand). It comes in pieces of 4 MB (hc exec keeps only 8 MiB of output; a Windows piece comes
+// as base64, 5.3 MB), each with dd at its offset as vscode-viewer's preview.js fetchFile does (or PowerShell, the piece's
+// first MB on its stdin), into a hidden temp file beside $3. Only a copy of exactly the size there lands, and never over
+// an entry: a file is linked into place (ln fails on a taken name), a folder is unpacked and moved in.
+export const DOWNLOAD = `PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
+m=$1 src=$2 out=$3 kind=$4 r=
+on() { hc exec --on "$m" --timeout 600 "$@"; }
+mkdir -p "$(dirname "$out")" && tmp=$(mktemp "$(dirname "$out")/.download.XXXXXX") || exit 1
+trap 'rm -rf "$tmp" "$tmp.b" "$tmp.d"; [ -z "$r" ] || on -- rm -f "$r"' EXIT
+case $kind in
+  win) size=$(on -- powershell -NoProfile -NonInteractive -EncodedCommand "$5") || exit 1 ;;
+  dir) r=$(on -- sh -c 'mktemp "\${TMPDIR:-/tmp}/herdr-download.XXXXXX"') || exit 1
+    size=$(on -- sh -c 'cd "$(dirname "$2")" && COPYFILE_DISABLE=1 tar -cf "$1" "./$(basename "$2")" && wc -c < "$1"' explorer "$r" "$src") || exit 1
+    src=$r ;;
+  *) size=$(on -- sh -c 'if [ -f "$1" ]; then wc -c < "$1"; else echo "$1 is not a file" >&2; exit 1; fi' explorer "$src") || exit 1 ;;
+esac
+size=$(printf %s "$size" | tr -dc 0-9); [ -n "$size" ] || { echo "Cannot read the size of $src"; exit 1; }
+skip=0
+while [ $((skip * 1000000)) -lt "$size" ]; do
+  if [ "$kind" = win ]; then
+    echo "$skip" | on -i -- powershell -NoProfile -NonInteractive -EncodedCommand "$6" > "$tmp.b" && base64 --decode < "$tmp.b" >> "$tmp" || exit 1
+  else
+    on -- sh -c 'exec dd if="$1" bs=1000000 skip="$2" count=4 2>/dev/null' explorer "$src" "$skip" >> "$tmp" || exit 1
+  fi
+  skip=$((skip + 4))
+done
+n=$(wc -c < "$tmp" | tr -d ' ')
+[ "$n" = "$size" ] || { echo "only $n of $size bytes arrived"; exit 4; }
+if [ "$kind" = dir ]; then
+  mkdir "$tmp.d" && tar -xf "$tmp" -C "$tmp.d" || exit 1
+  if [ -e "$out" ] || [ -L "$out" ]; then echo "$(basename "$out") already exists"; exit 5; fi
+  mv "$tmp.d/$(basename "$2")" "$out"
+else
+  ln "$tmp" "$out" 2>/dev/null || { echo "$(basename "$out") already exists"; exit 5; }
+fi`;
+// There (Windows), for DOWNLOAD: the size of file `path`, and the base64 of its 4 MB piece from the MB its stdin names.
+const winFile = (path, body) => {
+  if (!isWindowsPath(path) || /[\x00-\x1f]/.test(path)) throw new Error(`Cannot download ${path}`);
+  return `$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'
+try { ${body} } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 5 }`;
+};
+export const windowsSize = (path) => winFile(path,
+  `$i = Get-Item -LiteralPath ${psQuote(path)} -Force; if ($i.PSIsContainer) { throw "$($i.Name) is a folder" }; [Console]::Out.Write($i.Length)`);
+export const windowsPiece = (path) => winFile(path, `$skip = [long][Console]::In.ReadLine()
+  $f = [IO.File]::OpenRead(${psQuote(path)})
+  try {
+    [void]$f.Seek($skip * 1000000, 'Begin'); $buf = New-Object byte[] 4000000; $n = 0
+    while ($n -lt $buf.Length) { $k = $f.Read($buf, $n, $buf.Length - $n); if ($k -le 0) { break }; $n += $k }
+    [Console]::Out.Write([Convert]::ToBase64String($buf, 0, $n))
+  } finally { $f.Close() }`);
+// DOWNLOAD's arguments after the script's name, for machine `on`'s `path` (a folder when `dir`) coming to `out`.
+export function downloadArgs(on, path, dir, out) {
+  if (!isWindowsPath(path)) return [on, path, out, dir ? "dir" : "file"];
+  if (dir) throw new Error("Folders on a Windows machine can't be downloaded.");
+  return [on, path, out, "win", encodeCommand(windowsSize(path)), encodeCommand(windowsPiece(path))];
+}
+
+// hc(args) as Herdr's: only a drop onto another machine and a download use it.
 export function createOps(exec, on = null, hc = null) {
   const run = (cmd, args) => (on ? exec(cmd, args, { on }) : exec(cmd, args)).catch((e) => {
     if (!on) throw e;
@@ -37,6 +97,18 @@ export function createOps(exec, on = null, hc = null) {
   const must = async (cmd, args, what) => { const r = await run(cmd, args); if (r.code !== 0) throw new Error(r.stderr.trim() || what); };
   // A dangling link is there too: its name is taken and it can be deleted.
   const exists = async (p) => (await run("sh", ["-c", '[ -e "$1" ] || [ -L "$1" ]', "explorer", p])).code === 0;
+  // Runs sh `script` with `args` here as a background hc terminal, past exec's 30 s, waited on 20 s at a time; the last
+  // line it printed is the error (`what: <line>`).
+  const background = async (prefix, script, args, what) => {
+    const job = `${prefix}-${Date.now().toString(36)}`;
+    const started = await hc(["run", "--bg", "--no-parent", "--name", job, "--", "sh", "-c", script, "explorer", ...args]);
+    if (started.code !== 0) throw new Error(started.stderr.trim() || what);
+    let end;
+    do end = JSON.parse((await hc(["wait", job, "--timeout", "20", "--json"])).stdout); while (!end.ended);
+    const why = end.exit_code === 0 ? "" : (await hc(["read", job])).stdout.trim().split("\n").pop();
+    await hc(["rm", job]).catch(() => {});
+    if (end.exit_code !== 0) throw new Error(`${what}: ${why || `exit ${end.exit_code}`}`);
+  };
   return {
     exists,
     mkdir: (p) => must("mkdir", [p], "Could not create the folder"),
@@ -78,15 +150,17 @@ export function createOps(exec, on = null, hc = null) {
         const name = await freeName(baseName(path), (n) => copies.includes(`${folder}/${n}`) || exists(`${folder}/${n}`), await isDir(path));
         copies.push(`${folder}/${name}`); pairs.push(path, name);
       }
-      const job = `explorer-up-${Date.now().toString(36)}`;
-      const started = await hc(["run", "--bg", "--no-parent", "--name", job, "--", "sh", "-c", UPLOAD, "explorer", on, folder, ...pairs]);
-      if (started.code !== 0) throw new Error(started.stderr.trim() || "Upload failed");
-      let end;
-      do end = JSON.parse((await hc(["wait", job, "--timeout", "20", "--json"])).stdout); while (!end.ended);
-      const why = end.exit_code === 0 ? "" : (await hc(["read", job])).stdout.trim().split("\n").pop();
-      await hc(["rm", job]).catch(() => {});
-      if (end.exit_code !== 0) throw new Error(`Upload to ${on} failed: ${why || `exit ${end.exit_code}`}`);
+      await background("explorer-up", UPLOAD, [on, folder, ...pairs], `Upload to ${on} failed`);
       return copies;
+    },
+    // Downloads this machine's `path` (a folder when `dir`) into the local folder `to` (~/Downloads) under a free name
+    // there ("a (1).txt"), in a background hc terminal (DOWNLOAD) as a drop's upload. Answers the local path.
+    async download(path, dir, to) {
+      const name = path.split(/[\\/]/).pop();
+      const free = await freeName(name, async (n) => (await exec("sh", ["-c", '[ -e "$1" ] || [ -L "$1" ]', "explorer", `${to}/${n}`])).code === 0, dir, downloadName);
+      const out = `${to}/${free}`;
+      await background("explorer-down", DOWNLOAD, downloadArgs(on, path, dir, out), `Download from ${on} failed`);
+      return out;
     },
   };
 }

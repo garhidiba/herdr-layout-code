@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, mkdirSync, existsSync, readFileSync, rmSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createOps } from "../ops.js";
+import { createOps, downloadArgs, windowsSize, windowsPiece } from "../ops.js";
 
 const runHere = (path = process.env.PATH) => async (cmd, args) => {
   const r = spawnSync(cmd, args, { encoding: "utf8", env: { ...process.env, PATH: path } });
@@ -139,13 +139,14 @@ test("a dangling link counts as there: its name is taken", async () => {
 // Herdr's hc() for a drop onto "box": `hc run` runs the upload here at once with a stand-in `hc` (found through $HOME,
 // as the script's PATH puts it) that logs each --on and runs `hc exec`'s program here; `hc wait` says it ended on the
 // second ask, as a long upload would.
-function uploader(d, beforeRun = () => {}) {
+// `program`: how the stand-in runs that program (a test cuts its output short).
+function uploader(d, beforeRun = () => {}, program = 'exec "$@"') {
   const bin = join(d, "home", ".local", "bin"), log = join(d, "on.log"), seen = [];
   mkdirSync(bin, { recursive: true });
   writeFileSync(join(bin, "hc"), `#!/bin/sh
 [ "$1" = exec ] || exit 9; shift
 while :; do case $1 in --on) echo "$2" >> "${log}"; shift 2;; --timeout) shift 2;; -i) shift;; --) shift; break;; *) exit 9;; esac; done
-exec "$@"
+${program}
 `);
   chmodSync(join(bin, "hc"), 0o755);
   let done, waits = 0;
@@ -193,6 +194,78 @@ test("an upload never replaces an entry that appeared meanwhile, and says why it
   assert.equal(readFileSync(join(to, "a.txt"), "utf8"), "old");
   assert.deepEqual(spawnSync("ls", ["-A", to], { encoding: "utf8" }).stdout, "a.txt\n", "no temp folder left behind");
   rmSync(d, { recursive: true });
+});
+
+const lsA = (dir) => spawnSync("ls", ["-A", dir], { encoding: "utf8" }).stdout.split("\n").filter(Boolean).sort();
+
+test("a remote file downloads byte for byte, in pieces, under a numbered name when its name is taken", async () => {
+  const d = tmp(), { ops, log, seen } = uploader(d), src = join(d, "src"), to = join(d, "Downloads");
+  mkdirSync(src); mkdirSync(to);
+  const bytes = Buffer.alloc(9_500_000); // three pieces, the last one short
+  for (let i = 0; i < bytes.length; i++) bytes[i] = (i * 7919) % 256;
+  const name = `it's "한글" $x.bin`;
+  writeFileSync(join(src, name), bytes);
+  writeFileSync(join(to, name), "old");
+  assert.equal(await ops.download(join(src, name), false, to), join(to, `it's "한글" $x (1).bin`));
+  assert.ok(readFileSync(join(to, `it's "한글" $x (1).bin`)).equals(bytes));
+  assert.equal(readFileSync(join(to, name), "utf8"), "old");
+  assert.deepEqual(lsA(to), [name, `it's "한글" $x (1).bin`].sort(), "no temp file left behind");
+  assert.ok(readFileSync(log, "utf8").trim().split("\n").every(m => m === "box"));
+  assert.deepEqual(seen, ["run", "wait", "wait", "rm"]);
+  rmSync(d, { recursive: true });
+});
+
+test("a remote folder downloads as a tar, unpacked under a free name, its temp tar there removed", async () => {
+  const d = tmp(), { ops } = uploader(d), src = join(d, "src"), to = join(d, "Downloads"), there = join(d, "remote-tmp");
+  mkdirSync(join(src, "-dir", "sub"), { recursive: true }); mkdirSync(join(to, "-dir"), { recursive: true }); mkdirSync(there);
+  writeFileSync(join(src, "-dir", "sub", "run.sh"), "#!/bin/sh\n");
+  chmodSync(join(src, "-dir", "sub", "run.sh"), 0o755);
+  const was = process.env.TMPDIR;
+  process.env.TMPDIR = there;
+  try { assert.equal(await ops.download(join(src, "-dir"), true, to), join(to, "-dir (1)")); }
+  finally { if (was === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = was; }
+  assert.ok(spawnSync("test", ["-x", join(to, "-dir (1)", "sub", "run.sh")]).status === 0);
+  assert.deepEqual(lsA(to), ["-dir", "-dir (1)"]);
+  assert.deepEqual(lsA(join(to, "-dir")), [], "the folder already there is untouched");
+  assert.deepEqual(lsA(there), [], "the temp tar on the machine is gone");
+  rmSync(d, { recursive: true });
+});
+
+test("a download that arrives short fails and leaves nothing in ~/Downloads", async () => {
+  const d = tmp(), to = join(d, "Downloads");
+  // every remote command's output is cut to 1000 bytes: the size check catches it
+  const { ops } = uploader(d, () => {}, '"$@" | head -c 1000');
+  mkdirSync(to);
+  writeFileSync(join(d, "a.bin"), Buffer.alloc(5000, 1));
+  await assert.rejects(ops.download(join(d, "a.bin"), false, to), /Download from box failed: only 1000 of 5000 bytes arrived/);
+  assert.deepEqual(lsA(to), []);
+  rmSync(d, { recursive: true });
+});
+
+test("a download never replaces an entry that appeared meanwhile, and says why it failed", async () => {
+  const d = tmp(), to = join(d, "Downloads");
+  const { ops } = uploader(d, () => writeFileSync(join(to, "a.txt"), "old"));
+  mkdirSync(to);
+  writeFileSync(join(d, "a.txt"), "new");
+  await assert.rejects(ops.download(join(d, "a.txt"), false, to), /Download from box failed: a.txt already exists/);
+  assert.equal(readFileSync(join(to, "a.txt"), "utf8"), "old");
+  assert.deepEqual(lsA(to), ["a.txt"], "no temp file left behind");
+  rmSync(d, { recursive: true });
+});
+
+test("a Windows file downloads through PowerShell with its path quoted in the script, never a Windows folder", () => {
+  const utf16 = (b64) => Buffer.from(b64, "base64").toString("utf16le");
+  const path = "C:\\Users\\me\\it's ‘x’.bin";
+  const [on, src, out, kind, size, piece] = downloadArgs("win", path, false, "/Users/me/Downloads/x.bin");
+  assert.deepEqual([on, src, out, kind], ["win", path, "/Users/me/Downloads/x.bin", "win"]);
+  assert.equal(utf16(size), windowsSize(path));
+  assert.equal(utf16(piece), windowsPiece(path));
+  assert.ok(windowsSize(path).includes("-LiteralPath 'C:\\Users\\me\\it''s ‘‘x’’.bin'"));
+  assert.ok(windowsPiece(path).includes("[IO.File]::OpenRead('C:\\Users\\me\\it''s ‘‘x’’.bin')"));
+  assert.throws(() => downloadArgs("win", "C:\\Users\\me\\dir", true, "/x"), /Folders on a Windows machine/);
+  assert.throws(() => downloadArgs("win", "C:\\a\nb", false, "/x"), /Cannot download/);
+  assert.deepEqual(downloadArgs("box", "/srv/a", true, "/x"), ["box", "/srv/a", "/x", "dir"]);
+  assert.deepEqual(downloadArgs("box", "/srv/a.txt", false, "/x"), ["box", "/srv/a.txt", "/x", "file"]);
 });
 
 test("a machine that can't be reached rejects as unreachable; locally the error passes through as is", async () => {

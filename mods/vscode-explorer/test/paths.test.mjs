@@ -1,7 +1,7 @@
 // node --test mods/vscode-explorer/test/paths.test.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
-import { openArgs, wantsEditor, isMarkdown, isImage, relativeTo, within, copyName, freeName, nameProblem, menuItems, menuHeight, spaceCommand, parentOf, openWith, vscodeRemoteArgs, editorFileOf, splitArgs, autoRevealOf, revealPath, normalPath, editorTabOf, editorPaneOf, viewerPaneOf, deleteTitle, extraLines, closesForDeleted } from "../paths.js";
+import { openArgs, wantsEditor, isMarkdown, isImage, relativeTo, within, copyName, downloadName, isWindowsPath, freeName, nameProblem, menuItems, menuHeight, spaceCommand, parentOf, openWith, vscodeRemoteArgs, editorFileOf, splitArgs, autoRevealOf, revealPath, normalPath, editorTabOf, editorPaneOf, viewerPaneOf, deleteTitle, extraLines, closesForDeleted } from "../paths.js";
 
 test("a dialog grows by the lines a long file name wraps onto, and not for a short one", () => {
   assert.equal(deleteTitle("/p/Invoice-44K7PLUN-0001 copy 2.pdf"), "Are you sure you want to delete 'Invoice-44K7PLUN-0001 copy 2.pdf'?");
@@ -79,6 +79,21 @@ test("pasted copies get Finder-style names and never overwrite", async () => {
   assert.equal(await freeName("b.txt", async (n) => taken.has(n)), "b.txt");
 });
 
+test("a download whose name is taken in ~/Downloads gets a number before its (last) extension", async () => {
+  assert.equal(downloadName("a.tar.gz", 1), "a.tar (1).gz");
+  assert.equal(downloadName("a.txt", 2), "a (2).txt");
+  assert.equal(downloadName(".bashrc", 1), ".bashrc (1)");
+  assert.equal(downloadName("v1.2", 1, true), "v1.2 (1)", "a folder's dot is no extension");
+  const taken = new Set(["a.txt", "a (1).txt"]);
+  assert.equal(await freeName("a.txt", async (n) => taken.has(n), false, downloadName), "a (2).txt");
+  assert.equal(await freeName("b.txt", async (n) => taken.has(n), false, downloadName), "b.txt");
+});
+
+test("Windows paths are told apart from Unix ones", () => {
+  for (const p of ["C:\\Users\\me\\a.txt", "c:/Users/me", "C:\\Users\\me/a.txt", "\\\\server\\share\\a", "//server/share/a"]) assert.ok(isWindowsPath(p), p);
+  for (const p of ["/home/me/a.txt", "/c/Users", "C:", "relative/a"]) assert.ok(!isWindowsPath(p), p);
+});
+
 test("new names must be non-empty, slash-free and not taken", () => {
   assert.ok(nameProblem("  ", false));
   assert.ok(nameProblem("a/b", false));
@@ -87,7 +102,7 @@ test("new names must be non-empty, slash-free and not taken", () => {
   assert.equal(nameProblem("a.txt", false), null);
 });
 
-test("the menu groups items like VS Code; a remote entry has every item but Reveal in Finder; only folders offer Add as Space", () => {
+test("the menu groups items like VS Code; a remote entry has every item but Reveal in Finder, plus Download…; only folders offer Add as Space", () => {
   const labels = (rows) => rows.map(r => (r === "-" ? "-" : r[0]));
   assert.deepEqual(labels(menuItems({ dir: true, remote: false, canPaste: true })), [
     "New File…", "New Folder…", "-", "Reveal in Finder", "Open in Integrated Terminal", "Add as Space", "-", "Cut", "Copy", "Paste", "-",
@@ -96,13 +111,16 @@ test("the menu groups items like VS Code; a remote entry has every item but Reve
     "Open", "Open to the Side", "Open With…", "-", "Reveal in Finder", "Open in Integrated Terminal", "-", "Cut", "Copy", "-",
     "Copy Path", "Copy Relative Path", "-", "Rename…", "Delete"]);
   assert.deepEqual(labels(menuItems({ dir: true, remote: true, canPaste: true })), [
-    "New File…", "New Folder…", "-", "Open in Integrated Terminal", "Add as Space", "-", "Cut", "Copy", "Paste", "-",
+    "New File…", "New Folder…", "-", "Open in Integrated Terminal", "Add as Space", "Download…", "-", "Cut", "Copy", "Paste", "-",
     "Copy Path", "Copy Relative Path", "-", "Rename…", "Delete"]);
   assert.deepEqual(labels(menuItems({ dir: false, remote: false, canPaste: false, markdown: true })).slice(0, 4), ["Open", "Open to the Side", "Open Preview", "Open With…"]);
   assert.deepEqual(labels(menuItems({ dir: false, remote: true, canPaste: false, image: true })).slice(0, 4), ["Open", "Open to the Side", "Open in Image Panel", "Open With…"]);
   assert.deepEqual(labels(menuItems({ dir: false, remote: true, canPaste: false })), [
-    "Open", "Open to the Side", "Open With…", "-", "Open in Integrated Terminal", "-", "Cut", "Copy", "-",
+    "Open", "Open to the Side", "Open With…", "-", "Open in Integrated Terminal", "Download…", "-", "Cut", "Copy", "-",
     "Copy Path", "Copy Relative Path", "-", "Rename…", "Delete"]);
+  // A Windows machine's folder can't come as a tar; its files can.
+  assert.ok(!labels(menuItems({ dir: true, remote: true, canPaste: false, windows: true })).includes("Download…"));
+  assert.ok(labels(menuItems({ dir: false, remote: true, canPaste: false, windows: true })).includes("Download…"));
   assert.equal(menuHeight(["-", ["a"]]), 10 + 9 + 26);
 });
 

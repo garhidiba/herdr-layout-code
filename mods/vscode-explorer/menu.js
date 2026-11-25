@@ -6,7 +6,7 @@ import { exec, hc, run, spaces, panes, terminals, machines, props, openOverlay, 
 import { createOpenTab, noteViewer } from "./launch.js";
 import { createWarmPool, TIMING } from "./warm.js";
 import { menuItems, menuHeight, openWith, spaceCommand, baseName, parentOf, relativeTo, nameProblem, vscodeRemoteArgs, isMarkdown, isImage, editorPaneOf, viewerPaneOf, wantsEditor,
-  tabMenuItems, moveRows, outRows, moveOf, closeArgs, fileTabs, splitArgs, clipboardCommand, revealCommand, withDetails, deleteTitle, extraLines, closesForDeleted, DETAILS } from "./paths.js";
+  tabMenuItems, moveRows, outRows, moveOf, closeArgs, fileTabs, splitArgs, clipboardCommand, revealCommand, withDetails, deleteTitle, extraLines, closesForDeleted, isWindowsPath, DETAILS } from "./paths.js";
 import { createOps } from "./ops.js";
 import { createSplitOpen } from "./split.js";
 import { createRemote, createOpenFile, keysOs, ROOT, INSTALL_COMMAND, INSTALL_REQUEST } from "./remote.js";
@@ -91,15 +91,27 @@ export function openInImagePanel(file, on) {
   run("layout.show", { id: "image-panel" });
 }
 
+const entryRows = (t) => menuItems({ dir: t.dir, remote: !!t.on, canPaste: !!shared(CLIPBOARD), markdown: isMarkdown(t.path),
+  image: !t.dir && isImage(t.path), windows: isWindowsPath(t.path) });
 // Opens the menu for an entry: { path (absolute), root, dir, on }.
 export function openMenu(target) {
-  const rows = menuItems({ dir: target.dir, remote: !!target.on, canPaste: !!shared(CLIPBOARD), markdown: isMarkdown(target.path), image: !target.dir && isImage(target.path) });
-  openOverlay({ mod: "vscode-explorer", kind: "popup", width: 270, height: menuHeight(rows), props: { menu: target } });
+  openOverlay({ mod: "vscode-explorer", kind: "popup", width: 270, height: menuHeight(entryRows(target)), props: { menu: target } });
 }
 
 const dialog = (spec, height = 196) => openOverlay({ mod: "vscode-explorer", kind: "dialog", width: 440, height, props: { dialog: spec } });
 // A machine that can't be reached (or VS Code that can't open it) is a toast; any other failure the small dialog.
 const toast = (e) => notify({ title: "Explorer", body: String(e?.message ?? e), level: "error" });
+
+// Download… (another machine's entry only, as the menu shows it): into ~/Downloads, said when it starts, where it went
+// when done, why when it failed (a toast each).
+async function download(t) {
+  const name = t.path.split(/[\\/]/).pop();
+  notify({ title: "Explorer", body: `Downloading ${name} from ${t.on}…`, level: "info" });
+  try {
+    const out = await createOps(exec, t.on, hc).download(t.path, t.dir, `${home()}/Downloads`);
+    notify({ title: "Explorer", body: `Downloaded to ${out.replace(home(), "~")}`, level: "success" });
+  } catch (e) { toast(e); }
+}
 
 async function paste(folder, on) {
   const clip = shared(CLIPBOARD);
@@ -130,6 +142,7 @@ export function explorerAction(action, t) {
     case "system": return exec("open", [t.path]).catch(fail);
     case "reveal": return t.on ? undefined : osRun(revealCommand(os(), t.path)).catch(fail);
     case "terminal": return run("terminal.open", { folder, place: "tab" });
+    case "download": return t.on ? download(t) : undefined;
     case "space": return run(...spaceCommand(folder, t.on, spaces(), panes()));
     case "cut": case "copy": return setShared(CLIPBOARD, { path: t.path, dir: t.dir, cut: action === "cut", on: t.on ?? null });
     case "paste": return paste(folder, t.on).then(refresh, fail);
@@ -154,7 +167,7 @@ export class ExplorerMenu {
 
   rows() {
     const t = this.target;
-    return this.withList ? openWith(!!t.on) : menuItems({ dir: t.dir, remote: !!t.on, canPaste: !!shared(CLIPBOARD), markdown: isMarkdown(t.path), image: !t.dir && isImage(t.path) });
+    return this.withList ? openWith(!!t.on) : entryRows(t);
   }
 
   close() { closeOverlay(props().overlay); }

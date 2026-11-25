@@ -11,6 +11,8 @@ const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|ico|svg|tiff?)$/i;
 export const EDITOR = "mods/vscode-viewer/editor/vsedit.sh";
 
 export const baseName = (p) => p.slice(p.lastIndexOf("/") + 1);
+// A Windows machine's path (C:\…, C:/…, \\server\…): vscode-viewer's save.js isWindowsPath.
+export const isWindowsPath = (p) => /^([A-Za-z]:[\\/]|\\\\|\/\/)/.test(p);
 export const parentOf = (p) => p.slice(0, p.lastIndexOf("/")) || "/";
 
 // Whether a file opens in the terminal editor (else the viewer): all but images, videos and CSV/TSV, or when asked.
@@ -118,17 +120,22 @@ export const relativeTo = (root, abs) => (abs === root ? "." : abs.startsWith(ro
 // True when `target` is `dir` itself or below it (a folder can't be pasted into itself).
 export const within = (target, dir) => target === dir || target.startsWith(dir + "/");
 
+const splitExt = (name, dir) => { const dot = dir ? -1 : name.lastIndexOf("."); return dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, ""]; };
 // Finder-style names for a copy: "a.txt" -> "a copy.txt", "a copy 2.txt"...; folders and dotfiles keep the whole name.
 export function copyName(name, n, dir = false) {
-  const dot = dir ? -1 : name.lastIndexOf(".");
-  const [stem, ext] = dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, ""];
+  const [stem, ext] = splitExt(name, dir);
   return `${stem} copy${n > 1 ? ` ${n}` : ""}${ext}`;
 }
+// A download's n-th name when its name is taken in ~/Downloads: "a (1).txt", a folder "a (1)".
+export function downloadName(name, n, dir = false) {
+  const [stem, ext] = splitExt(name, dir);
+  return `${stem} (${n})${ext}`;
+}
 
-// First free name in a folder: the name itself, else its copy names. `exists(name)` may be async.
-export async function freeName(name, exists, dir = false) {
+// First free name in a folder: the name itself, else its copy names (`nameOf`). `exists(name)` may be async.
+export async function freeName(name, exists, dir = false, nameOf = copyName) {
   if (!(await exists(name))) return name;
-  for (let n = 1; n < 1000; n++) { const c = copyName(name, n, dir); if (!(await exists(c))) return c; }
+  for (let n = 1; n < 1000; n++) { const c = nameOf(name, n, dir); if (!(await exists(c))) return c; }
   throw new Error(`No free name for ${name}`);
 }
 
@@ -148,12 +155,14 @@ export function nameProblem(name, taken) {
 
 // Context menu rows: [label, action, hint] or "-" for a separator. A remote entry has the same items but Reveal in
 // Finder: Finder only sees this computer, and Copy Path already gives the remote path. Markdown adds Open Preview.
-export function menuItems({ dir, remote, canPaste, markdown = false, image = false }) {
+// Download… only for another machine's entry: a file, or a folder on a Unix machine (it comes as a tar).
+export function menuItems({ dir, remote, canPaste, markdown = false, image = false, windows = false }) {
   const groups = [
     dir ? [["New File…", "newFile"], ["New Folder…", "newFolder"]]
       : [["Open", "open"], ["Open to the Side", "openSide", "⌘↵"], ...(markdown ? [["Open Preview", "preview"]] : []),
         ...(image ? [["Open in Image Panel", "imagePanel"]] : []), ["Open With…", "openWith"]],
-    [...(remote ? [] : [["Reveal in Finder", "reveal", "⌥⌘R"]]), ["Open in Integrated Terminal", "terminal"], ...(dir ? [["Add as Space", "space"]] : [])],
+    [...(remote ? [] : [["Reveal in Finder", "reveal", "⌥⌘R"]]), ["Open in Integrated Terminal", "terminal"], ...(dir ? [["Add as Space", "space"]] : []),
+      ...(remote && !(dir && windows) ? [["Download…", "download"]] : [])],
     [["Cut", "cut", "⌘X"], ["Copy", "copy", "⌘C"], ...(canPaste ? [["Paste", "paste", "⌘V"]] : [])],
     [["Copy Path", "copyPath", "⌥⌘C"], ["Copy Relative Path", "copyRelative", "⇧⌥⌘C"]],
     [["Rename…", "rename", "↵"], ["Delete", "delete", "⌘⌫"]],
