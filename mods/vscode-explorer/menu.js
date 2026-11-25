@@ -65,6 +65,8 @@ const CLIPBOARD = "vscode-explorer.clipboard", REFRESH = "vscode-explorer.refres
 export const refreshKey = REFRESH;
 // The tab menu's Reveal in Explorer View asks the tree: { file, on, at }.
 export const REVEAL = "vscode-explorer.reveal";
+// Download… asks the tree to run it (the menu's overlay closes with the pick, which would end the transfer): { path, dir, on, at }.
+export const DOWNLOAD = "vscode-explorer.download";
 // The tab menu's Close items ask the tab bar (vscode-tabs' close.js CLOSE_REQUEST): { tabs: [tab.close args], at }.
 const TAB_CLOSE = "vscode-tabs.close";
 // Move into Tab / Move to New Tab ask the tab bar too (vscode-tabs' move.js MOVE_REQUEST).
@@ -104,7 +106,7 @@ const toast = (e) => notify({ title: "Explorer", body: String(e?.message ?? e), 
 
 // Download… (another machine's entry only, as the menu shows it): into ~/Downloads, said when it starts, where it went
 // when done, why when it failed (a toast each).
-async function download(t) {
+export async function download(t) {
   const name = t.path.split(/[\\/]/).pop();
   notify({ title: "Explorer", body: `Downloading ${name} from ${t.on}…`, level: "info" });
   try {
@@ -142,7 +144,7 @@ export function explorerAction(action, t) {
     case "system": return exec("open", [t.path]).catch(fail);
     case "reveal": return t.on ? undefined : osRun(revealCommand(os(), t.path)).catch(fail);
     case "terminal": return run("terminal.open", { folder, place: "tab" });
-    case "download": return t.on ? download(t) : undefined;
+    case "download": return t.on ? setShared(DOWNLOAD, { path: t.path, dir: t.dir, on: t.on, at: Date.now() }) : undefined;
     case "space": return run(...spaceCommand(folder, t.on, spaces(), panes()));
     case "cut": case "copy": return setShared(CLIPBOARD, { path: t.path, dir: t.dir, cut: action === "cut", on: t.on ?? null });
     case "paste": return paste(folder, t.on).then(refresh, fail);

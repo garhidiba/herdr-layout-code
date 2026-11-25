@@ -7,11 +7,11 @@ import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { spaces, panes, focused, terminals, machines, exec, hc, readTextFile, watchFolder, theme, window, appHome, props, shared, setShared, notify, nextCommand, openOverlay, layout } from "herdr";
 import { freshRoot, encode, decode } from "./cache.js";
-import { ExplorerMenu, ExplorerDialog, TabMenu, openMenu, openInCode, explorerAction, refreshKey, openFile, splitOpen, remote, warm, REVEAL, terminalRows, IMAGE_OPEN } from "./menu.js";
+import { ExplorerMenu, ExplorerDialog, TabMenu, openMenu, openInCode, explorerAction, download, DOWNLOAD, refreshKey, openFile, splitOpen, remote, warm, REVEAL, terminalRows, IMAGE_OPEN } from "./menu.js";
 import { OPEN_AT } from "./split.js";
 import { WARM } from "./warm.js";
 import { createCore, relevant, stampOf, stale } from "./core.js";
-import { editorFileOf, autoRevealOf, revealPath, within, isImage, DETAILS } from "./paths.js";
+import { editorFileOf, autoRevealOf, revealPath, within, isImage, DETAILS, downloadAsked } from "./paths.js";
 import { treeAction, step } from "./keys.js";
 import { keysOs } from "./remote.js";
 import { ROW, clampTop, rowAt, shown, scrollToShow, dragStarted, dropFolder, dragTarget, targetRange } from "./dnd.js";
@@ -412,6 +412,16 @@ export default class Files extends View {
     if (this.reveal(ask.file, cx)) { this.revealedAt = ask.at; this.askedRow = this.active; }
   }
 
+  // A Download… (menu.js DOWNLOAD) runs here, in the tree, which outlives the menu: once, and the request is cleared so a
+  // second tree of the machine doesn't run it too.
+  downloadAsked(cx) {
+    const ask = shared(DOWNLOAD);
+    if (!downloadAsked(ask, this.downloadedAt, this.on ?? null, Date.now())) return;
+    this.downloadedAt = ask.at;
+    setShared(DOWNLOAD, null);
+    cx.spawn(() => download(ask));
+  }
+
   // A file dropped on a pane (split.js): once each, dropped after 5s (shared values outlive a restart).
   openAtAsked(cx) {
     const ask = shared(OPEN_AT);
@@ -618,6 +628,7 @@ export default class Files extends View {
     this.autoReveal(cx);
     this.revealAsked(cx);
     this.openAtAsked(cx);
+    this.downloadAsked(cx);
     // an editor focused in this active window: this desktop answers its machine's suggestions (desktop.js)
     const editorOn = window()?.active ? activeFile(focused(), null)?.on ?? null : null;
     if (editorOn !== this.editorOn) { this.editorOn = editorOn; cx.spawn(() => desktop.mark(editorOn)); }

@@ -1,7 +1,7 @@
 // node --test mods/vscode-explorer/test/paths.test.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
-import { openArgs, wantsEditor, isMarkdown, isImage, relativeTo, within, copyName, downloadName, isWindowsPath, freeName, nameProblem, menuItems, menuHeight, spaceCommand, parentOf, openWith, vscodeRemoteArgs, editorFileOf, splitArgs, autoRevealOf, revealPath, normalPath, editorTabOf, editorPaneOf, viewerPaneOf, deleteTitle, extraLines, closesForDeleted } from "../paths.js";
+import { openArgs, wantsEditor, isMarkdown, isImage, relativeTo, within, copyName, downloadName, isWindowsPath, freeName, nameProblem, menuItems, menuHeight, spaceCommand, parentOf, openWith, vscodeRemoteArgs, editorFileOf, splitArgs, autoRevealOf, revealPath, normalPath, editorTabOf, editorPaneOf, viewerPaneOf, deleteTitle, extraLines, closesForDeleted, downloadAsked } from "../paths.js";
 
 test("a dialog grows by the lines a long file name wraps onto, and not for a short one", () => {
   assert.equal(deleteTitle("/p/Invoice-44K7PLUN-0001 copy 2.pdf"), "Are you sure you want to delete 'Invoice-44K7PLUN-0001 copy 2.pdf'?");
@@ -277,4 +277,14 @@ test("deleting a file or a folder closes the panes showing it, and their tab whe
 test("the image panel takes the viewer's image formats, not videos or other files", () => {
   assert.deepEqual(["a.PNG", "b.jpeg", "c.svg", "d.tif", "e.webp"].map(isImage), [true, true, true, true, true]);
   assert.deepEqual(["a.mp4", "png", "a.png.txt", "notes.md"].map(isImage), [false, false, false, false]);
+});
+
+test("a Download… request runs once, on its own machine, while fresh", () => {
+  const ask = { path: "/a/b", dir: false, on: "box", at: 1000 };
+  assert.equal(downloadAsked(ask, undefined, "box", 2000), true);
+  assert.equal(downloadAsked(ask, 1000, "box", 2000), false, "already run");
+  assert.equal(downloadAsked(ask, undefined, "other", 2000), false, "another machine's tree");
+  assert.equal(downloadAsked(ask, undefined, null, 2000), false, "this computer's tree");
+  assert.equal(downloadAsked(ask, undefined, "box", 6001), false, "older than 5s (a restart's leftover)");
+  assert.equal(downloadAsked(null, undefined, "box", 2000), false);
 });

@@ -132,6 +132,10 @@ export function downloadName(name, n, dir = false) {
   return `${stem} (${n})${ext}`;
 }
 
+// Whether a Download… request { path, dir, on, at } is this tree's to run: for its machine, not yet run (`doneAt`), and
+// under 5s old (shared values outlive a restart).
+export const downloadAsked = (ask, doneAt, on, now) => Boolean(ask?.path) && ask.at !== doneAt && now - ask.at <= 5000 && (ask.on ?? null) === on;
+
 // First free name in a folder: the name itself, else its copy names (`nameOf`). `exists(name)` may be async.
 export async function freeName(name, exists, dir = false, nameOf = copyName) {
   if (!(await exists(name))) return name;
