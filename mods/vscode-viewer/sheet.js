@@ -477,7 +477,7 @@ export class SheetGrid {
     };
     const q = rectOf(this.sel), a = this.sel.active;
     // The active cell's whole row and column, faintly tinted under the selection so its row and column read at a glance.
-    const band = b => div().absolute().left(b.left).top(b.top).w(b.w).h(b.bottom - b.top).bg(c.accent).opacity(0.07);
+    const band = b => div().absolute().left(b.left).top(b.top).w(b.w).h(b.bottom - b.top).bg(c.accent).opacity(0.04);
     const marks = [
       ...box(a.r, a.r, 0, sheet.cols - 1).map(band),
       ...box(0, rows - 1, a.c, a.c).map(band),
