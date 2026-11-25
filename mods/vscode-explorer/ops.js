@@ -63,6 +63,7 @@ if [ "$kind" = dir ]; then
   if [ -e "$out" ] || [ -L "$out" ]; then echo "$(basename "$out") already exists"; exit 5; fi
   mv "$tmp.d/$(basename "$2")" "$out"
 else
+  chmod "$(printf '%o' $((0666 & ~0$(umask))))" "$tmp"
   ln "$tmp" "$out" 2>/dev/null || { echo "$(basename "$out") already exists"; exit 5; }
 fi`;
 // There (Windows), for DOWNLOAD: the size of file `path`, and the base64 of its 4 MB piece from the MB its stdin names.
