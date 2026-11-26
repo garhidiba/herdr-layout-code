@@ -476,11 +476,11 @@ export class SheetGrid {
       return ys.flatMap(([top, bottom]) => xs.map(([left, right]) => ({ top, bottom, left, w: right - left })));
     };
     const q = rectOf(this.sel), a = this.sel.active;
-    // The active cell's whole row and column, faintly tinted under the selection so its row and column read at a glance.
+    // The selection's whole rows and columns, faintly tinted under it so its rows and columns read at a glance.
     const band = b => div().absolute().left(b.left).top(b.top).w(b.w).h(b.bottom - b.top).bg(c.accent).opacity(0.04);
     const marks = [
-      ...box(a.r, a.r, 0, sheet.cols - 1).map(band),
-      ...box(0, rows - 1, a.c, a.c).map(band),
+      ...(q.r1 - q.r0 < rows - 1 ? box(q.r0, q.r1, 0, sheet.cols - 1).map(band) : []),     // none for whole columns
+      ...(q.c1 - q.c0 < sheet.cols - 1 ? box(0, rows - 1, q.c0, q.c1).map(band) : []),     // nor whole rows
       ...box(q.r0, q.r1, q.c0, q.c1).map(b => div().absolute().left(b.left).top(b.top).w(b.w).h(b.bottom - b.top).bg(c.accent).opacity(0.18)),
       ...box(a.r, a.r, a.c, a.c).map(b => div().absolute().left(b.left).top(b.top).w(b.w).h(b.bottom - b.top).border_2().border_color(c.accent)),
     ];
