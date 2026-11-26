@@ -6,3 +6,4 @@ jsconfig.json
 .backups/
 mods/vscode-settings/native/target/
 __pycache__/
+.herdr/memo.md
